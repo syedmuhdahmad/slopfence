@@ -77,14 +77,8 @@ class SourceFile:
 
     @property
     def is_test_file(self) -> bool:
-        name = self.path.name
-        return (
-            name.startswith("test_")
-            or name.endswith("_test.py")
-            or name == "conftest.py"
-            # Relative parts, so a project that lives under ~/tests/ isn't all "test code".
-            or bool({"tests", "test"} & set(Path(self.rel).parts[:-1]))
-        )
+        """Whether this is test code (see ``is_test_path``)."""
+        return is_test_path(self.path.name, self.rel)
 
     @property
     def is_example_file(self) -> bool:
@@ -94,12 +88,8 @@ class SourceFile:
         return bool(folders & EXAMPLE_DIRS or words & EXAMPLE_DIRS)
 
     def is_ignored(self, rule: str, line: int) -> bool:
-        if self.ignore_file:
-            return True
-        if line not in self.ignores:
-            return False
-        rules = self.ignores[line]
-        return rules is None or rule in rules
+        """Whether an ignore comment in this file covers ``rule`` on ``line``."""
+        return ignore_covers(self.ignore_file, self.ignores, rule, line)
 
     @cached_property
     def nodes(self) -> list[ast.AST]:
@@ -150,6 +140,33 @@ class SourceFile:
         yield from self.docstring_lines
 
 
+def ignore_covers(
+    ignore_file: bool, ignores: dict[int, set[str] | None], rule: str, line: int
+) -> bool:
+    """Whether a file's ignore comments cover ``rule`` on ``line``.
+
+    ``ignore_file`` and ``ignores`` are what ``load`` read from the comments: see the
+    fields of ``SourceFile`` with these names.
+    """
+    if ignore_file:
+        return True
+    if line not in ignores:
+        return False
+    rules = ignores[line]
+    return rules is None or rule in rules
+
+
+def is_test_path(name: str, rel: str) -> bool:
+    """Whether a file is test code, from its name and its project-relative path."""
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+        # Relative parts, so a project that lives under ~/tests/ isn't all "test code".
+        or bool({"tests", "test"} & set(Path(rel).parts[:-1]))
+    )
+
+
 def relative_path(path: Path, root: Path) -> str:
     """``path`` relative to ``root`` as a POSIX string, or as given if it's outside."""
     try:
@@ -167,8 +184,12 @@ def read_source(path: Path) -> str | None:
         return None
 
 
-def load(path: Path, root: Path) -> SourceFile | None:
-    """Parse a file. Returns None if it is not valid Python."""
+def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
+    """Parse a file. Returns None if it is not valid Python.
+
+    With ``comments`` False the comments are not read, so the file has none and no
+    ignore directives. That is enough for a file that is only compared with (SLOP030).
+    """
     text = read_source(path)
     if text is None:
         return None
@@ -177,14 +198,9 @@ def load(path: Path, root: Path) -> SourceFile | None:
     except (SyntaxError, ValueError):
         return None
 
-    try:
-        rel = path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        rel = path.as_posix()
-
-    src = SourceFile(path=path, rel=rel, text=text, tree=tree)
-    if "#" not in text:
-        return src  # no comments, so nothing to tokenize for
+    src = SourceFile(path=path, rel=relative_path(path, root), text=text, tree=tree)
+    if not comments or "#" not in text:
+        return src  # nothing to tokenize for
     try:
         for tok in tokenize.generate_tokens(io.StringIO(text).readline):
             if tok.type != tokenize.COMMENT:
@@ -201,3 +217,15 @@ def load(path: Path, root: Path) -> SourceFile | None:
     except (tokenize.TokenError, IndentationError):
         pass
     return src
+
+
+def top_level_imports(src: SourceFile) -> list[tuple[str, int, int]]:
+    """(top-level module, line, column) of every absolute import, in ``ast.walk`` order."""
+    found = []
+    for node in src.nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((alias.name.split(".")[0], node.lineno, node.col_offset + 1))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.append((node.module.split(".")[0], node.lineno, node.col_offset + 1))
+    return found

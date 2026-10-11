@@ -16,7 +16,6 @@ from a private index: a name missing from PyPI could then be a private package.
 
 from __future__ import annotations
 
-import ast
 import fnmatch
 import importlib.metadata
 import importlib.util
@@ -31,7 +30,7 @@ from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
 from slopfence.models import Finding
 from slopfence.registry import OfflineRegistry, Registry, normalize
-from slopfence.source import IGNORE_FILE_RE, IGNORE_RE, SourceFile, read_source
+from slopfence.source import IGNORE_FILE_RE, IGNORE_RE, read_source
 from slopfence.source import relative_path as _rel
 
 if sys.version_info >= (3, 11):
@@ -400,15 +399,6 @@ def _installed_modules() -> set[str]:
         return set()
 
 
-def _top_level_imports(tree: ast.Module) -> Iterator[tuple[str, ast.stmt]]:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name.split(".")[0], node
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            yield node.module.split(".")[0], node
-
-
 def _is_installed(name: str, installed: set[str]) -> bool:
     if name in installed:
         return True
@@ -489,17 +479,21 @@ class PackageChecker:
             self._missing[name] = missing
         return self._missing[name]
 
-    def check_imports(self, src: SourceFile) -> Iterator[Finding]:
-        """Report imports that no installed, declared or PyPI package provides."""
+    def check_imports(self, rel: str, imports: Iterable[tuple[str, int, int]]) -> Iterator[Finding]:
+        """Report imports that no installed, declared or PyPI package provides.
+
+        ``imports`` are the (module, line, column) of the imports of the file ``rel``:
+        see ``source.top_level_imports``.
+        """
         if isinstance(self.registry, OfflineRegistry) or self.imports_may_be_private:
             return
-        for name, node in _top_level_imports(src.tree):
+        for name, line, col in imports:
             if self._is_missing(name):
                 yield Finding(
                     "SLOP001",
-                    src.rel,
-                    node.lineno,
-                    node.col_offset + 1,
+                    rel,
+                    line,
+                    col,
                     f"Import '{name}' is not installed, not declared, and no package with "
                     "that name exists on PyPI (possible hallucination)",
                 )
