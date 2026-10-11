@@ -171,6 +171,67 @@ def test_command_line_with_real_workers(tmp_path, monkeypatch, capsys):
     assert (rules.count("SLOP051"), rules.count("SLOP030")) == (200, 199)
 
 
+# Starts slopfence the way an installed ``slopfence`` command does: from a script in
+# a folder of its own, so the current folder is not on the import path of the main
+# process. Two files are enough for workers here, and they are started with "spawn".
+CONSOLE_SCRIPT = """
+import multiprocessing
+import sys
+
+sys.path.append(sys.argv[1])  # where slopfence is, if it is not installed
+from slopfence import analysis
+from slopfence.cli import main
+
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")
+    analysis.MIN_FILES_PER_WORKER = 2
+    sys.exit(main(sys.argv[2:]))
+"""
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="PYTHONSAFEPATH is new in Python 3.11")
+def test_project_file_named_like_a_standard_module_does_not_break_workers(tmp_path):
+    """Run in a folder with a ``types.py``, as many projects have: the workers must not
+    import it in place of the standard library's (they would die while starting)."""
+    script = tmp_path / "bin" / "run.py"
+    script.parent.mkdir()
+    script.write_text(CONSOLE_SCRIPT, encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "types.py").write_text("X = 1\n", encoding="utf-8")
+    for n in range(6):
+        (project / f"m{n}.py").write_text("# I hope this helps!\n", encoding="utf-8")
+    source = str(Path(analysis.__file__).parent.parent)
+
+    def scan(jobs):
+        """Run the command in the project folder; return its report and what it warned."""
+        options = [".", "--offline", "--format", "json", "--jobs", jobs]
+        done = subprocess.run(
+            [sys.executable, str(script), source, *options],
+            cwd=project,
+            capture_output=True,
+            text=True,
+        )
+        return done.returncode, done.stdout, done.stderr
+
+    code, report, warnings = scan("2")
+    assert warnings == ""
+    assert (code, report) == scan("1")[:2]
+    assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+
+
+@pytest.mark.parametrize("before", [None, "", "yes"])
+def test_safe_import_path_is_only_set_while_processes_start(monkeypatch, before):
+    """The setting is for the processes started in the block. Afterwards the
+    environment is what it was, whether the variable was set or not."""
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    if before is not None:
+        monkeypatch.setenv("PYTHONSAFEPATH", before)
+    with analysis._safe_import_path():
+        assert os.environ["PYTHONSAFEPATH"] == "1"
+    assert os.environ.get("PYTHONSAFEPATH") == before
+
+
 def use_failing_pool(monkeypatch, error, fail_in_map):
     """Make every pool fail with ``error``: when it is created or, with ``fail_in_map``,
     when it is used. Returns the list of shutdown calls."""

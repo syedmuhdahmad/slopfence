@@ -17,7 +17,7 @@ import os
 import signal
 import sys
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -175,6 +175,29 @@ def _ctrl_c_held_back() -> Iterator[None]:
             set_mask(signal.SIG_SETMASK, before)
 
 
+@contextmanager
+def _safe_import_path() -> Iterator[None]:
+    """Processes started in this block don't look for modules in the current folder.
+
+    Python starts a worker with the current folder first on its import path. A project
+    file named like a standard-library module (``types.py``, ``random.py``) is then
+    imported in its place, and the worker dies before this process has given it the
+    import path to use. ``PYTHONSAFEPATH`` switches that first entry off.
+
+    Python reads the variable from 3.11 on. On 3.10 it changes nothing: with such a
+    file there, the run still ends with a warning and one process.
+    """
+    before = os.environ.get("PYTHONSAFEPATH")
+    os.environ["PYTHONSAFEPATH"] = "1"
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["PYTHONSAFEPATH"]
+        else:
+            os.environ["PYTHONSAFEPATH"] = before
+
+
 def _analyze_in_pool(
     tasks: Sequence[Task], options: Options, workers: int, mp_context: BaseContext | None
 ) -> list[FileSummary] | None:
@@ -191,21 +214,23 @@ def _analyze_in_pool(
         # Not every platform has process pools: the import or the constructor fails there.
         from concurrent.futures import ProcessPoolExecutor
 
-        pool = ProcessPoolExecutor(
-            max_workers=workers, mp_context=mp_context, initializer=_init_worker
-        )
-        try:
-            # Every worker process is started by map(): it hands out all the batches
-            # before it returns. The pool is made before the block, not in it. Making
-            # it starts a helper process (the resource tracker), which looks after
-            # itself, and before Python 3.14 that lets Ctrl-C through again.
-            with _ctrl_c_held_back():
-                results = pool.map(partial(analyze_file, options), tasks, chunksize=chunk)
+        with ExitStack() as cleanup:
+            # Every process is started in this block: a helper process (the resource
+            # tracker) when the pool is made, and the workers by map(), which hands out
+            # all the batches before it returns.
+            with _safe_import_path():
+                pool = ProcessPoolExecutor(
+                    max_workers=workers, mp_context=mp_context, initializer=_init_worker
+                )
+                # Also after Ctrl-C or an error: batches that have not started are
+                # dropped, and the ones that are running finish first, which takes a
+                # moment.
+                cleanup.callback(pool.shutdown, wait=True, cancel_futures=True)
+                # Not around the pool's constructor: the helper looks after itself, and
+                # before Python 3.14 starting it lets Ctrl-C through again.
+                with _ctrl_c_held_back():
+                    results = pool.map(partial(analyze_file, options), tasks, chunksize=chunk)
             return list(results)
-        finally:
-            # Also after Ctrl-C or an error: batches that have not started are dropped,
-            # and the ones that are running finish first, which takes a moment.
-            pool.shutdown(wait=True, cancel_futures=True)
     # BrokenExecutor: a worker died. The others: this platform has no process pools,
     # or no room to start one. An OSError from analyze_file itself lands here too;
     # the single-process run then raises it again.
