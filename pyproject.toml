@@ -54,11 +54,6 @@ include = ["/src", "/tests", "/pyproject.toml", "/README.md", "/CHANGELOG.md", "
 [tool.hatch.build.targets.wheel]
 packages = ["src/slopfence"]
 
-# slopfence checks itself in CI. Claude Code keeps extra checkouts of this repository under
-# .claude/worktrees/; without this, every function there counts as a duplicate (SLOP030).
-[tool.slopfence]
-exclude = [".claude/worktrees/"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

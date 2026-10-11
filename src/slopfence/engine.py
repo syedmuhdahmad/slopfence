@@ -66,9 +66,19 @@ def discover_all(paths: Sequence[Path]) -> tuple[list[Path], list[Path], list[Pa
                 lock_files.append(path)
             continue
         for dirpath, dirnames, filenames in os.walk(path):
-            # Prune excluded trees (.venv, node_modules, .git...) before descending.
+            # Prune excluded trees (.venv, node_modules, .git...) and nested checkouts
+            # before descending. A sub-folder that holds a .git file or folder is a
+            # worktree, clone or submodule: another copy of a project, not this one.
+            # Its files must not count as this project's code (SLOP030 would
+            # double-report; SLOP001 would treat its modules as local, see #58). The
+            # path passed on the command line is the walk root and is never pruned, so
+            # an explicitly named checkout is still checked.
             dirnames[:] = [
-                d for d in dirnames if d not in EXCLUDED_DIRS and not d.endswith(".egg-info")
+                d
+                for d in dirnames
+                if d not in EXCLUDED_DIRS
+                and not d.endswith(".egg-info")
+                and not (Path(dirpath, d) / ".git").exists()
             ]
             for filename in filenames:
                 child = Path(dirpath, filename)
