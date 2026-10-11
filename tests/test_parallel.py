@@ -267,6 +267,7 @@ def use_failing_pool(monkeypatch, error, fail_in_map):
         (ImportError("no _multiprocessing"), False),
         (NotImplementedError("no sem_open"), False),
         (OSError("no more processes"), True),
+        (EOFError("unexpected EOF"), True),  # the fork server died while it started
         (BrokenProcessPool("a worker died"), True),
     ],
 )

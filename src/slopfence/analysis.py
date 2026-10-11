@@ -231,10 +231,11 @@ def _analyze_in_pool(
                 with _ctrl_c_held_back():
                     results = pool.map(partial(analyze_file, options), tasks, chunksize=chunk)
             return list(results)
-    # BrokenExecutor: a worker died. The others: this platform has no process pools,
-    # or no room to start one. An OSError from analyze_file itself lands here too;
-    # the single-process run then raises it again.
-    except (BrokenExecutor, OSError, ImportError, NotImplementedError) as err:
+    # BrokenExecutor: a worker died. EOFError: the fork server died while it started.
+    # The others: this platform has no process pools, or no room to start one. An
+    # error of these types from analyze_file itself lands here too; the single-process
+    # run then raises it again.
+    except (BrokenExecutor, EOFError, OSError, ImportError, NotImplementedError) as err:
         print(
             f"slopfence: warning: worker processes failed ({type(err).__name__}: {err}); "
             "checking files in one process instead",
