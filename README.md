@@ -150,6 +150,7 @@ slopfence reads and checks files in several processes at once. The report is the
 - Small projects don't need it. Worker processes only start when there are 200 or more Python files to read, one for every 100 files.
 - Each worker needs 40 to 80 MB of memory on a big project. In a container with little memory, set `jobs = 1` or `2`.
 - If worker processes can't start, or one dies, slopfence prints a warning and checks the files in one process.
+- If slopfence is stopped or killed, its worker processes end too.
 - PyPI lookups are sent 8 at a time.
 
 Example: the CPython standard library and 127 installed packages (22,864 files) take 35 to 45 seconds with 8 jobs on a laptop with 4 cores, and a little over 2 minutes with one process. v0.2 needed almost 6 minutes and 8 GB of memory for the same files. Now the main process needs about 0.3 GB.
