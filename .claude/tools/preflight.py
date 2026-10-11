@@ -22,6 +22,8 @@ from devenv import repo_root, venv_python
 TOOLS = Path(__file__).resolve().parent
 # Lines of a failing command's output to show: enough to see the error, not a whole log.
 TAIL_LINES = 40
+# Longest one command may run. The slowest (tests with coverage) takes well under a minute.
+COMMAND_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,11 @@ def build_checks(root: Path, python: str, quick: bool, base: str) -> list[Check]
     return checks
 
 
-def run_check(check: Check, root: Path) -> tuple[bool, str]:
-    """Run a check's commands in ``root``; return whether it passed and the failing output."""
+def run_check(check: Check, root: Path, timeout: float = COMMAND_TIMEOUT) -> tuple[bool, str]:
+    """Run a check's commands in ``root``; return whether it passed and the failing output.
+
+    A command that runs longer than ``timeout`` seconds fails the check.
+    """
     for command in check.commands:
         try:
             done = subprocess.run(
@@ -86,8 +91,11 @@ def run_check(check: Check, root: Path) -> tuple[bool, str]:
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=timeout,
                 check=False,
             )
+        except subprocess.TimeoutExpired:
+            return False, f"{' '.join(command[:4])} ... did not finish in {timeout:.0f}s"
         except OSError as err:
             return False, f"could not run {command[0]}: {err}"
         if done.returncode != 0:

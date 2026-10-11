@@ -61,6 +61,18 @@ def already_passed(marker: Path, state: str) -> bool:
         return False  # no marker yet: these changes have not been checked
 
 
+def run_quick_checks(root: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``preflight.py --quick`` on ``root``; raises ``TimeoutExpired`` if it hangs."""
+    return subprocess.run(
+        [sys.executable, str(PREFLIGHT), "--quick", "--root", str(root)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
 def main() -> int:
     """Block the stop with the failing output when the quick checks fail."""
     event = read_event()
@@ -77,15 +89,17 @@ def main() -> int:
         return 0
 
     try:
-        done = subprocess.run(
-            [sys.executable, str(PREFLIGHT), "--quick", "--root", str(root)],
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=TIMEOUT_SECONDS,
-            check=False,
+        done = run_quick_checks(root)
+    except subprocess.TimeoutExpired:
+        # A gate that can't finish must not trap the session, but the user should know.
+        emit(
+            {
+                "systemMessage": "slopfence stop gate: the quick checks did not finish in "
+                f"{TIMEOUT_SECONDS}s, so the changes were not checked."
+            }
         )
-    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    except OSError:
         return 0  # a gate that can't run must not trap the session
     if done.returncode == 0:
         # Without the marker the checks simply run again next time.

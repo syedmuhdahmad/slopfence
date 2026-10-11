@@ -47,8 +47,11 @@ Publishing the GitHub release starts `.github/workflows/release.yml`: it checks 
 
 ## 4. Check
 
+Wait for the release workflow to finish before installing: until its `publish-pypi` job is done, the version is not on PyPI.
+
 ```bash
-gh run list --workflow release.yml --limit 1
+run_id=$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$run_id" --exit-status
 python -m venv /tmp/release-check && /tmp/release-check/bin/pip install slopfence==$ARGUMENTS
 /tmp/release-check/bin/slopfence --version
 /tmp/release-check/bin/slopfence --list-rules

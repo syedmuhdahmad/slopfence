@@ -96,6 +96,8 @@ def project(tmp_path: Path) -> Path:
         "git push origin HEAD:main",
         "git push --force origin +refs/heads/main",
         "git push origin HEAD",
+        "git push -o ci.skip origin",
+        "git push -o ci.skip origin main",
     ],
 )
 def test_guard_denies_on_protected_branch(project: Path, command: str) -> None:
@@ -111,6 +113,8 @@ def test_guard_denies_on_protected_branch(project: Path, command: str) -> None:
         "git push -u origin feat/x",
         "git push origin HEAD",
         "git push origin v1.0.0",
+        "git push origin -o main feat/x",
+        "git push --push-option main -u origin feat/x",
     ],
 )
 def test_guard_allows_on_feature_branch(project: Path, command: str) -> None:
@@ -205,6 +209,38 @@ def test_stop_gate_never_blocks_when_checks_cannot_run(project: Path) -> None:
     (project / "src").mkdir()
     (project / "src" / "app.py").write_text("import os\n", encoding="utf-8")
     assert run_hook("hook_stop_gate.py", stop_event(project), project) is None
+
+
+def test_stop_gate_says_so_when_the_checks_do_not_finish(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A timeout lets the turn end, with a message that nothing was checked."""
+    import hook_stop_gate
+
+    def never_finishes(root: Path) -> None:
+        """Stand in for a preflight run that hangs."""
+        raise subprocess.TimeoutExpired(cmd="preflight", timeout=1)
+
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setattr(hook_stop_gate, "read_event", lambda: stop_event(project))
+    monkeypatch.setattr(hook_stop_gate, "run_quick_checks", never_finishes)
+
+    assert hook_stop_gate.main() == 0
+    message = json.loads(capsys.readouterr().out)
+    assert "did not finish" in message["systemMessage"]
+    assert "decision" not in message
+
+
+def test_preflight_fails_a_command_that_hangs(tmp_path: Path) -> None:
+    """A command that outlives the timeout fails its check instead of hanging preflight."""
+    import preflight
+
+    sleeper = preflight.Check("sleeps", ((sys.executable, "-c", "import time; time.sleep(30)"),))
+    passed, output = preflight.run_check(sleeper, tmp_path, timeout=0.5)
+    assert not passed
+    assert "did not finish" in output
 
 
 def test_session_context_states_the_branch(project: Path) -> None:

@@ -24,6 +24,8 @@ from devenv import (
 _PUNCTUATION = "();<>|&\n"
 # git options that take a value, so the word after them is not the subcommand.
 _GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+# ``git push`` options that take a value, so the word after them is not a remote or refspec.
+_PUSH_VALUE_OPTIONS = frozenset({"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
 
 
 def split_commands(command: str) -> list[list[str]]:
@@ -68,9 +70,22 @@ def parse_git(args: list[str], where: Path) -> tuple[Path, str | None, list[str]
     return where, args[index], args[index + 1 :]
 
 
+def positional_words(args: list[str], value_options: frozenset[str]) -> list[str]:
+    """The words that are neither options nor the value of an option that takes one."""
+    words, skip_next = [], False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+        elif arg in value_options:
+            skip_next = True
+        elif not arg.startswith("-"):
+            words.append(arg)
+    return words
+
+
 def push_target(args: list[str], where: Path) -> str | None:
     """The protected branch a ``git push`` would update, or None."""
-    refspecs = [a for a in args if not a.startswith("-")][1:]  # the first word is the remote
+    refspecs = positional_words(args, _PUSH_VALUE_OPTIONS)[1:]  # the first word is the remote
     if not refspecs:
         branch = current_branch(where)
         return branch if branch in PROTECTED_BRANCHES else None

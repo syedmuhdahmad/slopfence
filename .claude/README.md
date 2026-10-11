@@ -68,7 +68,9 @@ Instructions can be forgotten. These can't.
 | After an edit | `hook_format_python.py` | The edited Python file is formatted with ruff |
 | Before a turn ends | `hook_stop_gate.py` | If Python under `src/` or `tests/` changed, the quick checks pass, or Claude is sent back once to fix them |
 
-The hooks run with `python3` and need nothing installed. To skip the last one for a session, start Claude Code with `SLOPFENCE_SKIP_STOP_GATE=1`.
+The hooks need `python3` on your `PATH` and nothing else. They only protect when they can run: if `python3` is missing (often the case on Windows, where the command is `python`), Claude Code reports a hook error and carries on without them. `main` stays safe either way, because the repository's own rules refuse a direct push.
+
+To skip the stop gate for a session, start Claude Code with `SLOPFENCE_SKIP_STOP_GATE=1`.
 
 `settings.json` also lets Claude run the project's own checks and read-only `git` and `gh` commands without asking each time. Personal settings go in `.claude/settings.local.json`, which git ignores.
 
