@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checking a few files of a big project (pre-commit) is faster. The rest of the project is only read for what `SLOP030` needs, and its test files are not read at all ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - PyPI lookups are sent 8 at a time instead of one by one. 200 uncached names took 95 seconds and now take 10. What is sent has not changed. A name is requested once per run, also when PyPI gives no answer for it ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
 - The PyPI cache file is written in one step, so two runs at the same time can't leave a broken file ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
-- Ctrl-C during a scan prints `slopfence: interrupted` and exits with status `130`, instead of a traceback ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- Ctrl-C during a scan prints `slopfence: interrupted` and exits with status `130`, instead of a traceback. On Windows, worker processes that are still starting can print tracebacks of their own ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 
 ### Fixed
 

@@ -335,6 +335,56 @@ def test_workers_end_when_the_main_process_is_killed(tmp_path, method):
         (tmp_path / "stop").touch()
 
 
+needs_signal_mask = pytest.mark.skipif(
+    not hasattr(signal, "pthread_sigmask"), reason="Windows can't hold a signal back"
+)
+
+
+def _ctrl_c_is_held_back(options, task):
+    """Stands in for ``analyze_file`` in a worker: is Ctrl-C held back in this process?"""
+    return signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+
+
+@needs_signal_mask
+@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+def test_workers_start_with_ctrl_c_held_back(project, monkeypatch, method):
+    """A worker can't be interrupted while it starts up (it would print a traceback):
+    Ctrl-C is held back in every worker from its first moment, and not in this process."""
+    tasks, options = tasks_and_options(project)
+    monkeypatch.setattr(analysis, "analyze_file", _ctrl_c_is_held_back)
+    context = multiprocessing.get_context(method)
+    assert analysis._analyze_in_pool(tasks, options, 3, context) == [True] * len(tasks)
+    assert not _ctrl_c_is_held_back(options, tasks[0])
+
+
+@needs_signal_mask
+def test_ctrl_c_arrives_when_the_block_is_left():
+    """Ctrl-C while workers are started is not lost: it arrives right after."""
+    seen = []
+    previous = signal.signal(signal.SIGINT, lambda *args: seen.append("interrupt"))
+    try:
+        with analysis._ctrl_c_held_back():
+            signal.raise_signal(signal.SIGINT)
+            seen.append("still in the block")
+        assert seen == ["still in the block", "interrupt"]
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_nothing_is_held_back_where_signals_cannot_be(monkeypatch):
+    """On Windows there is no signal mask: the block runs, and changes nothing."""
+    monkeypatch.delattr(signal, "pthread_sigmask", raising=False)
+    seen = []
+    previous = signal.signal(signal.SIGINT, lambda *args: seen.append("interrupt"))
+    try:
+        with analysis._ctrl_c_held_back():
+            signal.raise_signal(signal.SIGINT)
+            seen.append("still in the block")
+        assert seen == ["interrupt", "still in the block"]
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def test_ctrl_c_drops_queued_work(project, monkeypatch, capsys):
     """Ctrl-C while workers run: queued batches are dropped and the interrupt goes on."""
     tasks, options = tasks_and_options(project)

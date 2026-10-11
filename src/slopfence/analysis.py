@@ -16,7 +16,8 @@ from __future__ import annotations
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -155,6 +156,25 @@ def _end_with_parent() -> None:
     os._exit(1)
 
 
+@contextmanager
+def _ctrl_c_held_back() -> Iterator[None]:
+    """Hold Ctrl-C back for a moment. It is not lost: it arrives when the block is left.
+
+    A process that is started inside the block starts with Ctrl-C held back too, and
+    there it stays that way. A worker that is interrupted while it starts up prints a
+    traceback, and this is the only way to rule that out from its first moment.
+
+    Windows can't hold a signal back. There the block changes nothing.
+    """
+    set_mask = getattr(signal, "pthread_sigmask", None)
+    before = set_mask(signal.SIG_BLOCK, {signal.SIGINT}) if set_mask else None
+    try:
+        yield
+    finally:
+        if set_mask:
+            set_mask(signal.SIG_SETMASK, before)
+
+
 def _analyze_in_pool(
     tasks: Sequence[Task], options: Options, workers: int, mp_context: BaseContext | None
 ) -> list[FileSummary] | None:
@@ -175,7 +195,13 @@ def _analyze_in_pool(
             max_workers=workers, mp_context=mp_context, initializer=_init_worker
         )
         try:
-            return list(pool.map(partial(analyze_file, options), tasks, chunksize=chunk))
+            # Every worker process is started by map(): it hands out all the batches
+            # before it returns. The pool is made before the block, not in it. Making
+            # it starts a helper process (the resource tracker), which looks after
+            # itself, and before Python 3.14 that lets Ctrl-C through again.
+            with _ctrl_c_held_back():
+                results = pool.map(partial(analyze_file, options), tasks, chunksize=chunk)
+            return list(results)
         finally:
             # Also after Ctrl-C or an error: batches that have not started are dropped,
             # and the ones that are running finish first, which takes a moment.
