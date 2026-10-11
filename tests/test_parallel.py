@@ -346,19 +346,53 @@ def test_ctrl_c_drops_queued_work(project, monkeypatch, capsys):
 
 
 def test_interrupt_exits_130(tmp_path, monkeypatch, capsys):
-    """Ctrl-C ends the run with one line and the usual exit status, not a traceback."""
+    """Ctrl-C ends the run with one line, not a traceback. Then the interrupt is sent
+    again with its default action; where that can't be done, the exit status is 130."""
 
     def interrupted(*args, **kwargs):
         """Stand in for a run that is interrupted."""
         raise KeyboardInterrupt
 
+    sent = []
     monkeypatch.setattr(climod, "run", interrupted)
+    monkeypatch.setattr(signal, "signal", lambda *args: sent.append(args))
+    monkeypatch.setattr(signal, "raise_signal", lambda *args: sent.append(args))
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     output = tmp_path / "report.json"
     assert main([str(tmp_path), "--offline", "--exit-zero", "-o", str(output)]) == 130
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "slopfence: interrupted\n")
     assert not output.exists()  # no report, not even an empty one
+    again = [(signal.SIGINT, signal.SIG_DFL), (signal.SIGINT,)]
+    assert sent == (again if os.name == "posix" else [])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows can't send Ctrl-C to one process")
+def test_ctrl_c_ends_the_process_like_any_interrupted_program(tmp_path):
+    """A real Ctrl-C: the process dies of the interrupt, as v0.2 did. That is what makes
+    a shell stop the script or loop that runs slopfence; an exit status alone doesn't."""
+    code = (
+        "import signal, sys, time\n"
+        "from slopfence import cli\n"
+        "def run(*args, **kwargs):\n"
+        "    print('running', flush=True)\n"
+        "    time.sleep(60)\n"
+        "cli.run = run\n"
+        # The interrupt may be switched off in the process that runs the tests.
+        "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+        "sys.exit(cli.main([sys.argv[1], '--offline']))\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout.readline() == "running\n"
+    process.send_signal(signal.SIGINT)
+    out, err = process.communicate(timeout=30)
+    assert process.returncode == -signal.SIGINT
+    assert (out, err) == ("", "slopfence: interrupted\n")
 
 
 def test_default_jobs(monkeypatch):

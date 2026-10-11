@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -127,6 +128,20 @@ def _use_utf8_output() -> None:
                 stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _end_like_an_interrupted_program() -> None:
+    """End this process the way Ctrl-C ends a program that doesn't catch it.
+
+    A shell stops a script or a loop only when the program it ran died of the
+    interrupt. After a plain exit with status 130 it runs the next command. So the
+    interrupt gets its default action back and is sent again. A shell still shows 130.
+
+    Windows has no such rule. There this does nothing, and the caller exits with 130.
+    """
+    if os.name == "posix":
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGINT)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run slopfence from the command line and return the exit code.
 
@@ -204,6 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.
         print("slopfence: interrupted", file=sys.stderr)
+        _end_like_an_interrupted_program()
         return EXIT_INTERRUPTED
     if isinstance(registry, PyPIRegistry):
         registry.save()
