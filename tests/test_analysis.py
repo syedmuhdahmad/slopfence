@@ -85,9 +85,8 @@ def test_comments_are_not_read_for_a_file_that_is_only_compared_with(write, tmp_
     path = write("app.py", "x = 1  # slopfence: ignore\n# slopfence: ignore-file\n")
     src = load(path, tmp_path, comments=False)
     assert (src.comments, src.ignores, src.ignore_file) == ([], {}, False)
-    assert not src.is_ignored("SLOP010", 1)
     src = load(path, tmp_path)
-    assert len(src.comments) == 2 and src.ignore_file and src.is_ignored("SLOP010", 99)
+    assert (len(src.comments), src.ignores, src.ignore_file) == (2, {1: None}, True)
 
 
 def test_analyze_files_keeps_the_order_of_the_tasks(write, tmp_path):

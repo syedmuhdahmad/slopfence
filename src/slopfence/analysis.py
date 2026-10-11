@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from slopfence.detectors import FILE_DETECTORS
 from slopfence.detectors.duplicates import Function, index_functions
 from slopfence.models import Finding
-from slopfence.source import ignore_covers, is_test_path, load, relative_path, top_level_imports
+from slopfence.source import is_test_path, load, relative_path, top_level_imports
 
 if TYPE_CHECKING:
     from multiprocessing.context import BaseContext
@@ -82,7 +82,12 @@ class FileSummary:
 
     def is_ignored(self, rule: str, line: int) -> bool:
         """Whether an ignore comment in the file covers ``rule`` on ``line``."""
-        return ignore_covers(self.ignore_file, self.ignores, rule, line)
+        if self.ignore_file:
+            return True
+        if line not in self.ignores:
+            return False
+        rules = self.ignores[line]
+        return rules is None or rule in rules
 
 
 def analyze_file(options: Options, task: Task) -> FileSummary:

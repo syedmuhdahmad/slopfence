@@ -186,7 +186,7 @@ def test_stub_function_skips_pyi_files(tmp_path):
     import ast
 
     from slopfence.detectors.code_quality import check_stub_functions
-    from slopfence.engine import discover
+    from slopfence.engine import discover_all
     from slopfence.source import SourceFile
 
     text = 'def fetch(user_id) -> dict:\n    """Fetch the user."""\n    ...\n'
@@ -195,4 +195,4 @@ def test_stub_function_skips_pyi_files(tmp_path):
     src = SourceFile(path=path, rel="api.pyi", text=text, tree=ast.parse(text))
     assert list(check_stub_functions(src)) == []
     # Discovery only picks up .py files, so a full run never sees it either.
-    assert discover([tmp_path]) == ([], [])
+    assert discover_all([tmp_path]) == ([], [], [])

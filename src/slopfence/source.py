@@ -90,10 +90,6 @@ class SourceFile:
         words = set(self.path.stem.lower().split("_"))
         return bool(folders & EXAMPLE_DIRS or words & EXAMPLE_DIRS)
 
-    def is_ignored(self, rule: str, line: int) -> bool:
-        """Whether an ignore comment in this file covers ``rule`` on ``line``."""
-        return ignore_covers(self.ignore_file, self.ignores, rule, line)
-
     @cached_property
     def nodes(self) -> list[ast.AST]:
         """Every node of the tree in ``ast.walk`` order, walked once and shared by all rules."""
@@ -141,22 +137,6 @@ class SourceFile:
         """Comments and docstring lines: where AI chat text and placeholders hide."""
         yield from self.comments
         yield from self.docstring_lines
-
-
-def ignore_covers(
-    ignore_file: bool, ignores: dict[int, set[str] | None], rule: str, line: int
-) -> bool:
-    """Whether a file's ignore comments cover ``rule`` on ``line``.
-
-    ``ignore_file`` and ``ignores`` are what ``load`` read from the comments: see the
-    fields of ``SourceFile`` with these names.
-    """
-    if ignore_file:
-        return True
-    if line not in ignores:
-        return False
-    rules = ignores[line]
-    return rules is None or rule in rules
 
 
 def is_test_path(name: str, rel: str) -> bool:

@@ -44,12 +44,6 @@ def _is_dependency_file(path: Path) -> bool:
     return name == "pyproject.toml" or (name.startswith("requirements") and name.endswith(".txt"))
 
 
-def discover(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
-    """Return (python files, dependency files) under the given paths."""
-    py_files, dep_files, _ = discover_all(paths)
-    return py_files, dep_files
-
-
 def discover_all(paths: Sequence[Path]) -> tuple[list[Path], list[Path], list[Path]]:
     """Return (python files, dependency files, lock files) under the given paths."""
     py_files: list[Path] = []
