@@ -126,7 +126,8 @@ def test_warning_filters_of_this_process_do_not_change_the_result(write, tmp_pat
     write("plain.py", "# I hope this helps!\n")
     tasks, options = tasks_and_options(tmp_path)
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        # Only this warning: Python has others of its own when a process is forked.
+        warnings.filterwarnings("error", message=".*invalid escape sequence")
         serial = analyze_files(tasks, options, 1)
         context = multiprocessing.get_context(method)
         assert analysis._analyze_in_pool(tasks, options, 2, context) == serial
