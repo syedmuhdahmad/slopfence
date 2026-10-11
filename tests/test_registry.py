@@ -1,9 +1,12 @@
 """PyPI lookups as one concurrent batch, with the same findings (#54)."""
 
+import io
 import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -285,8 +288,8 @@ def test_answers_before_a_failure_still_count(tmp_path, monkeypatch):
 
 
 def test_unknown_answer_for_one_name_is_not_cached(tmp_path, monkeypatch):
-    """A rate limit or server error for one name leaves the others alone, and is
-    asked again next time instead of being remembered."""
+    """A rate limit or server error for one name leaves the others alone. The name
+    stays unknown for this run without a second request, and the next run asks again."""
     asked: list[str] = []
 
     def query(self, key):
@@ -298,9 +301,46 @@ def test_unknown_answer_for_one_name_is_not_cached(tmp_path, monkeypatch):
     registry = PyPIRegistry(tmp_path / "cache", workers=1)
     registry.prefetch(["pkg-1", "busy-pkg", "pkg-2"])
     assert registry.exists("pkg-1") is True and registry.exists("pkg-2") is True
-    assert registry.exists("busy-pkg") is None
+    assert registry.exists("busy-pkg") is None and registry.exists("Busy_Pkg") is None
+    registry.prefetch(["busy-pkg"])
+    assert asked == ["pkg-1", "busy-pkg", "pkg-2"]
+    registry.save()
+    # Not remembered between runs: the next run sends the request again.
+    again = PyPIRegistry(tmp_path / "cache", workers=1)
+    assert again.exists("pkg-1") is True and again.exists("busy-pkg") is None
     assert asked == ["pkg-1", "busy-pkg", "pkg-2", "busy-pkg"]
-    assert "busy-pkg" not in registry._cache
+
+
+def test_single_lookup_without_an_answer_is_not_repeated(tmp_path, monkeypatch):
+    """Without a batch too: a name PyPI gave no answer for is requested once per run."""
+    asked: list[str] = []
+    monkeypatch.setattr(PyPIRegistry, "_query", lambda self, key: asked.append(key))
+    registry = PyPIRegistry(tmp_path / "cache")
+    assert registry.exists("busy-pkg") is None and registry.exists("busy-pkg") is None
+    assert asked == ["busy-pkg"]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_rate_limited_run_sends_one_request_per_name(write, tmp_path, monkeypatch, status):
+    """End to end: PyPI answers every lookup with an error status. Each name is asked
+    about twice (by the batch, then by the check) and still requested once. Nothing
+    is reported, and nothing is cached."""
+    requested: list[str] = []
+
+    def urlopen(request, timeout=None):
+        """Answer like PyPI when it limits requests or is down. No socket is opened."""
+        requested.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, status, "No answer", {}, io.BytesIO())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    names = [f"pkg-number-{n}" for n in range(200)]
+    write("requirements.txt", "".join(f"{name}\n" for name in names))
+    registry = PyPIRegistry(tmp_path / "cache")
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert result.findings == []
+    assert sorted(requested) == sorted(f"https://pypi.org/pypi/{name}/json" for name in names)
+    registry.save()
+    assert not registry.cache_file.exists()
 
 
 def test_unreachable_registry_reports_nothing(project, monkeypatch, tmp_path):

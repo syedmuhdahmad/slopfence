@@ -75,6 +75,9 @@ class PyPIRegistry:
         self._cache: dict[str, list] = self._load()
         self._dirty = False
         self._unreachable = False
+        # The names PyPI was already asked about by this object, which lives for one
+        # run. No name is requested twice, also when there was no answer the first time.
+        self._asked: set[str] = set()
 
     def _load(self) -> dict[str, list]:
         """The cache file's content: ``{name: [found, timestamp]}``. Empty if unreadable."""
@@ -101,7 +104,10 @@ class PyPIRegistry:
                 tmp.unlink()
 
     def exists(self, name: str) -> bool | None:
-        """Whether PyPI has the package: from the cache if that is fresh, else one request."""
+        """Whether PyPI has the package: from the cache if that is fresh, else one request.
+
+        None when PyPI gave no answer. Asking again in the same run sends nothing more.
+        """
         key, now = normalize(name), time.time()
         self._fetch([key], now)
         return self._cached(key, now)
@@ -122,9 +128,11 @@ class PyPIRegistry:
     def _fetch(self, keys: Iterable[str], now: float) -> None:
         """Ask PyPI about the keys without a fresh cached answer, and cache what it says.
 
-        An unknown answer (unreachable, rate limited, an unexpected status) is not cached.
+        An unknown answer (unreachable, rate limited, an unexpected status) is not cached,
+        so the next run asks again. This run does not: each key is requested once.
         """
-        wanted = [key for key in keys if self._cached(key, now) is None]
+        wanted = [key for key in keys if key not in self._asked and self._cached(key, now) is None]
+        self._asked.update(wanted)
         for key, found in zip(wanted, self._query_all(wanted), strict=True):
             if found is not None:
                 self._cache[key] = [found, now]
