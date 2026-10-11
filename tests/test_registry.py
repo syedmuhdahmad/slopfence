@@ -343,6 +343,34 @@ def test_rate_limited_run_sends_one_request_per_name(write, tmp_path, monkeypatc
     assert not registry.cache_file.exists()
 
 
+def test_ctrl_c_does_not_wait_for_requests_in_flight(tmp_path, monkeypatch):
+    """Ctrl-C during a batch: the requests that are out are not waited for (each could
+    take the whole timeout), the ones not sent yet are dropped, and the interrupt goes on."""
+    import concurrent.futures
+
+    shutdowns: list[dict] = []
+
+    class InterruptedPool:
+        """Stands in for ThreadPoolExecutor while the user presses Ctrl-C."""
+
+        def __init__(self, **kwargs):
+            """Accept the real pool's arguments."""
+
+        def map(self, *args):
+            """Be interrupted while the answers are collected."""
+            raise KeyboardInterrupt
+
+        def shutdown(self, **kwargs):
+            """Record how the pool was shut down."""
+            shutdowns.append(kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", InterruptedPool)
+    registry = PyPIRegistry(tmp_path / "cache")
+    with pytest.raises(KeyboardInterrupt):
+        registry.prefetch(["pkg-1", "pkg-2"])
+    assert shutdowns == [{"wait": False, "cancel_futures": True}]
+
+
 def test_unreachable_registry_reports_nothing(project, monkeypatch, tmp_path):
     """End to end: PyPI can't be reached during the batch, so there are no findings."""
 

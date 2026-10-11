@@ -158,10 +158,16 @@ class PyPIRegistry:
         # Imported here: a run that looks nothing up (offline, warm cache) doesn't pay for it.
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(
+        pool = ThreadPoolExecutor(
             max_workers=min(self.workers, len(keys)), thread_name_prefix="slopfence-pypi"
-        ) as pool:
+        )
+        try:
             return list(pool.map(one, keys))
+        finally:
+            # Nothing is left to wait for when every answer is in. After Ctrl-C there
+            # is: each request in flight could take the whole timeout. They are left
+            # behind, and the ones not sent yet are dropped.
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _query(self, key: str) -> bool | None:
         """One request to PyPI: True or False if it answers, None if the answer is unknown."""
