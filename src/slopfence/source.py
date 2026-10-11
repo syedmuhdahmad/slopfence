@@ -66,6 +66,8 @@ class TextSpan:
 
 @dataclass
 class SourceFile:
+    """One parsed Python file: its text, syntax tree, comments and ignore directives."""
+
     path: Path
     rel: str
     text: str

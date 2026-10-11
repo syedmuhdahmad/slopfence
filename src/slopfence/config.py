@@ -35,6 +35,8 @@ class ConfigError(ValueError):
 
 @dataclass
 class Config:
+    """The settings of ``[tool.slopfence]``, with their defaults."""
+
     select: list[str] | None = None
     ignore: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)

@@ -31,11 +31,13 @@ if TYPE_CHECKING:
     from multiprocessing.context import BaseContext
 
 # The default number of jobs is one per CPU, but never more than this. A worker needs
-# about 60 MB, and a container's memory limit doesn't show in its CPU count.
+# 40 to 80 MB on big projects, and a container's memory limit doesn't show in its CPU
+# count.
 DEFAULT_MAX_JOBS = 8
 # One worker is started for every this many files, so none below twice this number.
-# Starting a process costs more than it saves for fewer files: about 45 on Linux with
-# the "spawn" start method, doubled here for Windows and macOS, where it is slower.
+# Measured on Linux, workers already pay off with half as many files each, whatever
+# the start method. The margin is for Windows and macOS, where starting a process
+# costs more.
 MIN_FILES_PER_WORKER = 100
 # Windows can't wait on more than 61 processes.
 MAX_WORKERS = 61
