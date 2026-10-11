@@ -6,6 +6,7 @@ import ast
 import io
 import re
 import tokenize
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -196,7 +197,13 @@ def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
     if text is None:
         return None
     try:
-        tree = ast.parse(text, filename=str(path))
+        # Python warns about some valid code (an invalid escape sequence, for one).
+        # What happens then depends on the warning filters of the process: under
+        # ``-W error`` the file would not parse. A worker process doesn't always have
+        # the filters of the main one, so the answer must not depend on them.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text, filename=str(path))
     except (SyntaxError, ValueError):
         return None
 

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -101,6 +102,26 @@ def test_every_start_method(project, monkeypatch, method):
     serial = analyze_files(tasks, options, 1)
     monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
     assert analyze_files(tasks, options, 3, multiprocessing.get_context(method)) == serial
+
+
+@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+def test_warning_filters_of_this_process_do_not_change_the_result(write, tmp_path, capfd, method):
+    """A program that turned warnings into errors (as ``pytest -W error`` does) gets the
+    same result with workers as without. A "spawn" worker doesn't have those filters, so
+    a file Python only warns about must parse the same way with them and without."""
+    write("escapes.py", 'PATTERN = "\\d+"\n# I hope this helps!\n')
+    write("plain.py", "# I hope this helps!\n")
+    tasks, options = tasks_and_options(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        serial = analyze_files(tasks, options, 1)
+        context = multiprocessing.get_context(method)
+        assert analysis._analyze_in_pool(tasks, options, 2, context) == serial
+    assert [(s.rel, s.parsed, len(s.findings)) for s in serial] == [
+        ("escapes.py", True, 1),
+        ("plain.py", True, 1),
+    ]
+    assert capfd.readouterr().err == ""
 
 
 def test_odd_file_names_cross_the_process_boundary(write, tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 
 import ast
 import tokenize
+import warnings
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,15 @@ def test_a_file_without_comments_is_not_tokenized(write, tmp_path, monkeypatch):
     src = load(commented, tmp_path)
     assert [c.text for c in src.comments] == ["# slopfence: ignore[SLOP010]", "# note"]
     assert src.ignores == {1: {"SLOP010"}}
+
+
+@pytest.mark.parametrize("action", ["error", "always"])
+def test_warning_filters_do_not_decide_what_parses(write, tmp_path, action):
+    """Python warns about an invalid escape sequence, but the file is valid Python. It
+    parses, and quietly, also in a program that turned warnings into errors."""
+    path = write("escapes.py", 'PATTERN = "\\d+"\n')
+    with warnings.catch_warnings(record=True) as shown:
+        warnings.simplefilter(action)
+        src = load(path, tmp_path)
+    assert src is not None and src.tree.body
+    assert shown == []
