@@ -123,13 +123,8 @@ def _has_comment(src: SourceFile, first: int, last: int) -> bool:
     return any(first <= c.line <= last for c in src.comments)
 
 
-def check_swallowed_exceptions(src: SourceFile) -> Iterator[Finding]:
-    """SLOP040: ``except Exception: pass`` that hides every error, in application code."""
-    if src.is_test_file or src.is_example_file:
-        return
-    # Only worked out if a handler qualifies: most files have none.
-    owners: dict[int, str] | None = None
-    atexit_funcs: set[str] = set()
+def _silent_handlers(src: SourceFile) -> Iterator[tuple[ast.Try, ast.ExceptHandler]]:
+    """Every broad handler that does nothing, with its ``try``, in ``ast.walk`` order."""
     for node in src.nodes:
         if (
             not isinstance(node, ast.Try)
@@ -138,27 +133,36 @@ def check_swallowed_exceptions(src: SourceFile) -> Iterator[Finding]:
         ):
             continue
         for handler in node.handlers:
-            if not (_is_broad(handler) and _does_nothing(handler.body)):
-                continue
-            if owners is None:
-                owners = _enclosing_functions(src.tree)
-                atexit_funcs = _atexit_functions(src)
-            func = owners.get(id(node), "")
-            if func in CLEANUP_FUNCTIONS or func in atexit_funcs:
-                break  # cleanup code: none of this try's handlers are reported
-            # A comment ("# best effort", "# optional dependency") shows it's deliberate.
-            if _has_comment(src, handler.lineno, handler.end_lineno or handler.lineno):
-                continue
-            caught = "except:" if handler.type is None else "except Exception"
-            yield Finding(
-                "SLOP040",
-                src.rel,
-                handler.lineno,
-                handler.col_offset + 1,
-                f"'{caught}' silently swallows every error; catch a specific exception, "
-                "or log or re-raise it",
-                end_line=handler.end_lineno,
-            )
+            if _is_broad(handler) and _does_nothing(handler.body):
+                yield node, handler
+
+
+def check_swallowed_exceptions(src: SourceFile) -> Iterator[Finding]:
+    """SLOP040: ``except Exception: pass`` that hides every error, in application code."""
+    if src.is_test_file or src.is_example_file:
+        return
+    handlers = list(_silent_handlers(src))
+    if not handlers:
+        return  # most files: the two walks below are not needed
+    owners = _enclosing_functions(src.tree)
+    atexit_funcs = _atexit_functions(src)
+    for node, handler in handlers:
+        func = owners.get(id(node), "")
+        if func in CLEANUP_FUNCTIONS or func in atexit_funcs:
+            continue
+        # A comment ("# best effort", "# optional dependency") shows it's deliberate.
+        if _has_comment(src, handler.lineno, handler.end_lineno or handler.lineno):
+            continue
+        caught = "except:" if handler.type is None else "except Exception"
+        yield Finding(
+            "SLOP040",
+            src.rel,
+            handler.lineno,
+            handler.col_offset + 1,
+            f"'{caught}' silently swallows every error; catch a specific exception, "
+            "or log or re-raise it",
+            end_line=handler.end_lineno,
+        )
 
 
 # --- SLOP011 ------------------------------------------------------------------------
