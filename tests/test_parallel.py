@@ -7,7 +7,10 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
 
 import pytest
 
@@ -249,12 +252,87 @@ def test_error_in_a_file_is_raised_like_with_one_job(project, monkeypatch, capfd
     assert "worker processes failed" not in capfd.readouterr().err
 
 
-def test_workers_ignore_ctrl_c(monkeypatch):
-    """Only the main process reacts to Ctrl-C."""
-    calls = []
+def test_worker_ignores_ctrl_c_and_watches_the_main_process(monkeypatch):
+    """Only the main process reacts to Ctrl-C, and every worker waits for its end."""
+    calls, watching = [], threading.Event()
     monkeypatch.setattr(signal, "signal", lambda sig, handler: calls.append((sig, handler)))
+    monkeypatch.setattr(analysis, "_end_with_parent", watching.set)
     analysis._init_worker()
     assert calls == [(signal.SIGINT, signal.SIG_IGN)]
+    assert watching.wait(timeout=10)
+
+
+def test_worker_ends_once_the_main_process_is_gone(monkeypatch):
+    """The watcher waits until the main process has ended, and only then ends the worker."""
+    events = []
+
+    class GoneParent:
+        """Stands in for a main process that has ended."""
+
+        def join(self):
+            """Return at once: there is nothing left to wait for."""
+            events.append("waited")
+
+    monkeypatch.setattr(multiprocessing, "parent_process", GoneParent)
+    monkeypatch.setattr(os, "_exit", lambda status: events.append(status))
+    analysis._end_with_parent()
+    assert events == ["waited", 1]
+
+
+def _heartbeat(folder, number):
+    """A task that keeps a worker busy: its file grows for as long as the worker lives
+    (half a minute at most, so that a failed test leaves nothing behind for long)."""
+    beat, stop = Path(folder, f"beat-{number}"), Path(folder, "stop")
+    for _ in range(1500):
+        if stop.exists():
+            break
+        with beat.open("a", encoding="utf-8") as file:
+            file.write(".")
+        time.sleep(0.02)
+
+
+def _own_a_pool(folder, method):
+    """Stand in for the main process: start two busy workers, then wait to be killed."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    pool = ProcessPoolExecutor(
+        2, mp_context=multiprocessing.get_context(method), initializer=analysis._init_worker
+    )
+    for number in range(2):
+        pool.submit(_heartbeat, folder, number)
+    time.sleep(30)
+
+
+@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+def test_workers_end_when_the_main_process_is_killed(tmp_path, method):
+    """A main process that is killed can't tell its workers to stop. They notice, and
+    end by themselves, instead of staying behind for good."""
+    code = "import sys; from tests.test_parallel import _own_a_pool; _own_a_pool(*sys.argv[1:])"
+    owner = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path), method], cwd=Path(__file__).parent.parent
+    )
+    beats = [tmp_path / "beat-0", tmp_path / "beat-1"]
+
+    def stopped():
+        """Whether the workers write nothing: two readings half a second apart are equal."""
+        before = [beat.stat().st_size for beat in beats]
+        time.sleep(0.5)
+        return [beat.stat().st_size for beat in beats] == before
+
+    try:
+        deadline = time.monotonic() + 60
+        while not all(beat.exists() for beat in beats):
+            assert owner.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        owner.kill()
+        owner.wait()
+        deadline = time.monotonic() + 10
+        while not stopped() and time.monotonic() < deadline:
+            continue
+        assert stopped()
+    finally:
+        owner.kill()
+        (tmp_path / "stop").touch()
 
 
 def test_ctrl_c_drops_queued_work(project, monkeypatch, capsys):

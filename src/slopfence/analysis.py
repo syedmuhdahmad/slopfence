@@ -133,8 +133,26 @@ def worker_count(jobs: int, files: int) -> int:
 
 
 def _init_worker() -> None:
-    """Leave Ctrl-C to the main process, so that workers don't each print a traceback."""
+    """Set up a worker process: it leaves Ctrl-C to the main process, and ends with it."""
+    # Imported here: only a worker process needs it.
+    import threading
+
+    # Otherwise every worker would print a traceback of its own.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    threading.Thread(target=_end_with_parent, daemon=True).start()
+
+
+def _end_with_parent() -> None:
+    """End this worker process once the main process is gone.
+
+    A worker waits for its next batch for ever. A main process that is killed (``kill``,
+    a closed terminal, the out-of-memory killer) can't tell it to stop, so the worker
+    watches for that itself. Otherwise it would stay behind, holding its memory.
+    """
+    import multiprocessing
+
+    multiprocessing.parent_process().join()
+    os._exit(1)
 
 
 def _analyze_in_pool(
