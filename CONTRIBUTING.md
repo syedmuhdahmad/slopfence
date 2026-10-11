@@ -69,6 +69,10 @@ If you change `.pre-commit-hooks.yaml`, also run the end-to-end hook test (needs
 .github/scripts/test-pre-commit-hook.sh .
 ```
 
+### Working with Claude Code
+
+The repository includes a shared [Claude Code](https://code.claude.com/docs) setup: project instructions in `CLAUDE.md`, coding standards, skills such as `/preflight` and `/add-detector`, review agents, and hooks that format edited files and stop commits on `main`. [`.claude/README.md`](.claude/README.md) lists everything. You don't need Claude Code to contribute, and the same checks run in CI either way.
+
 ### Re-recording the demo GIF
 
 `docs/demo.gif` is generated from `docs/demo/demo.tape` with [VHS](https://github.com/charmbracelet/vhs). To re-record it after changing the output, run this (needs Docker):

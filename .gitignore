@@ -15,3 +15,9 @@ build/
 .coverage.*
 coverage.xml
 htmlcov/
+
+# Claude Code: personal settings and local state (the rest of .claude/ is shared)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/agent-memory-local/
+CLAUDE.local.md
