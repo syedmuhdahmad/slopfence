@@ -49,8 +49,9 @@ def _is_patch_decorator(dec: ast.AST) -> bool:
     return any(name == p or name.endswith("." + p) for p in PATCH_NAMES)
 
 
-def _test_functions(tree: ast.Module) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
-    for node in ast.walk(tree):
+def _test_functions(src: SourceFile) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function in the file whose name starts with ``test``."""
+    for node in src.nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
             "test"
         ):
@@ -161,9 +162,10 @@ def _calls_real_code(func: ast.AST, mocks: set[str], assertion_nodes: set[int]) 
 
 
 def check_mock_only_tests(src: SourceFile) -> Iterator[Finding]:
+    """SLOP020: tests that only assert on mocks they created themselves."""
     if not src.is_test_file:
         return
-    for func in _test_functions(src.tree):
+    for func in _test_functions(src):
         mocks = _mock_names(func)
         if not mocks:
             continue
@@ -251,9 +253,10 @@ def _unused_call_results(func: ast.AST) -> list[str]:
 
 
 def check_trivial_assertions(src: SourceFile) -> Iterator[Finding]:
+    """SLOP021: tests whose only assertions are always true."""
     if not src.is_test_file:
         return
-    for func in _test_functions(src.tree):
+    for func in _test_functions(src):
         asserts = _assertions(func)
         if not asserts or not all(_is_trivially_true(a) for a in asserts):
             continue
@@ -330,9 +333,10 @@ def _is_assertion(node: ast.AST) -> bool:
 
 
 def check_swallowed_assertions(src: SourceFile) -> Iterator[Finding]:
+    """SLOP022: tests whose assertions sit in a try/except that swallows the failure."""
     if not src.is_test_file:
         return
-    for func in _test_functions(src.tree):
+    for func in _test_functions(src):
         all_asserts = {id(n) for n in _walk_own_body(func) if _is_assertion(n)}
         if not all_asserts or _uses_pytest_raises_or_fail(func):
             continue

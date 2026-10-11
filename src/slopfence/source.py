@@ -15,6 +15,44 @@ IGNORE_RE = re.compile(r"#\s*slopfence:\s*ignore(?:\[(?P<rules>[A-Z0-9,\s]+)\])?
 _ESCAPE_SEQ = re.compile(r"\\[ntr]")
 EXAMPLE_DIRS = {"demo", "demos", "example", "examples", "sample", "samples"}
 IGNORE_FILE_RE = re.compile(r"#\s*slopfence:\s*ignore-file\b", re.I)
+# The only nodes that can hold statements. Expressions never do, and they are most
+# of a tree, so a search for functions, classes, ``if`` or ``try`` can skip them.
+_STATEMENT_HOLDERS = (ast.stmt, ast.excepthandler, ast.match_case)
+
+
+def children(node: ast.AST, kinds: type | tuple[type, ...] = ast.AST) -> list[ast.AST]:
+    """The direct children of ``node`` that are ``kinds``, in ``ast.iter_child_nodes`` order."""
+    found = []
+    for name in node._fields:
+        value = getattr(node, name, None)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, kinds):
+                    found.append(item)
+        elif isinstance(value, kinds):
+            found.append(value)
+    return found
+
+
+def walk(node: ast.AST) -> list[ast.AST]:
+    """``node`` and everything below it, as a list in ``ast.walk`` order.
+
+    Faster than ``ast.walk``, which goes through two generators per node.
+    """
+    nodes = [node]
+    # The list grows while it is read, which makes this breadth-first like ``ast.walk``.
+    for current in nodes:
+        nodes.extend(children(current))
+    return nodes
+
+
+def child_statements(node: ast.AST) -> list[ast.AST]:
+    """The children of ``node`` that can hold statements, in source order.
+
+    These are statements, ``except`` handlers and ``match`` cases. Following only
+    them reaches every statement of a tree without visiting its expressions.
+    """
+    return children(node, _STATEMENT_HOLDERS)
 
 
 @dataclass
@@ -64,17 +102,23 @@ class SourceFile:
         return rules is None or rule in rules
 
     @cached_property
+    def nodes(self) -> list[ast.AST]:
+        """Every node of the tree in ``ast.walk`` order, walked once and shared by all rules."""
+        return walk(self.tree)
+
+    @cached_property
     def docstring_lines(self) -> list[TextSpan]:
         """Each line of every module, class and function docstring."""
         return list(self._iter_docstring_lines())
 
     def _iter_docstring_lines(self) -> Iterator[TextSpan]:
+        """Yield the non-empty lines of every docstring, with their positions."""
         # Use the physical source lines, not the decoded string value: escapes like
         # "\n" and backslash-continuations would otherwise shift line numbers.
         lines = self.text.split("\n")
         nodes = [self.tree] + [
             n
-            for n in ast.walk(self.tree)
+            for n in self.nodes
             if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         for node in nodes:
@@ -139,6 +183,8 @@ def load(path: Path, root: Path) -> SourceFile | None:
         rel = path.as_posix()
 
     src = SourceFile(path=path, rel=rel, text=text, tree=tree)
+    if "#" not in text:
+        return src  # no comments, so nothing to tokenize for
     try:
         for tok in tokenize.generate_tokens(io.StringIO(text).readline):
             if tok.type != tokenize.COMMENT:

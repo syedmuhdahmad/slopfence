@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterator
 
 from slopfence.models import Finding
-from slopfence.source import SourceFile
+from slopfence.source import SourceFile, child_statements
 
 # --- SLOP040 ------------------------------------------------------------------------
 
@@ -88,10 +88,10 @@ def _only_imports(body: list[ast.stmt]) -> bool:
     return all(isinstance(stmt, (ast.Import, ast.ImportFrom)) for stmt in body)
 
 
-def _atexit_functions(tree: ast.Module) -> set[str]:
+def _atexit_functions(src: SourceFile) -> set[str]:
     """Names registered with ``atexit.register(f)`` or decorated ``@atexit.register``."""
     names = set()
-    for node in ast.walk(tree):
+    for node in src.nodes:
         if isinstance(node, ast.Call) and _last_name(node.func) == "register" and node.args:
             names.add(_last_name(node.args[0]))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
@@ -102,21 +102,19 @@ def _atexit_functions(tree: ast.Module) -> set[str]:
 
 
 def _enclosing_functions(tree: ast.Module) -> dict[int, str]:
-    """For every node id, the name of the innermost function that contains it."""
+    """For every statement (by node id), the name of the innermost function around it."""
     owner: dict[int, str] = {}
-
-    def visit(node: ast.AST, current: str) -> None:
-        """Record the innermost function name for each node below ``node``."""
-        for child in ast.iter_child_nodes(node):
+    todo: list[tuple[ast.AST, str]] = [(tree, "")]
+    while todo:
+        node, current = todo.pop()
+        for child in child_statements(node):
             name = (
                 child.name
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                 else current
             )
             owner[id(child)] = name
-            visit(child, name)
-
-    visit(tree, "")
+            todo.append((child, name))
     return owner
 
 
@@ -129,21 +127,25 @@ def check_swallowed_exceptions(src: SourceFile) -> Iterator[Finding]:
     """SLOP040: ``except Exception: pass`` that hides every error, in application code."""
     if src.is_test_file or src.is_example_file:
         return
-    owners = _enclosing_functions(src.tree)
-    atexit_funcs = _atexit_functions(src.tree)
-    for node in ast.walk(src.tree):
+    # Only worked out if a handler qualifies: most files have none.
+    owners: dict[int, str] | None = None
+    atexit_funcs: set[str] = set()
+    for node in src.nodes:
         if (
             not isinstance(node, ast.Try)
             or _only_cleanup_calls(node.body)
             or _only_imports(node.body)
         ):
             continue
-        func = owners.get(id(node), "")
-        if func in CLEANUP_FUNCTIONS or func in atexit_funcs:
-            continue
         for handler in node.handlers:
             if not (_is_broad(handler) and _does_nothing(handler.body)):
                 continue
+            if owners is None:
+                owners = _enclosing_functions(src.tree)
+                atexit_funcs = _atexit_functions(src)
+            func = owners.get(id(node), "")
+            if func in CLEANUP_FUNCTIONS or func in atexit_funcs:
+                break  # cleanup code: none of this try's handlers are reported
             # A comment ("# best effort", "# optional dependency") shows it's deliberate.
             if _has_comment(src, handler.lineno, handler.end_lineno or handler.lineno):
                 continue
@@ -303,23 +305,22 @@ def _candidate_functions(
     """Functions that are meant to be real implementations: not in Protocols, ABCs or
     ``if TYPE_CHECKING`` blocks."""
 
-    def visit(node: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
-        """Functions under ``node``, skipping exempt classes and TYPE_CHECKING blocks."""
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.If) and "TYPE_CHECKING" in ast.unparse(child.test):
+    # Depth-first, in source order. Functions are only found through statements.
+    todo = child_statements(tree)[::-1]
+    while todo:
+        child = todo.pop()
+        if isinstance(child, ast.If) and "TYPE_CHECKING" in ast.unparse(child.test):
+            continue
+        if isinstance(child, ast.ClassDef):
+            bases = {
+                _last_name(b.value if isinstance(b, ast.Subscript) else b) for b in child.bases
+            }
+            metaclass = {_last_name(k.value) for k in child.keywords}
+            if bases & EXEMPT_BASES or metaclass & EXEMPT_BASES:
                 continue
-            if isinstance(child, ast.ClassDef):
-                bases = {
-                    _last_name(b.value if isinstance(b, ast.Subscript) else b) for b in child.bases
-                }
-                metaclass = {_last_name(k.value) for k in child.keywords}
-                if bases & EXEMPT_BASES or metaclass & EXEMPT_BASES:
-                    continue
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                yield child
-            yield from visit(child)
-
-    yield from visit(tree)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield child
+        todo.extend(child_statements(child)[::-1])
 
 
 def check_stub_functions(src: SourceFile) -> Iterator[Finding]:

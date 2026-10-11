@@ -40,7 +40,7 @@ from dataclasses import dataclass
 
 from slopfence.diff import ChangedLines, touches
 from slopfence.models import Finding
-from slopfence.source import SourceFile
+from slopfence.source import SourceFile, child_statements, children, walk
 
 MIN_STATEMENTS = 3
 SIMILARITY = 0.9
@@ -58,6 +58,8 @@ MIRROR_TOKENS = 2
 MAX_NEAR_TOKENS = 5000
 
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+# The ``ctx`` nodes of names, attributes and subscripts. They are not tokens.
+_CONTEXTS = (ast.Load, ast.Store, ast.Del)
 
 
 @dataclass
@@ -73,7 +75,14 @@ class Function:
 
 def _statement_count(func: FunctionNode) -> int:
     """Statements inside the function, nested ones included."""
-    return sum(isinstance(n, ast.stmt) for n in ast.walk(func)) - 1
+    count = 0
+    todo = child_statements(func)
+    while todo:
+        node = todo.pop()
+        # ``except`` handlers and ``match`` cases hold statements but aren't statements.
+        count += isinstance(node, ast.stmt)
+        todo.extend(child_statements(node))
+    return count
 
 
 def _local_names(func: FunctionNode) -> set[str]:
@@ -81,7 +90,7 @@ def _local_names(func: FunctionNode) -> set[str]:
     args = func.args
     params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
     names = {a.arg for a in params if a}
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             names.add(node.id)
     return names
@@ -100,33 +109,38 @@ def _body_without_docstring(func: FunctionNode) -> list[ast.stmt]:
     return body
 
 
-def _tokens(node: ast.AST, rename: dict[str, str], local: set[str]) -> Iterator[str]:
-    """A flat token sequence of node types and the values that matter.
+def _tokens(node: ast.AST, rename: dict[str, str], local: set[str], out: list[str]) -> None:
+    """Append a flat token sequence of node types and the values that matter to ``out``.
 
     Depth-first, so each statement's tokens stay together and an edit changes one
     stretch only. Parameters and locals become v0, v1... in order of appearance,
     so renaming them doesn't change the sequence.
     """
-    yield type(node).__name__
-    if isinstance(node, (ast.Name, ast.arg)):
-        name = node.id if isinstance(node, ast.Name) else node.arg
-        yield rename.setdefault(name, f"v{len(rename)}") if name in local else name
-    elif isinstance(node, ast.Attribute):
-        yield node.attr
-    elif isinstance(node, ast.Constant):
-        # The full value: constants that differ anywhere (long SQL, URLs) must never
-        # make two functions look identical.
-        yield repr(node.value)
-    for child in ast.iter_child_nodes(node):
-        if not isinstance(child, (ast.Load, ast.Store, ast.Del)):
-            yield from _tokens(child, rename, local)
+    # A stack instead of recursion: an expression can be thousands of levels deep.
+    todo = [node]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, _CONTEXTS):
+            continue
+        out.append(type(node).__name__)
+        if isinstance(node, (ast.Name, ast.arg)):
+            name = node.id if isinstance(node, ast.Name) else node.arg
+            out.append(rename.setdefault(name, f"v{len(rename)}") if name in local else name)
+        elif isinstance(node, ast.Attribute):
+            out.append(node.attr)
+        elif isinstance(node, ast.Constant):
+            # The full value: constants that differ anywhere (long SQL, URLs) must never
+            # make two functions look identical.
+            out.append(repr(node.value))
+        # Reversed, so the first child is taken off the stack first.
+        todo.extend(reversed(children(node)))
 
 
 def _functions(
     node: ast.AST, owner: str | None = None
 ) -> Iterator[tuple[FunctionNode, str | None]]:
     """Every function and method under ``node``, with the class it's defined in."""
-    for child in ast.iter_child_nodes(node):
+    for child in child_statements(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             yield child, owner
             yield from _functions(child, None)
@@ -145,17 +159,17 @@ def index_functions(sources: Iterable[SourceFile]) -> list[Function]:
         for func, owner in _functions(src.tree):
             if _statement_count(func) < MIN_STATEMENTS:
                 continue
-            local, rename = _local_names(func), {}
-            tokens = tuple(_tokens(func.args, rename, local))
+            local, rename, tokens = _local_names(func), {}, []
+            _tokens(func.args, rename, local, tokens)
             for stmt in _body_without_docstring(func):
-                tokens += tuple(_tokens(stmt, rename, local))
+                _tokens(stmt, rename, local, tokens)
             found.append(
                 Function(
                     name=func.name,
                     path=src.rel,
                     line=func.lineno,
                     end_line=func.end_lineno or func.lineno,
-                    tokens=tokens,
+                    tokens=tuple(tokens),
                     owner=owner,
                 )
             )
