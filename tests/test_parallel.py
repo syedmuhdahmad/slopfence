@@ -69,11 +69,23 @@ def tasks_and_options(root):
 
 
 def count_pools(monkeypatch):
-    """Make two files enough for a pool. Returns the worker count of each pool started."""
+    """Make two files enough for a pool. Returns the worker count of each pool started.
+
+    A pool that gives up fails the test. Without that, a test would pass on a machine
+    where no worker can start, because the files are then checked in this process.
+    """
     pools = []
     real = analysis._analyze_in_pool
+
+    def counted(tasks, options, workers, mp_context):
+        """Run the real pool, note its size, and insist that it did the work."""
+        pools.append(workers)
+        summaries = real(tasks, options, workers, mp_context)
+        assert summaries is not None, "the worker processes did not do the work"
+        return summaries
+
     monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
-    monkeypatch.setattr(analysis, "_analyze_in_pool", lambda *a: pools.append(a[2]) or real(*a))
+    monkeypatch.setattr(analysis, "_analyze_in_pool", counted)
     return pools
 
 
@@ -96,12 +108,13 @@ def test_same_result_with_one_job_and_many(project, monkeypatch):
 
 
 @pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
-def test_every_start_method(project, monkeypatch, method):
-    """spawn (Windows, macOS), forkserver and fork all give the single-process result."""
+def test_every_start_method(project, method):
+    """spawn (Windows, macOS), forkserver and fork all give the single-process result.
+    The pool is called directly: it answers None when the workers could not do the work."""
     tasks, options = tasks_and_options(project)
     serial = analyze_files(tasks, options, 1)
-    monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
-    assert analyze_files(tasks, options, 3, multiprocessing.get_context(method)) == serial
+    context = multiprocessing.get_context(method)
+    assert analysis._analyze_in_pool(tasks, options, 3, context) == serial
 
 
 @pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
