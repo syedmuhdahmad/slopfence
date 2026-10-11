@@ -200,5 +200,9 @@ def run(
     if changed is not None:
         findings = [f for f in findings if diffmod.touches(changed, f.path, f.line, f.end_line)]
 
-    result.findings = sorted(set(findings), key=lambda f: (f.path, f.line, f.col, f.rule))
+    # The message breaks ties: ``import a, b`` gives two findings at one position, and
+    # without it their order would be the set's, which changes with the hash seed.
+    result.findings = sorted(
+        set(findings), key=lambda f: (f.path, f.line, f.col, f.rule, f.message)
+    )
     return result
