@@ -1,0 +1,374 @@
+"""--jobs: files are checked in worker processes, with the same result (#12)."""
+
+import importlib
+import json
+import multiprocessing
+import os
+import signal
+import subprocess
+import sys
+from concurrent.futures.process import BrokenProcessPool
+
+import pytest
+
+from slopfence import analysis
+from slopfence import cli as climod
+from slopfence.analysis import Options, analyze_files, default_jobs, worker_count
+from slopfence.cli import main
+from slopfence.config import ConfigError, load_config
+from slopfence.detectors import FILE_DETECTORS
+from slopfence.engine import run
+from tests.conftest import FakeRegistry
+
+HELPER = '''
+def format_date(value, fmt="%Y-%m-%d"):
+    """Format a date for display."""
+    if value is None:
+        return ""
+    text = value.strftime(fmt)
+    return text.strip()
+'''
+SWALLOW = "def f{n}(x):\n    try:\n        x()\n    except Exception:\n        pass\n"
+MOCK_TEST = (
+    "from unittest.mock import Mock\n\n\ndef test_x():\n    m = Mock()\n    m.a = 1\n"
+    "    assert m.a == 1\n"
+)
+
+
+@pytest.fixture
+def project(write, tmp_path):
+    """A project with every kind of result: findings of per-file rules, duplicates, a
+    missing import, ignore comments, a test file and a file that can't be parsed."""
+    write("src/a.py", "# In a real implementation, retry\n" + HELPER)
+    write("src/b.py", "import ghost_pkg_zz\n" + HELPER.replace("format_date", "fmt_date"))
+    write("src/c.py", HELPER.replace("format_date", "fmt2") + "# I hope this helps!\n")
+    write("src/d.py", "import ghost_pkg_zz  # slopfence: ignore\nx = 1\n")
+    write("src/ignored.py", "# slopfence: ignore-file\n# I hope this helps!\n" + HELPER)
+    write("src/broken.py", "def broken(:\n")
+    write("tests/test_a.py", MOCK_TEST)
+    write("requirements.txt", "requests\nghost-dep-zz\n")
+    for n in range(6):
+        write(f"src/more/m{n}.py", SWALLOW.format(n=n))
+    return tmp_path
+
+
+def scan(root, jobs):
+    """Everything a run reports, for comparing runs."""
+    result = run([root], root, FakeRegistry({"requests"}), check_imports=True, jobs=jobs)
+    return result.findings, result.parse_errors, result.files_checked, result.notes
+
+
+def tasks_and_options(root):
+    """Tasks and options that check every Python file under ``root``."""
+    tasks = [(str(p), True) for p in sorted(root.rglob("*.py"))]
+    return tasks, Options(str(root), frozenset(FILE_DETECTORS), functions=True, imports=True)
+
+
+def count_pools(monkeypatch):
+    """Make two files enough for a pool. Returns the worker count of each pool started."""
+    pools = []
+    real = analysis._analyze_in_pool
+    monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
+    monkeypatch.setattr(analysis, "_analyze_in_pool", lambda *a: pools.append(a[2]) or real(*a))
+    return pools
+
+
+def test_same_result_with_one_job_and_many(project, monkeypatch):
+    """--jobs N gives the same findings in the same order as --jobs 1."""
+    serial = scan(project, 1)
+    assert {f.rule for f in serial[0]} == {
+        "SLOP001",
+        "SLOP010",
+        "SLOP020",
+        "SLOP030",
+        "SLOP040",
+        "SLOP051",
+    }
+    assert serial[1] == ["src/broken.py"]
+    pools = count_pools(monkeypatch)
+    assert scan(project, 2) == serial
+    assert scan(project, 4) == serial
+    assert pools == [2, 4]  # worker processes really did the work
+
+
+@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+def test_every_start_method(project, monkeypatch, method):
+    """spawn (Windows, macOS), forkserver and fork all give the single-process result."""
+    tasks, options = tasks_and_options(project)
+    serial = analyze_files(tasks, options, 1)
+    monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
+    assert analyze_files(tasks, options, 3, multiprocessing.get_context(method)) == serial
+
+
+def test_odd_file_names_cross_the_process_boundary(write, tmp_path, monkeypatch):
+    """Spaces and non-ASCII letters in a path reach the workers and come back intact."""
+    names = ["with space/a b.py", "ünïcode/naïve.py", "日本/語.py", "plain.py"]
+    for name in names:
+        write(name, "# I hope this helps!\n")
+    tasks, options = tasks_and_options(tmp_path)
+    serial = analyze_files(tasks, options, 1)
+    assert len(serial) == len(names)
+    assert {"with space/a b.py", "plain.py"} < {s.rel for s in serial}
+    assert all(s.parsed and [f.rule for f in s.findings] == ["SLOP051"] for s in serial)
+    pools = count_pools(monkeypatch)
+    assert analyze_files(tasks, options, 2) == serial
+    assert pools == [2]
+
+
+def test_no_pool_for_few_files(project, monkeypatch):
+    """Under 200 files nothing is started, whatever --jobs says."""
+
+    def no_pool(*args):
+        """Fail the test: this project is far too small for worker processes."""
+        raise AssertionError("worker processes were started")
+
+    monkeypatch.setattr(analysis, "_analyze_in_pool", no_pool)
+    assert scan(project, 8) == scan(project, 1)
+
+
+@pytest.mark.parametrize(
+    ("jobs", "files", "workers"),
+    [
+        (8, 0, 1),
+        (8, 199, 1),
+        (8, 200, 2),
+        (8, 799, 7),
+        (8, 800, 8),
+        (8, 99_999, 8),
+        (1, 99_999, 1),
+        (2, 99_999, 2),
+        (500, 99_999, 61),
+    ],
+)
+def test_worker_count(jobs, files, workers):
+    """One worker per 100 files, never more than --jobs or 61, and none under 200 files."""
+    assert worker_count(jobs, files) == workers
+
+
+def test_command_line_with_real_workers(tmp_path, monkeypatch, capsys):
+    """200 files is where workers start: the report is the same, and nothing is warned."""
+    for n in range(200):
+        (tmp_path / f"m{n:03}.py").write_text(
+            f"# I hope this helps!\ndef helper_{n}(value):\n"
+            "    text = str(value)\n    text = text.strip()\n    return text\n",
+            encoding="utf-8",
+        )
+    pools = []
+    real = analysis._analyze_in_pool
+    monkeypatch.setattr(analysis, "_analyze_in_pool", lambda *a: pools.append(a[2]) or real(*a))
+    reports = []
+    for jobs in ("1", "2", "8"):
+        assert main([str(tmp_path), "--offline", "--format", "json", "--jobs", jobs]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        reports.append(captured.out)
+    assert pools == [2, 2]  # --jobs 8 still means one worker per 100 files
+    assert reports[0] == reports[1] == reports[2]
+    rules = [f["rule"] for f in json.loads(reports[0])["findings"]]
+    assert (rules.count("SLOP051"), rules.count("SLOP030")) == (200, 199)
+
+
+def use_failing_pool(monkeypatch, error, fail_in_map):
+    """Make every pool fail with ``error``: when it is created or, with ``fail_in_map``,
+    when it is used. Returns the list of shutdown calls."""
+    import concurrent.futures
+
+    shutdowns: list[dict] = []
+
+    class FailingPool:
+        """Stands in for ProcessPoolExecutor."""
+
+        def __init__(self, **kwargs):
+            """Accept the real pool's arguments; maybe fail like a platform without pools."""
+            if not fail_in_map:
+                raise error
+
+        def map(self, *args, **kwargs):
+            """Fail while results are collected."""
+            raise error
+
+        def shutdown(self, **kwargs):
+            """Record how the pool was shut down."""
+            shutdowns.append(kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", FailingPool)
+    monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
+    return shutdowns
+
+
+@pytest.mark.parametrize(
+    ("error", "fail_in_map"),
+    [
+        (OSError("no semaphores here"), False),
+        (ImportError("no _multiprocessing"), False),
+        (NotImplementedError("no sem_open"), False),
+        (OSError("no more processes"), True),
+        (BrokenProcessPool("a worker died"), True),
+    ],
+)
+def test_falls_back_to_one_process(project, monkeypatch, capsys, error, fail_in_map):
+    """If workers can't be started, or one dies, the files are checked in this process."""
+    serial = scan(project, 1)
+    shutdowns = use_failing_pool(monkeypatch, error, fail_in_map)
+    assert scan(project, 4) == serial
+    assert capsys.readouterr().err == (
+        f"slopfence: warning: worker processes failed ({type(error).__name__}: {error}); "
+        "checking files in one process instead\n"
+    )
+    # A pool that was created is always shut down, and never left with queued work.
+    assert shutdowns == ([{"wait": True, "cancel_futures": True}] if fail_in_map else [])
+
+
+def _exit_at_once():
+    """A worker initializer that kills the worker (workers must be able to import it)."""
+    os._exit(3)
+
+
+def test_dead_worker_is_survived(project, monkeypatch, capfd):
+    """A worker that dies breaks the pool; the run still finishes with the same result."""
+    tasks, options = tasks_and_options(project)
+    serial = analyze_files(tasks, options, 1)
+    monkeypatch.setattr(analysis, "MIN_FILES_PER_WORKER", 2)
+    monkeypatch.setattr(analysis, "_init_worker", _exit_at_once)
+    assert analyze_files(tasks, options, 2) == serial
+    assert "worker processes failed (BrokenProcessPool" in capfd.readouterr().err
+
+
+def test_error_in_a_file_is_raised_like_with_one_job(project, monkeypatch, capfd):
+    """A crash while a worker analyses a file is raised as it is with one job. It is
+    not mistaken for a broken pool, so there is no warning and no second attempt."""
+    tasks, options = tasks_and_options(project)
+    tasks.append(("no\0such.py", True))  # no file name may hold a null character
+    with pytest.raises(ValueError, match="null") as serial:
+        analyze_files(tasks, options, 1)
+    pools = count_pools(monkeypatch)
+    with pytest.raises(ValueError, match="null") as parallel:
+        analyze_files(tasks, options, 2)
+    assert pools == [2]
+    assert str(parallel.value) == str(serial.value)
+    assert "worker processes failed" not in capfd.readouterr().err
+
+
+def test_workers_ignore_ctrl_c(monkeypatch):
+    """Only the main process reacts to Ctrl-C."""
+    calls = []
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: calls.append((sig, handler)))
+    analysis._init_worker()
+    assert calls == [(signal.SIGINT, signal.SIG_IGN)]
+
+
+def test_ctrl_c_drops_queued_work(project, monkeypatch, capsys):
+    """Ctrl-C while workers run: queued batches are dropped and the interrupt goes on."""
+    tasks, options = tasks_and_options(project)
+    shutdowns = use_failing_pool(monkeypatch, KeyboardInterrupt(), fail_in_map=True)
+    with pytest.raises(KeyboardInterrupt):
+        analyze_files(tasks, options, 2)
+    assert shutdowns == [{"wait": True, "cancel_futures": True}]
+    assert capsys.readouterr().err == ""
+
+
+def test_interrupt_exits_130(tmp_path, monkeypatch, capsys):
+    """Ctrl-C ends the run with one line and the usual exit status, not a traceback."""
+
+    def interrupted(*args, **kwargs):
+        """Stand in for a run that is interrupted."""
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(climod, "run", interrupted)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    output = tmp_path / "report.json"
+    assert main([str(tmp_path), "--offline", "--exit-zero", "-o", str(output)]) == 130
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "slopfence: interrupted\n")
+    assert not output.exists()  # no report, not even an empty one
+
+
+def test_default_jobs(monkeypatch):
+    """One job per CPU the process may use, at most 8, whichever way Python reports CPUs."""
+    assert 1 <= default_jobs() <= 8
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 64, raising=False)
+    assert default_jobs() == 8
+    monkeypatch.setattr(os, "process_cpu_count", lambda: None, raising=False)
+    assert default_jobs() == 1
+    monkeypatch.delattr(os, "process_cpu_count")
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    assert default_jobs() == 3
+    monkeypatch.delattr(os, "sched_getaffinity")
+    monkeypatch.setattr(os, "cpu_count", lambda: 4)
+    assert default_jobs() == 4
+    monkeypatch.setattr(os, "cpu_count", lambda: None)
+    assert default_jobs() == 1
+
+
+def test_jobs_option_and_config(tmp_path, monkeypatch, capsys):
+    """--jobs replaces the config value; with neither, the default is used. The report
+    is the same every time."""
+    (tmp_path / "app.py").write_text("# I hope this helps!\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.slopfence]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    seen, reports = [], []
+    real = climod.run
+    monkeypatch.setattr(climod, "run", lambda *a, **k: seen.append(k["jobs"]) or real(*a, **k))
+
+    def scan_with(*options):
+        """Run the CLI and keep its JSON report."""
+        main([".", "--offline", "--format", "json", *options])
+        reports.append(capsys.readouterr().out)
+
+    scan_with()
+    scan_with("--jobs", "3")
+    (tmp_path / "pyproject.toml").write_text("[tool.slopfence]\njobs = 2\n", encoding="utf-8")
+    scan_with()
+    scan_with("--jobs", "1")
+    assert seen == [default_jobs(), 3, 2, 1]
+    assert len(set(reports)) == 1
+    assert json.loads(reports[0])["findings"][0]["rule"] == "SLOP051"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "many", ""])
+def test_invalid_jobs_option(tmp_path, value, capsys):
+    """--jobs must be a whole number, 1 or more: anything else is a usage error."""
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(tmp_path), "--jobs", value])
+    assert exit_info.value.code == 2
+    assert f"argument --jobs: must be a whole number, 1 or more (got {value!r})" in (
+        capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "true", '"4"', "1.5", "[2]"])
+def test_invalid_jobs_config(tmp_path, value):
+    """jobs in pyproject.toml must be a whole number, 1 or more."""
+    (tmp_path / "pyproject.toml").write_text(
+        f"[tool.slopfence]\njobs = {value}\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="'jobs' must be a whole number, 1 or more"):
+        load_config(tmp_path)
+
+
+def test_jobs_is_a_known_config_key(tmp_path):
+    """``jobs`` is read from the config, and named among the keys a typo is told about."""
+    (tmp_path / "pyproject.toml").write_text("[tool.slopfence]\njobs = 16\n", encoding="utf-8")
+    assert load_config(tmp_path).jobs == 16
+    (tmp_path / "pyproject.toml").write_text("[tool.slopfence]\njob = 16\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"unknown key\(s\): job \(supported: .*\bjobs\b"):
+        load_config(tmp_path)
+
+
+def test_main_module_can_be_imported_without_running():
+    """A worker process may import ``slopfence.__main__``; that must not start a run."""
+    entry = importlib.import_module("slopfence.__main__")
+    assert entry.main is main
+
+
+def test_starting_up_stays_cheap():
+    """Worker processes import slopfence.analysis: it must not pull in the registry.
+    And a run that starts no workers must not import the pool machinery."""
+    code = (
+        "import sys, slopfence.analysis\n"
+        "assert 'slopfence.registry' not in sys.modules\n"
+        "import slopfence.cli\n"
+        "assert 'concurrent.futures' not in sys.modules\n"
+        "assert 'multiprocessing' not in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

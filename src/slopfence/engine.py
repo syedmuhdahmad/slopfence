@@ -108,6 +108,7 @@ def run(
     known_packages: Sequence[str] = (),
     check_imports: bool = False,
     private_index: str | None = None,
+    jobs: int = 1,
 ) -> Result:
     """Check ``paths`` and return the findings.
 
@@ -117,6 +118,10 @@ def run(
 
     ``private_index`` says where the environment configures a non-PyPI package
     index (see ``indexes.find_private_index``); SLOP001 then makes no lookups.
+
+    Files are parsed and checked in up to ``jobs`` worker processes when there are
+    enough of them (see ``analysis.analyze_files``). The result does not depend on
+    ``jobs``. Registry lookups always happen in this process.
     """
     rules = set(select) if select else set(RULES)
     rules -= set(ignore)
@@ -151,7 +156,7 @@ def run(
         functions="SLOP030" in rules,
         imports="SLOP001" in rules and check_imports,
     )
-    summaries = analyze_files(tasks, options)
+    summaries = analyze_files(tasks, options, jobs)
     checked, compared_with = summaries[: len(py_files)], summaries[len(py_files) :]
 
     result = Result()
