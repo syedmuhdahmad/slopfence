@@ -104,14 +104,12 @@ def run(
 ) -> Result:
     """Check ``paths`` and return the findings.
 
-    ``private_index`` says where the environment configures a non-PyPI package
-    index (see ``indexes.find_private_index``); SLOP001 then makes no lookups.
-    """
-    """Check the given paths and return the findings.
-
     SLOP001 always checks dependency files. Imports in source code are only looked
     up on PyPI with ``check_imports``, because that sends their names to pypi.org
     and can reveal private package names.
+
+    ``private_index`` says where the environment configures a non-PyPI package
+    index (see ``indexes.find_private_index``); SLOP001 then makes no lookups.
     """
     rules = set(select) if select else set(RULES)
     rules -= set(ignore)
