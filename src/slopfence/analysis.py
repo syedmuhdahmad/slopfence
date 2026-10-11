@@ -3,8 +3,9 @@
 ``analyze_file`` is the unit of work. It parses one file, runs the rules that need
 nothing but that file, and returns a ``FileSummary``: the findings, plus the few
 facts the project-wide rules need (function fingerprints for SLOP030, imports for
-SLOP001). The syntax tree never leaves the function, so memory stays flat however
-big the project is.
+SLOP001). The syntax tree never leaves the function, so no two trees are in memory
+at once. The summaries are kept until the run ends: memory still grows with the
+project, but by a small summary per file and not by a tree per file.
 
 ``analyze_files`` runs it for many files, in this process or in worker processes.
 Workers import this module. Keep it cheap to import, and never import the registry
