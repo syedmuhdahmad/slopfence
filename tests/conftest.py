@@ -28,6 +28,19 @@ class FakeRegistry:
         return normalize(name) in self.existing
 
 
+class FakeBatchRegistry(FakeRegistry):
+    """FakeRegistry that also takes every name up front, like ``PyPIRegistry.prefetch``."""
+
+    def __init__(self, existing: set[str]) -> None:
+        """``batches`` records what each ``prefetch`` call was given."""
+        super().__init__(existing)
+        self.batches: list[list[str]] = []
+
+    def prefetch(self, names) -> None:
+        """Record the batch; the answers still come from ``exists``."""
+        self.batches.append(list(names))
+
+
 INDEX_ENV_VARS = (
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",

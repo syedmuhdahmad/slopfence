@@ -172,6 +172,11 @@ def run(
             index, registry, known_packages=known_packages, private_index=private_index
         )
         checked_deps = {_rel_to(p, root) for p in dep_files}
+        # Imports are only sent to PyPI when the user opts in (they can reveal private
+        # names), and never for files outside the diff.
+        in_scope = [s for s in sources if check_imports and (changed is None or s.rel in changed)]
+        # One batch with every name the two checks below will ask about.
+        checker.prefetch(checked_deps, (name for s in in_scope for name, _, _ in s.imports))
         findings.extend(checker.check_dependencies(only_paths=checked_deps))
         if private_index:
             result.notes.append(
@@ -185,9 +190,6 @@ def run(
                 f"SLOP001 didn't look up imports on PyPI: {files} uses a private package "
                 "index, so unknown imports may be private packages."
             )
-        # Imports are only sent to PyPI when the user opts in (they can reveal private
-        # names), and never for files outside the diff.
-        in_scope = [s for s in sources if check_imports and (changed is None or s.rel in changed)]
         for summary in in_scope:
             findings.extend(checker.check_imports(summary.rel, summary.imports))
 
