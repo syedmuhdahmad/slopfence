@@ -1384,10 +1384,8 @@ def test_pipfile_private_source_and_details(write, check, tmp_path):
 
 
 PIPFILE_TABLE = '[packages]  # slopfence: ignore\nrequests = "*"\n\n'
-POETRY_TABLE = (
-    '[tool.poetry]\nname = "demo"\n\n'
-    '[tool.poetry.dependencies]  # slopfence: ignore\npython = "^3.10"\nrequests = "*"\n\n'
-)
+POETRY_HEAD = '[tool.poetry]\nname = "demo"\n\n'
+POETRY_TABLE = POETRY_HEAD + '[tool.poetry.dependencies]\npython = "^3.10"\nrequests = "*"\n\n'
 # An entry written as a table of its own: (file, what stands above it, its header).
 OWN_TABLES = [
     ("Pipfile", PIPFILE_TABLE, "[packages.ghost-lib]"),
@@ -1422,7 +1420,8 @@ def test_an_entry_that_is_a_table_of_its_own_is_on_its_header_line(
 ):
     """``[packages.ghost-lib]`` is reported on that line, not on the line of
     ``[packages]``, so ``--diff`` keeps it when the entry is new. An ignore comment
-    on the header covers the entry, and one on ``[packages]`` does not."""
+    on the header covers the entry, and one on ``[packages]`` in a ``Pipfile`` does
+    not: no version ever reported the entry there."""
     line = above.count("\n") + 1
     write(name, f'{above}{header}\nversion = "*"\n')
     registry = FakeRegistry({"requests"})
@@ -1434,6 +1433,56 @@ def test_an_entry_that_is_a_table_of_its_own_is_on_its_header_line(
     registry = FakeRegistry({"requests"})
     assert check("SLOP001", registry=registry).findings == []
     assert "ghost-lib" not in registry.queries
+
+
+IGNORED = "  # slopfence: ignore"
+OWN_ENTRY = '[tool.poetry.dependencies.corp-auth]\nversion = "^1.2"\nextras = ["saml"]\n'
+# A Poetry entry that v0.2 reported on another line than its own, with an ignore
+# comment on that line: the file, and the line the entry is reported on today.
+WHERE_V02_REPORTED = {
+    "the header of the table": (
+        f'{POETRY_HEAD}[tool.poetry.dependencies]{IGNORED}\npython = "^3.10"\n\n{OWN_ENTRY}',
+        7,
+    ),
+    "the header, for this rule only": (
+        f'{POETRY_HEAD}[tool.poetry.dependencies]{IGNORED}[SLOP001]\nrequests = "*"\n\n'
+        + OWN_ENTRY,
+        7,
+    ),
+    "the header of a group": (
+        f'{POETRY_HEAD}[tool.poetry.group.dev.dependencies]{IGNORED}\nrequests = "*"\n\n'
+        + OWN_ENTRY.replace("poetry.dep", "poetry.group.dev.dep"),
+        7,
+    ),
+    "the header, above a dotted key": (
+        f'{POETRY_HEAD}[tool.poetry.dependencies]{IGNORED}\ncorp-auth.version = "^1.2"\n',
+        5,
+    ),
+    "line 1 of a file without the table": (f"{IGNORED.strip()}\n{POETRY_HEAD}{OWN_ENTRY}", 5),
+    "the same key in another table": (
+        f'{POETRY_HEAD}[tool.poetry.extras]\ncorp-auth = ["saml"]{IGNORED}\n\n{OWN_ENTRY}',
+        7,
+    ),
+}
+
+
+@pytest.mark.parametrize("where", sorted(WHERE_V02_REPORTED))
+def test_an_ignore_comment_where_v02_reported_a_poetry_entry_still_covers_it(tmp_path, where):
+    """v0.2 reported ``[tool.poetry.dependencies.name]`` and ``name.version = ...`` on
+    the header of the table, so that is where its users put the ignore comment. The
+    entry is reported on its own line now, and the comment on the old line still
+    keeps its name on the machine. Without the comment it is looked up."""
+    text, line = WHERE_V02_REPORTED[where]
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text, encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    assert run([tmp_path], tmp_path, registry, select=["SLOP001"]).findings == []
+    assert "corp-auth" not in registry.queries
+
+    path.write_text(text.replace(IGNORED.strip(), "# checked"), encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("pyproject.toml", line, 1)] and "corp-auth" in registry.queries
 
 
 def test_a_pipfile_entry_with_a_dotted_key_is_on_its_own_line(write, check):

@@ -522,6 +522,8 @@ class _LineFinder:
         # (line, column) of entries already matched, so repeated specs map to
         # successive occurrences and several entries can share one line.
         self.used: set[tuple[int, int]] = set()
+        # The same for the searches that ``key_in_v02`` makes.
+        self._used_by_v02: set[tuple[int, int]] = set()
 
     def _array_range(self, start: int, end: int, key: str) -> tuple[int, int] | None:
         """Lines spanned by `key = [ ... ]` inside a table, using quote-aware bracket counting."""
@@ -549,7 +551,21 @@ class _LineFinder:
             return i, end
         return None
 
-    def _search(self, table: str, pattern: re.Pattern[str], array: str | None = None) -> int:
+    def _search(
+        self,
+        table: str,
+        pattern: re.Pattern[str],
+        array: str | None = None,
+        used: set[tuple[int, int]] | None = None,
+    ) -> int:
+        """The line (1-based) of the first match of ``pattern`` in a table that no
+        earlier search took, or the first line of the table when there is none.
+
+        A table without a header of its own is searched for in the whole file.
+        ``array`` narrows the search to that array of the table. ``used`` holds the
+        matches that are taken: the finder's own, unless another set is given.
+        """
+        used = self.used if used is None else used
         start, end = self.ranges.get(table, (0, len(self.lines) - 1))
         if array is not None and (span := self._array_range(start, end, array)):
             start, end = span
@@ -558,8 +574,8 @@ class _LineFinder:
             if line.lstrip().startswith("#"):  # commented-out entries
                 continue
             for m in pattern.finditer(line):
-                if (i, m.start()) not in self.used:
-                    self.used.add((i, m.start()))
+                if (i, m.start()) not in used:
+                    used.add((i, m.start()))
                     return i + 1
         return start + 1
 
@@ -578,6 +594,17 @@ class _LineFinder:
             return own[0] + 1
         key = re.escape(name)
         return self._search(table, re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]"""))
+
+    def key_in_v02(self, table: str, name: str) -> int:
+        """The line (1-based) on which v0.2 reported the entry ``name`` of a table.
+
+        v0.2 only knew the form ``name = ...``. An entry in another form (a table of
+        its own, a dotted key) it reported on the header of ``table``, and without
+        such a header on the first ``name = ...`` line of the file, or on line 1.
+        That is where a user of v0.2 put the ignore comment for it.
+        """
+        pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
+        return self._search(table, pattern, used=self._used_by_v02)
 
     def suppressed(self, line: int) -> bool:
         """Whether an ignore comment on a line (1-based) covers SLOP001."""
@@ -677,9 +704,12 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
             )
             line = finder.key(table, name)
             validate = not (external or private_index) and is_package_name(name)
-            deps.append(
-                Dependency(name, rel, line, validate, finder.suppressed(line), own_source=external)
+            # A comment on the line where v0.2 reported the entry kept its name on the
+            # machine. It still does, also where the entry is reported on another line.
+            suppressed = finder.suppressed(line) or finder.suppressed(
+                finder.key_in_v02(table, name)
             )
+            deps.append(Dependency(name, rel, line, validate, suppressed, own_source=external))
     return found
 
 
