@@ -914,7 +914,10 @@ def test_diff_run_and_full_run_agree_about_duplicates(tmp_path, ignores):
         (None, "does not exist (create it with --write-baseline)"),
         ("", "is not valid JSON: Expecting value"),
         ("{not json", "is not valid JSON: Expecting property name"),
-        ("[" * 100_000, "is not valid JSON: nested too deeply"),
+        # How Python words this depends on its version; test_deep_nesting_has_its_own_message
+        # pins the wording slopfence adds. The id keeps the test name short: Windows can't
+        # hold a 100,000-character name in the variable pytest sets for the running test.
+        pytest.param("[" * 100_000, "is not valid JSON", id="nested-100000-deep"),
         ("[]", "is not a slopfence baseline file"),
         ('{"findings": []}', "is not a slopfence baseline file"),
         ('{"version": true, "findings": []}', "is not a slopfence baseline file"),
@@ -1012,6 +1015,23 @@ def test_odd_paths_in_a_baseline_never_crash(write, tmp_path, monkeypatch, capsy
 # --- the file that --write-baseline replaces --------------------------------------------
 
 
+def test_deep_nesting_has_its_own_message(write, tmp_path, monkeypatch, capsys):
+    """When Python gives up on brackets nested too deeply, the error says so plainly."""
+
+    def too_deep(text):
+        """Stand in for a JSON reader that runs out of stack."""
+        raise RecursionError("maximum recursion depth exceeded")
+
+    write("app.py", "# I hope this helps!\n")
+    (tmp_path / "base.json").write_text("[[1]]", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(baselinemod.json, "loads", too_deep)
+    assert main([".", "--offline", "--baseline", "base.json"]) == 2
+    assert capsys.readouterr().err == (
+        "slopfence: error: baseline base.json is not valid JSON: nested too deeply\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "content"),
     [
@@ -1020,7 +1040,7 @@ def test_odd_paths_in_a_baseline_never_crash(write, tmp_path, monkeypatch, capsy
         ("package.json", b'{"version": "1.0.0", "findings": []}'),
         ("other.json", b'{"version": 3}'),
         ("latin.txt", b"caf\xe9"),
-        ("deep.json", b"[" * 100_000),
+        pytest.param("deep.json", b"[" * 100_000, id="deep.json"),
     ],
 )
 def test_write_baseline_never_replaces_a_file_that_is_not_a_baseline(
