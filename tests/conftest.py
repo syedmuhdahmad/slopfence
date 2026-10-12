@@ -93,10 +93,18 @@ def not_installed(monkeypatch):
 
 @pytest.fixture
 def write(tmp_path: Path) -> Callable[[str, str], Path]:
+    """A function that writes one file of the project under test, as UTF-8.
+
+    Without a named encoding a file would be written in the encoding of the locale,
+    which on Windows is not UTF-8: slopfence could not read a file that holds a
+    letter outside ASCII.
+    """
+
     def _write(rel: str, content: str) -> Path:
+        """Write ``content`` (dedented) to ``rel`` inside the project and return its path."""
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(content).lstrip("\n"))
+        path.write_text(textwrap.dedent(content).lstrip("\n"), encoding="utf-8")
         return path
 
     return _write
