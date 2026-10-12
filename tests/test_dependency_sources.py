@@ -893,7 +893,7 @@ TOML_LISTS = {
 def test_a_line_separator_does_not_move_a_toml_ignore_comment(tmp_path, check, name, char):
     """In a ``Pipfile`` or ``pyproject.toml`` the entry and its ignore comment are
     found on the same line. Before, a line separator above them moved the comment to
-    the next entry: the ignored name was sent, and the other one never was."""
+    the entry before: the ignored name was sent, and the other one never was."""
     text, line = TOML_LISTS[name]
     (tmp_path / name).write_text(text.format(char=char), encoding="utf-8")
     registry = FakeRegistry({"requests"})
