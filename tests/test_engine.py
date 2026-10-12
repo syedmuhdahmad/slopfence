@@ -63,14 +63,17 @@ def test_report_is_the_same_for_every_hash_seed(tmp_path):
     (cache / "pypi.json").write_text(
         json.dumps({name: [False, 9e12] for name in names}), encoding="utf-8"
     )
+    # The package under test, however this test run found it. It goes in front of what
+    # is there already: on Python 3.10 that may be where tomli comes from.
+    package = str(Path(slopfence.__file__).parents[1])
+    search_path = os.pathsep.join(filter(None, [package, os.environ.get("PYTHONPATH")]))
     reports = set()
     for seed in ("0", "1", "2"):
         env = dict(
             os.environ,
             PYTHONHASHSEED=seed,
             SLOPFENCE_CACHE_DIR=str(tmp_path / "cache"),
-            # The package under test, however this test run found it.
-            PYTHONPATH=str(Path(slopfence.__file__).parents[1]),
+            PYTHONPATH=search_path,
         )
         done = subprocess.run(
             # The machine's own pip settings must not decide whether names are looked up.
@@ -88,7 +91,8 @@ def test_report_is_the_same_for_every_hash_seed(tmp_path):
             capture_output=True,
             encoding="utf-8",
         )
-        assert done.returncode == 1, done.stderr
+        # A process that crashed also ends with status 1. Only a report counts.
+        assert done.returncode == 1 and done.stdout.startswith("{"), done.stderr
         reports.add(done.stdout)
     assert len(reports) == 1
     found = [f["message"].split("'")[1] for f in json.loads(reports.pop())["findings"]]
