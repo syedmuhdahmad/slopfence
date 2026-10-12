@@ -48,6 +48,7 @@ from slopfence.detectors.dependency import (
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
+    text_lines,
 )
 from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
@@ -287,7 +288,7 @@ def toml_comments(text: str) -> list[str]:
     """
     comments: list[str] = []
     multiline: str | None = None
-    for line in text.split("\n"):
+    for line in text_lines(text):
         comment, i = "", 0
         while i < len(line):
             if multiline:
@@ -378,7 +379,7 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     # Directives only count inside real comments, never inside values or URLs.
     if kind is Kind.REQUIREMENTS:
         found = _parse_requirements(text, rel)
-        comments = [requirements_comment(line) for line in text.splitlines()]
+        comments = [requirements_comment(line) for line in text_lines(text)]
     else:
         found = _parse_pyproject(text, rel) if kind is Kind.PYPROJECT else _parse_pipfile(text, rel)
         comments = toml_comments(text)
@@ -425,7 +426,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     line. Neither does a list for another package manager yield anything. The index
     options of the file count in every case.
     """
-    lines = text.splitlines()
+    lines = text_lines(text)
     # With another source than PyPI, a name missing from PyPI may be a private package.
     private_index, links = _requirements_sources(lines)
     if lists_other_packages(PurePosixPath(rel)):
@@ -493,7 +494,7 @@ class _LineFinder:
 
     def __init__(self, text: str) -> None:
         """``text`` is the whole pyproject.toml."""
-        self.lines = text.splitlines()
+        self.lines = text_lines(text)
         self.comments = toml_comments(text)
         self.ranges = _table_ranges(self.lines)
         # (line, column) of entries already matched, so repeated specs map to

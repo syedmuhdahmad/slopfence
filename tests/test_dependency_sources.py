@@ -10,7 +10,13 @@ from pathlib import PurePosixPath
 import pytest
 
 from slopfence.cli import main
-from slopfence.detectors.dependency import Kind, dependency_kind, kind_of, parse_requirement
+from slopfence.detectors.dependency import (
+    Kind,
+    dependency_kind,
+    kind_of,
+    parse_requirement,
+    text_lines,
+)
 from slopfence.detectors.packages import parse_dependency_file
 from slopfence.detectors.setuptools_files import _cfg_lines
 from slopfence.engine import discover_all, run
@@ -819,6 +825,60 @@ def test_a_form_feed_does_not_shift_setup_cfg_lines(tmp_path, check):
         encoding="utf-8",
     )
     assert found(check("SLOP001", registry=FakeRegistry(set()))) == [("setup.cfg", 6, 1)]
+
+
+def test_text_lines_end_at_line_feeds_only():
+    """A form feed, U+0085 and U+2028 are characters of their line, and a carriage
+    return before a line feed is part of the line end. An ordinary text has the
+    lines that ``str.splitlines`` gives, so no line number of such a file moves."""
+    assert text_lines("a\nb\r\nc\x0cd\x85e\u2028f\n") == ["a", "b", "c\x0cd\x85e\u2028f", ""]
+    ordinary = "requests==2.31\n\n# pins\r\n  flask \\\n    --hash=sha256:abc\n"
+    assert text_lines(ordinary) == [*ordinary.splitlines(), ""]
+
+
+# Characters that ``str.splitlines`` ends a line at, and git and editors don't.
+NOT_LINE_ENDS = ["\x0c", "\x0b", "\x1c", "\x85", "\u2028", "\u2029"]
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+@pytest.mark.parametrize("name", ["constraints.txt", "requirements.txt"])
+def test_a_form_feed_or_line_separator_does_not_shift_requirements_lines(
+    tmp_path, check, name, char
+):
+    """The finding of a requirements file is on the line that git counts, whatever
+    characters the lines above it hold."""
+    text = f"# pins{char}\nrequests==2.31\nghost-pin==1.0\n"
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    assert found(check("SLOP001", registry=FakeRegistry({"requests"}))) == [(name, 3, 1)]
+
+
+# The same list in the two TOML files, with a comment line above it that holds {char}.
+TOML_LISTS = {
+    "Pipfile": (
+        '[packages]\n# from the wiki{char}keep sorted\nrequests = "*"\nghost-lib = "*"\n'
+        'ghost-quiet = "*"  # slopfence: ignore\n',
+        4,
+    ),
+    "pyproject.toml": (
+        '[project]\nname = "demo"\n# from the wiki{char}keep sorted\ndependencies = [\n'
+        '    "requests",\n    "ghost-lib",\n    "ghost-quiet",  # slopfence: ignore\n]\n',
+        6,
+    ),
+}
+
+
+# A form feed is not here: TOML takes none, so such a file declares nothing.
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029"])
+@pytest.mark.parametrize("name", sorted(TOML_LISTS))
+def test_a_line_separator_does_not_move_a_toml_ignore_comment(tmp_path, check, name, char):
+    """In a ``Pipfile`` or ``pyproject.toml`` the entry and its ignore comment are
+    found on the same line. Before, a line separator above them moved the comment to
+    the next entry: the ignored name was sent, and the other one never was."""
+    text, line = TOML_LISTS[name]
+    (tmp_path / name).write_text(text.format(char=char), encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [(name, line, 1)]
+    assert sorted(registry.queries) == ["ghost-lib", "requests"]
 
 
 def test_setup_cfg_details(write, tmp_path):

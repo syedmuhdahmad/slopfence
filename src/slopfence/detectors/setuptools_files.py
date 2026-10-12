@@ -22,6 +22,7 @@ from slopfence.detectors.dependency import (
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
+    text_lines,
 )
 from slopfence.indexes import is_public_index
 from slopfence.source import IGNORE_FILE_RE, SourceFile, char_column, walk
@@ -50,14 +51,15 @@ def _cfg_lines(text: str) -> Iterator[tuple[str, str, _ValueLine]]:
 
     Follows ``configparser``: a line indented deeper than its option continues the
     value, and lines starting with ``#`` or ``;`` are comments. Lines end at a line
-    feed and nowhere else, as they do for git and for ``configparser``.
+    feed and nowhere else, as they do for git and for ``configparser`` (see
+    ``dependency.text_lines``).
     """
     # A file with a line before its first section header never gets here:
     # ``configparser`` turns it down first (see ``_cfg_values``).
     section = ""
     option: str | None = None
     key_indent = 0
-    for lineno, raw in enumerate(text.split("\n"), start=1):
+    for lineno, raw in enumerate(text_lines(text), start=1):
         stripped = raw.strip()
         if not stripped or stripped[0] in "#;":
             continue
@@ -110,7 +112,7 @@ def _cfg_key(option: str) -> str:
 def _cfg_comments(text: str) -> list[str]:
     """The comment on each line ("" if none): full-line comments and trailing `` #``."""
     comments = []
-    for raw in text.split("\n"):
+    for raw in text_lines(text):
         stripped = raw.strip()
         comments.append(stripped if stripped.startswith("#") else requirements_comment(raw))
     return comments
@@ -489,7 +491,7 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
     """
     found = DependencyFile(src.rel, Kind.SETUP_PY)
     script = _SetupScript(src.tree, src.nodes)
-    lines = src.text.split("\n")
+    lines = text_lines(src.text)
     comments = {comment.line: comment.text for comment in src.comments}
     seen: set[tuple[int, int, str]] = set()
     for call in script.setup_calls():

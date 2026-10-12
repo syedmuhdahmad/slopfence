@@ -7,6 +7,7 @@
 * ``parse_requirement`` reads the package name out of a requirement string, and
   refuses everything that is not a requirement (URLs, paths, file names, prose).
 * ``is_pip_option`` knows pip's index and links options, also when they are cut short.
+* ``text_lines`` cuts a text into the lines that git and an editor count.
 
 Nothing here reads a file or asks the registry.
 """
@@ -350,6 +351,18 @@ def is_pip_option(word: str, short: str, long: Mapping[str, str]) -> bool:
         return word.startswith(short)
     name = word.partition("=")[0]
     return any(full.startswith(name) and name.startswith(start) for full, start in long.items())
+
+
+def text_lines(text: str) -> list[str]:
+    """The lines of a text, as git and an editor count them.
+
+    A line ends at a line feed and nowhere else. ``str.splitlines`` also ends one at
+    a form feed, U+0085 or U+2028, and every line after such a character then gets a
+    number one too high. A carriage return before the line feed belongs to the line
+    end. Every parser that reports a line number, or matches a comment to a line,
+    takes its lines from here.
+    """
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 def suppresses_slop001(comment: str) -> bool:
