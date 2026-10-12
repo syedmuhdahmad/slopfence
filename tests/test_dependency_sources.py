@@ -1407,12 +1407,8 @@ def test_a_name_used_many_times_is_not_followed_without_end(write, tmp_path):
 
 @pytest.mark.parametrize(
     "expression",
-    [
-        pytest.param('"a" + ' * 100_000 + '"b"', marks=needs_parser_depth_limit),
-        "~" * 20_000 + "1",
-        "lambda: " * 5000 + "1",
-    ],
-    ids=["a sum of 100,000 strings", "20,000 unary operators", "5,000 nested lambdas"],
+    ["~" * 20_000 + "1", "lambda: " * 5000 + "1"],
+    ids=["20,000 unary operators", "5,000 nested lambdas"],
 )
 def test_a_setup_py_too_deep_for_the_parser_does_not_stop_the_run(write, tmp_path, expression):
     """Every setup.py of the project is read for the name it gives the project, also
@@ -1428,6 +1424,22 @@ def test_a_setup_py_too_deep_for_the_parser_does_not_stop_the_run(write, tmp_pat
         result = run([tmp_path], tmp_path, FakeRegistry(set()), select=rules)
         assert found(result) == [("requirements.txt", 1, 1)]
         assert result.parse_errors == ["vendor/generated/setup.py"]
+
+
+@needs_parser_depth_limit
+def test_a_setup_py_with_a_sum_of_100_000_strings_does_not_stop_the_run(write, tmp_path):
+    """Whether Python's parser takes a sum this long depends on its version. Where it
+    gives up, the file is one parse error. Where it returns a tree 100,000 levels
+    deep, the file is read like any other. Either way SLOP001 goes on and the setup.py
+    declares no dependency. (Only SLOP001 runs here: the code-quality rules have a
+    depth limit of their own on such a tree, which is issue #66.)"""
+    text = "from setuptools import setup\nx = " + '"a" + ' * 100_000 + '"b"\n'
+    deep = write("vendor/generated/setup.py", text)
+    write("requirements.txt", "ghost-lib\n")
+    assert parse_dependency_file(deep, tmp_path).dependencies == []
+    result = run([tmp_path], tmp_path, FakeRegistry(set()), select=["SLOP001"])
+    assert found(result) == [("requirements.txt", 1, 1)]
+    assert result.parse_errors in ([], ["vendor/generated/setup.py"])
 
 
 def test_setup_py_is_still_checked_as_python(write, check):

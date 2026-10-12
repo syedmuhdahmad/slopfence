@@ -124,13 +124,8 @@ def test_nodes_are_walked_once_and_shared(write, tmp_path):
 
 @pytest.mark.parametrize(
     "expression",
-    [
-        pytest.param(" + ".join(["1"] * 100_000), marks=needs_parser_depth_limit),
-        "~" * 20_000 + "1",
-        "lambda: " * 5000 + "1",
-        "(" * 5000 + "1" + ")" * 5000,
-    ],
-    ids=["a sum of 100,000 numbers", "20,000 unary operators", "5,000 lambdas", "5,000 brackets"],
+    ["~" * 20_000 + "1", "lambda: " * 5000 + "1", "(" * 5000 + "1" + ")" * 5000],
+    ids=["20,000 unary operators", "5,000 lambdas", "5,000 brackets"],
 )
 def test_text_that_is_too_deep_for_the_parser_is_not_valid_python(write, tmp_path, expression):
     """Python's parser gives up on an expression that is nested thousands deep, with
@@ -139,6 +134,16 @@ def test_text_that_is_too_deep_for_the_parser_is_not_valid_python(write, tmp_pat
     text = f"x = {expression}\n"
     assert parse(text, Path("deep.py"), "deep.py") is None
     assert load(write("deep.py", text), tmp_path) is None
+
+
+@needs_parser_depth_limit
+def test_a_sum_of_100_000_numbers_is_read_or_refused_but_never_raises(write, tmp_path):
+    """Whether Python's parser takes a sum this long depends on its version: some give
+    up with a RecursionError or a MemoryError, newer ones return a tree 100,000 levels
+    deep. ``load`` returns None for the first and a file that can be walked for the
+    second. It never raises."""
+    src = load(write("deep.py", "x = " + " + ".join(["1"] * 100_000) + "\n"), tmp_path)
+    assert src is None or sum(isinstance(node, ast.BinOp) for node in src.nodes) == 99_999
 
 
 def test_a_text_the_tokenizer_turns_down_keeps_its_tree():
