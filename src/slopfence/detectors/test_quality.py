@@ -185,6 +185,7 @@ def check_mock_only_tests(src: SourceFile) -> Iterator[Finding]:
             func.col_offset + 1,
             f"Test '{func.name}' only asserts on its own mocks and never calls real code",
             end_line=func.end_lineno,
+            subject=func.name,
         )
 
 
@@ -282,6 +283,7 @@ def check_trivial_assertions(src: SourceFile) -> Iterator[Finding]:
             first.col_offset + 1,
             f"Test '{func.name}' {detail}",
             end_line=func.end_lineno,
+            subject=func.name,
         )
 
 
@@ -364,4 +366,5 @@ def check_swallowed_assertions(src: SourceFile) -> Iterator[Finding]:
             f"Test '{func.name}' catches assertion failures without re-raising, "
             "so it can never fail",
             end_line=func.end_lineno,
+            subject=func.name,
         )

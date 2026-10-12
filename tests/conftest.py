@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -87,6 +88,23 @@ def check(tmp_path: Path) -> Callable[..., Result]:
         )
 
     return _check
+
+
+def pyproject(root: Path, body: str) -> None:
+    """Write the pyproject.toml of a project named "demo". ``body`` is its slopfence part."""
+    (root / "pyproject.toml").write_text("[project]\nname = 'demo'\n\n" + body, encoding="utf-8")
+
+
+def git(cwd: Path, *args: str) -> None:
+    """Run a git command in ``cwd``. Fails the test when git does."""
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def git_init(cwd: Path) -> None:
+    """Make ``cwd`` a git repository on the branch main, with a name to commit under."""
+    git(cwd, "init", "-q", "-b", "main")
+    git(cwd, "config", "user.email", "t@example.com")
+    git(cwd, "config", "user.name", "t")
 
 
 def rule_lines(result: Result, rule: str) -> list[int]:

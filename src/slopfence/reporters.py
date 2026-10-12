@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 from slopfence import __version__
 from slopfence.engine import Result
-from slopfence.models import RULES, Severity
+from slopfence.models import RULES, Severity, plural
 
 _SEVERITY_ORDER = [Severity.HIGH, Severity.MEDIUM, Severity.LOW]
 _SARIF_LEVEL = {Severity.HIGH: "error", Severity.MEDIUM: "warning", Severity.LOW: "note"}
@@ -33,11 +33,20 @@ def text(result: Result, color: bool = False, strict: bool = False) -> str:
         out.append("")
 
     counts = Counter(f.severity for f in result.findings)
+    hidden = len(result.baselined)
     if result.findings:
         parts = [paint(f"{counts[s]} {s.value}", _COLOR[s]) for s in _SEVERITY_ORDER if counts[s]]
-        total = len(result.findings)
-        summary = paint(f"{total} issue{'s' if total != 1 else ''}", _BOLD)
-        out.append(f"{summary} ({', '.join(parts)})")
+        summary = paint(plural(len(result.findings), "issue"), _BOLD)
+        more = f"; {hidden} more hidden by the baseline" if hidden else ""
+        out.append(f"{summary} ({', '.join(parts)}){more}")
+    elif hidden:
+        out.append(
+            paint(
+                f"No new issues found in {result.files_checked} files; "
+                f"{hidden} hidden by the baseline.",
+                _GREEN,
+            )
+        )
     else:
         out.append(paint(f"No issues found in {result.files_checked} files.", _GREEN))
     label = "error" if strict else "warning"
@@ -48,7 +57,7 @@ def text(result: Result, color: bool = False, strict: bool = False) -> str:
 
 
 def as_json(result: Result) -> str:
-    """Machine-readable report with findings, parse errors and notes."""
+    """Machine-readable report: findings, how many the baseline hid, parse errors, notes."""
     return json.dumps(
         {
             "version": __version__,
@@ -65,6 +74,7 @@ def as_json(result: Result) -> str:
                 }
                 for f in result.findings
             ],
+            "baselined": len(result.baselined),
             "parse_errors": result.parse_errors,
             "notes": result.notes,
         },
@@ -73,14 +83,21 @@ def as_json(result: Result) -> str:
 
 
 def sarif(result: Result, strict: bool = False) -> str:
-    """SARIF 2.1.0 report; parse errors and notes become tool notifications."""
+    """SARIF 2.1.0 report; parse errors and notes become tool notifications.
+
+    Findings that the baseline hid are left out, like in the other reports. A
+    notification says how many there were.
+    """
     rules = [
         {
             "id": rule.id,
             "name": rule.name,
             "shortDescription": {"text": rule.summary},
             "helpUri": "https://github.com/syedmuhdahmad/slopfence#planned-detectors",
-            "defaultConfiguration": {"level": _SARIF_LEVEL[rule.severity]},
+            # The severity this run used: the config can give a rule another one.
+            "defaultConfiguration": {
+                "level": _SARIF_LEVEL[result.severities.get(rule.id, rule.severity)]
+            },
         }
         for rule in RULES.values()
     ]
@@ -105,6 +122,9 @@ def sarif(result: Result, strict: bool = False) -> str:
         }
         for f in result.findings
     ]
+    notes = list(result.notes)
+    if result.baselined:
+        notes.append(f"{plural(len(result.baselined), 'finding')} hidden by the baseline")
     doc = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -141,7 +161,7 @@ def sarif(result: Result, strict: bool = False) -> str:
                             }
                             for path in result.parse_errors
                         ]
-                        + [{"level": "note", "message": {"text": note}} for note in result.notes],
+                        + [{"level": "note", "message": {"text": note}} for note in notes],
                     }
                 ],
                 "results": results,

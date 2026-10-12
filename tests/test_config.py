@@ -5,12 +5,9 @@ import pytest
 from slopfence.cli import main
 from slopfence.config import ConfigError, is_excluded, load_config
 from tests.conftest import FakeRegistry, rule_lines
+from tests.conftest import pyproject as _pyproject
 
 SLOPPY = "# In a real implementation, retry\n# I hope this helps!\n"
-
-
-def _pyproject(tmp_path, body):
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n\n" + body)
 
 
 def _rules(capsys):

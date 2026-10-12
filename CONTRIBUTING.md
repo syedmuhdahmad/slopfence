@@ -87,8 +87,9 @@ The demo project is created at record time by `docs/demo/make-project.sh`, so no
 
 1. Add the rule to `RULES` in `src/slopfence/models.py`.
 2. Write the detector in `src/slopfence/detectors/` and register it in `detectors/__init__.py`.
-3. Add tests with **both** flagged and not-flagged cases. Real-world code that must stay quiet is the most valuable test.
-4. Run it against a large codebase (for example your Python install's standard library) and check for false positives before opening the pull request.
+3. Give each `Finding` a `subject`: what it is about (a package, function or test name, or the text of the flagged comment). Baselines match findings on it, so it must not hold a line number or another file's location. Add one finding of your rule to the `project` fixture in `tests/test_baseline.py`, its subject to `SUBJECTS`, and its row to the list in `test_baseline_file_is_sorted_stable_and_ascii`. A test fails until you do. No other test there counts the findings by hand. Never change the subject of an existing rule without raising `BASELINE_VERSION` in `baseline.py`.
+4. Add tests with **both** flagged and not-flagged cases. Real-world code that must stay quiet is the most valuable test.
+5. Run it against a large codebase (for example your Python install's standard library) and check for false positives before opening the pull request.
 
 Per-file detectors run in worker processes. Write a detector as a plain function of the `SourceFile`: no global state, no network. To visit every node, loop over `src.nodes` instead of calling `ast.walk(src.tree)`. The tree is then walked only once per file.
 

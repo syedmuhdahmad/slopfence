@@ -1,10 +1,10 @@
 import json
-import subprocess
 
 import pytest
 
 from slopfence import diff as diffmod
 from slopfence.cli import main
+from tests.conftest import git as _git
 
 SLOPPY = """\
 def charge(card):
@@ -77,10 +77,6 @@ diff --git a/old.py b/old.py
     assert diffmod.touches(changed, "app.py", 1, 2)
     assert not diffmod.touches(changed, "app.py", 5, 13)
     assert not diffmod.touches(changed, "other.py", 1, None)
-
-
-def _git(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
 def test_diff_mode_only_reports_changed_lines(tmp_path, capsys, monkeypatch):

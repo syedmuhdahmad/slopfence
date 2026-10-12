@@ -29,7 +29,8 @@ In `tests/`, using the `write` and `check` fixtures:
 
 - cases that SHOULD be flagged, including the exact message for one of them;
 - every look-alike case from your "never flag" list;
-- an ignore comment, and a test file or example file if the rule skips those.
+- an ignore comment, and a test file or example file if the rule skips those;
+- one finding of the rule in the `project` fixture of `tests/test_baseline.py`, with its subject in `SUBJECTS` (a test fails until you do).
 
 Run them and see them fail for the right reason.
 
@@ -39,6 +40,7 @@ Run them and see them fail for the right reason.
 - Write the detector in `src/slopfence/detectors/` and register it in `detectors/__init__.py`.
 - Keep it pure and conservative: when a case is unclear, don't flag it.
 - The message says what is wrong and what to do, and names the thing involved.
+- Every `Finding` sets `subject=`: the name or text the finding is about, never a line number. The baseline matches on it.
 
 ## 5. Measure on real code
 

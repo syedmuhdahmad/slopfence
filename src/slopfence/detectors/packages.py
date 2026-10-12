@@ -59,6 +59,10 @@ class Dependency:
 
 
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock", "Pipfile"}
+# The rules whose findings depend on answers from PyPI. A run that got no answer finds
+# nothing for them, and that must never be read as "fixed". SLOP002 (#39) is named
+# before it exists, so that the two rules can never get two lists.
+PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
 
 
 @dataclass
@@ -430,6 +434,8 @@ class PackageChecker:
         self._missing: dict[str, bool] = {}
         # Import name -> the names to ask PyPI about ([] when it needs no lookup).
         self._candidates: dict[str, list[str]] = {}
+        # Whether the registry had no answer for a name it was asked about.
+        self._unanswered = False
 
     @property
     def imports_may_be_private(self) -> bool:
@@ -437,10 +443,18 @@ class PackageChecker:
         could be private packages and must not be sent to PyPI."""
         return bool(self.private_index or self.index.private_index_files)
 
-    def _lookup_dependencies(self, only_paths: set[str] | None) -> Iterator[Dependency]:
-        """The declared dependencies that are looked up on PyPI."""
-        if self.private_index:
-            return
+    @property
+    def _asks_nobody(self) -> bool:
+        """Whether this run can't ask PyPI about anything: it is offline, or the
+        environment configures a private index."""
+        return bool(self.private_index) or isinstance(self.registry, OfflineRegistry)
+
+    def _public_dependencies(self, only_paths: set[str] | None) -> Iterator[Dependency]:
+        """The declared dependencies that PyPI can be asked about.
+
+        Not the ones from a URL, a path or a private index, not the ones with an
+        ignore comment, and not the known packages.
+        """
         for dep in self.index.dependencies:
             if only_paths is not None and dep.path not in only_paths:
                 continue
@@ -448,13 +462,17 @@ class PackageChecker:
                 continue
             yield dep
 
+    def _lookup_dependencies(self, only_paths: set[str] | None) -> Iterator[Dependency]:
+        """The declared dependencies that are looked up on PyPI."""
+        return iter(()) if self.private_index else self._public_dependencies(only_paths)
+
     def _lookup_names(self, name: str) -> list[str]:
         """The names to ask PyPI about for ``import name``: none if it needs no lookup.
 
         Every import name that reaches the registry comes from here, whether it is
         sent ahead in the batch or asked about by ``check_imports``.
         """
-        if isinstance(self.registry, OfflineRegistry) or self.imports_may_be_private:
+        if self._asks_nobody or self.index.private_index_files:
             return []
         if name not in self._candidates:
             # Sorted, so that requests go out in the same order on every run.
@@ -478,25 +496,59 @@ class PackageChecker:
         if names:
             self.registry.prefetch(names)
 
+    def _exists(self, name: str) -> bool | None:
+        """What the registry says about ``name``. Remembers when it could not say."""
+        found = self.registry.exists(name)
+        if found is None:
+            self._unanswered = True
+        return found
+
+    def lookups_unanswered(self, only_paths: set[str], imports: Iterable[str]) -> bool:
+        """Whether this run may have missed findings because PyPI gave no answer.
+
+        That is so when a name was asked about and the registry could not say: the run
+        is offline, PyPI could not be reached, or it sent back something unexpected.
+        It is also so when nobody was asked although there was a name to ask about.
+        A name that is never looked up (a known package, the standard library, the
+        project's own modules, anything declared) leaves nothing open.
+
+        ``only_paths`` and ``imports`` are what the two checks were given: the
+        dependency files of the run, and the modules its files import. Whether a
+        module is installed is not looked at: an offline run has no reason to, and on
+        another machine it may not be.
+        """
+        if self._unanswered or not self._asks_nobody:
+            return self._unanswered
+        # Offline, every dependency was still put to the registry, which had no answer:
+        # that is recorded already. With a private index, none was.
+        if self.private_index and any(self._public_dependencies(only_paths)):
+            return True
+        # A project whose own files use a private index never has its imports looked up.
+        return not self.index.private_index_files and any(
+            not self._is_provided(name) for name in imports
+        )
+
     def check_dependencies(self, only_paths: set[str] | None = None) -> Iterator[Finding]:
         """Report declared dependencies that don't exist on PyPI."""
         for dep in self._lookup_dependencies(only_paths):
-            if self.registry.exists(dep.name) is False:
+            if self._exists(dep.name) is False:
                 yield Finding(
                     "SLOP001",
                     dep.path,
                     dep.line,
                     1,
                     f"Dependency '{dep.name}' does not exist on PyPI (possible hallucination)",
+                    subject=normalize(dep.name),
                 )
 
     def _is_known(self, name: str) -> bool:
         key = normalize(name)
         return any(fnmatch.fnmatchcase(key, pattern) for pattern in self._known)
 
-    def _should_lookup(self, name: str) -> bool:
-        """Whether an import needs a PyPI lookup: nothing local, installed or declared has it."""
-        return not (
+    def _is_provided(self, name: str) -> bool:
+        """Whether the module comes from something the project itself names: a known
+        package, Python, the project's own code, or a declared or locked package."""
+        return (
             self._is_known(name)
             or name in sys.stdlib_module_names
             or name == "__future__"
@@ -504,13 +556,16 @@ class PackageChecker:
             or name in self.index.local_modules
             or name in IMPORT_NAMES
             or any(provides(dist, name) for dist in self._provided_by)
-            or _is_installed(name, self._installed)
         )
+
+    def _should_lookup(self, name: str) -> bool:
+        """Whether an import needs a PyPI lookup: nothing local, installed or declared has it."""
+        return not (self._is_provided(name) or _is_installed(name, self._installed))
 
     def _is_missing(self, name: str) -> bool:
         """Cached per name; every import occurrence is still reported separately."""
         if name not in self._missing:
-            answers = [self.registry.exists(c) for c in self._lookup_names(name)]
+            answers = [self._exists(c) for c in self._lookup_names(name)]
             self._missing[name] = bool(answers) and all(a is False for a in answers)
         return self._missing[name]
 
@@ -529,4 +584,5 @@ class PackageChecker:
                     col,
                     f"Import '{name}' is not installed, not declared, and no package with "
                     "that name exists on PyPI (possible hallucination)",
+                    subject=name,
                 )

@@ -84,6 +84,11 @@ RULES: dict[str, Rule] = {
 }
 
 
+def plural(count: int, noun: str) -> str:
+    """The count with its noun, in the singular for one: "1 finding", "3 findings"."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 @dataclass(frozen=True)
 class Finding:
     rule: str
@@ -93,7 +98,19 @@ class Finding:
     message: str
     # Last line of the flagged construct, used by --diff to match changed functions.
     end_line: int | None = None
+    # What the finding is about: a package, function or test name, or the text of the
+    # flagged comment. Baselines match findings on it, so it must stay the same when
+    # the code moves: no line number, no other file's location. Every rule sets it.
+    subject: str | None = None
+    # Set by the engine when the config gives this rule another severity.
+    severity_override: Severity | None = None
+    # SLOP030 with --diff only: (path, subject) of a copy of this function whose
+    # baseline entry also stands for this finding. A full scan never reports the first
+    # copy of a group of identical functions, so that copy has no entry of its own
+    # (see ``baseline.match``).
+    peer: tuple[str, str] | None = None
 
     @property
     def severity(self) -> Severity:
-        return RULES[self.rule].severity
+        """The severity the config sets for the finding's rule, or else the rule's own."""
+        return self.severity_override or RULES[self.rule].severity
