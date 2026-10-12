@@ -354,3 +354,33 @@ def labels(value):
     assert check("SLOP030").findings == []
     write("c.py", two_constants.replace("labels", "captions"))  # a real copy is still found
     assert rule_lines(check("SLOP030"), "SLOP030") == [1]
+
+
+def test_first_copy_is_the_same_whatever_paths_are_checked(write, tmp_path):
+    """Checking one folder reports the same duplicates in it as checking everything.
+
+    The files of the checked paths are read first. If that order picked "the first
+    copy", one copy in the folder would go unreported.
+    """
+    for rel in ["lib/a.py", "svc/b.py", "svc/c.py", "svc/d.py", "svc/e.py"]:
+        write(rel, FORMAT_DATE)
+    everything = run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"])
+    folder = run([tmp_path / "svc"], tmp_path, OfflineRegistry(), select=["SLOP030"])
+    assert [f.path for f in folder.findings] == ["svc/b.py", "svc/c.py", "svc/d.py", "svc/e.py"]
+    assert folder.findings == everything.findings
+    assert all("'format_date' in lib/a.py:1" in m for m in messages(folder))
+    one_file = run([tmp_path / "svc" / "b.py"], tmp_path, OfflineRegistry(), select=["SLOP030"])
+    assert one_file.findings == everything.findings[:1]
+
+
+def test_one_order_decides_the_first_copy(write, check):
+    """Four copies give three findings, also where files and path texts sort differently.
+
+    Files are found in the order of their folders ("a/" before "a-b/"), while "the
+    first copy" is the smallest path text ("a-b/" before "a/").
+    """
+    for rel in ["a/b.py", "a/d.py", "a/e.py", "a-b/c.py"]:
+        write(rel, FORMAT_DATE)
+    result = check("SLOP030")
+    assert [f.path for f in result.findings] == ["a/b.py", "a/d.py", "a/e.py"]
+    assert all("'format_date' in a-b/c.py:1" in m for m in messages(result))

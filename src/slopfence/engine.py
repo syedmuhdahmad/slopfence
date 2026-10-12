@@ -240,10 +240,16 @@ def run(
             findings.extend(checker.check_imports(summary.rel, summary.imports))
 
     if "SLOP030" in rules:
-        # Checked files first, then the rest of the project: the order decides which
-        # copy a duplicate points at.
-        functions = [f for s in (*sources, *compared_with) for f in s.functions]
-        findings.extend(check_duplicates(functions, {s.rel for s in sources}, changed))
+        project_files = (*sources, *compared_with)
+        findings.extend(
+            check_duplicates(
+                [f for s in project_files for f in s.functions],
+                {s.rel for s in sources},
+                changed,
+                # A copy of code from a file where SLOP030 is off is still reported.
+                ignored={s.rel for s in project_files if switched_off("SLOP030", s.rel)},
+            )
+        )
 
     # The filters, always in this order: ignore comments, per-file ignores, severities
     # from the config (they only change a label), then --diff.

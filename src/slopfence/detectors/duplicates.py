@@ -35,7 +35,7 @@ import difflib
 import itertools
 import zlib
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 
 from slopfence.diff import ChangedLines, touches
@@ -302,22 +302,37 @@ def check_duplicates(
     functions: list[Function],
     checked: set[str],
     changed: ChangedLines | None = None,
+    *,
+    ignored: Collection[str] = (),
 ) -> Iterator[Finding]:
     """SLOP030 for functions in ``checked`` files, compared with all ``functions``.
 
-    ``functions`` are those of the whole project (see ``index_functions``), the ones
-    of the checked files first. The order matters: a function with many identical
-    copies is only linked to the first two in this list.
+    ``functions`` are those of the whole project (see ``index_functions``), in any
+    order.
 
     In a full scan, identical copies are reported, each except the first (by path
     and line) pointing at the first. With ``changed``, every changed function that is
     identical or near-identical to another one is reported, pointing at an unchanged
     copy where possible, so a new copy is caught even when it sorts first.
+
+    ``ignored`` are the files where SLOP030 is switched off (``per-file-ignores``).
+    They come before every other file. So a copy of their code somewhere else is
+    never "the first copy", and it is always reported.
     """
 
-    def order(k: int) -> tuple[str, int]:
+    def position(func: Function) -> tuple[bool, str, int]:
+        """Sort key: files where SLOP030 is switched off first, then by path and line."""
+        return func.path not in ignored, func.path, func.line
+
+    # One order decides everything: which copies find_duplicates links (a function
+    # with many identical copies is only linked to the first two), which copy is "the
+    # first" and which one a message points at. The caller's order can't be used: it
+    # changes with the paths that are checked.
+    functions = sorted(functions, key=position)
+
+    def order(k: int) -> tuple[bool, str, int]:
         """Sort key: where the function is."""
-        return functions[k].path, functions[k].line
+        return position(functions[k])
 
     def is_changed(k: int) -> bool:
         """Whether the function overlaps lines changed in the diff."""

@@ -13,6 +13,13 @@ from tests.conftest import FakeBatchRegistry
 
 PLACEHOLDER = "# In a real implementation, retry\n"  # SLOP010, medium
 CHAT = "# I hope this helps!\n"  # SLOP051, medium
+HELPER = """
+def {name}(value, fmt="%Y"):
+    if value is None:
+        return ""
+    text = value.strftime(fmt)
+    return text.strip()
+"""
 # SLOP040, low
 SWALLOW = """
 def load(path):
@@ -199,6 +206,45 @@ def test_dependencies_of_an_ignored_file_still_count_as_declared(write, check):
     # corp_auth_zz is provided by a declared dependency, so only the other import is asked.
     assert [(f.path, f.line) for f in result.findings] == [("app.py", 2)]
     assert "corp" not in " ".join(registry.queries + registry.batches[0])
+
+
+@pytest.mark.parametrize(
+    ("ignored", "new"),
+    [("legacy", "src"), ("vendor", "app"), ("third_party", "core"), ("scripts", "pkg")],
+)
+def test_slop030_is_off_for_functions_in_matching_files(write, check, ignored, new):
+    """A copy inside the ignored folder is not reported; code that copies from it is.
+
+    Whichever folder sorts first: a file where SLOP030 is off never holds the copy
+    that is reported, and it never makes a copy elsewhere "the first one".
+    """
+    write(f"{ignored}/dates.py", HELPER.format(name="format_date"))
+    write(f"{ignored}/old_copy.py", HELPER.format(name="fmt_date"))
+    write(f"{new}/new_copy.py", HELPER.format(name="date_formatter"))
+    result = check("SLOP030", per_file_ignores={f"{ignored}/": ["SLOP030"]})
+    assert [(f.path, f.rule) for f in result.findings] == [(f"{new}/new_copy.py", "SLOP030")]
+    assert f"'format_date' in {ignored}/dates.py:1" in result.findings[0].message
+
+
+def test_every_copy_of_ignored_code_is_reported(write, check):
+    """Three copies of a vendored helper: all three are reported, each pointing at it."""
+    for rel, name in [("app/x.py", "fx"), ("app/y.py", "fy"), ("app/z.py", "fz")]:
+        write(rel, HELPER.format(name=name))
+    write("vendor/a.py", HELPER.format(name="fa"))
+    result = check("SLOP030", per_file_ignores={"vendor/": ["SLOP030"]})
+    assert [f.path for f in result.findings] == ["app/x.py", "app/y.py", "app/z.py"]
+    assert all("'fa' in vendor/a.py:1" in f.message for f in result.findings)
+    # Without the per-file ignore, the first copy by path is the one left out.
+    assert [f.path for f in check("SLOP030").findings] == ["app/y.py", "app/z.py", "vendor/a.py"]
+
+
+def test_slop030_ignore_does_not_hide_copies_among_other_files(write, check):
+    """Two copies outside the ignored folder, none inside: reported as usual."""
+    write("app/x.py", HELPER.format(name="fx"))
+    write("app/y.py", HELPER.format(name="fy"))
+    write("vendor/other.py", "def unrelated():\n    return 1\n")
+    result = check("SLOP030", per_file_ignores={"vendor/": ["SLOP030"]})
+    assert [f.path for f in result.findings] == ["app/y.py"]
 
 
 # --- severity: the config ---------------------------------------------------------------
