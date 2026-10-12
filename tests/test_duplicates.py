@@ -1,13 +1,13 @@
 """SLOP030: near-duplicate functions (#11)."""
 
-import subprocess
+from functools import partial
 
 from slopfence import diff as diffmod
 from slopfence.detectors.duplicates import TOKEN_SEP, check_duplicates, index_functions
 from slopfence.engine import run
 from slopfence.registry import OfflineRegistry
 from slopfence.source import load
-from tests.conftest import rule_lines
+from tests.conftest import git, git_init, rule_lines
 
 FORMAT_DATE = '''
 def format_date(value, fmt="%Y-%m-%d"):
@@ -73,14 +73,8 @@ def test_renamed_copy_is_identical(write, check):
 def git_project(tmp_path):
     """A git repo in tmp_path; returns a helper that runs git in it."""
 
-    def git(*args):
-        """Run git in the test project."""
-        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
-
-    git("init", "-q", "-b", "main")
-    git("config", "user.email", "t@example.com")
-    git("config", "user.name", "t")
-    return git
+    git_init(tmp_path)
+    return partial(git, tmp_path)
 
 
 def test_near_duplicate_reported_in_diff_mode(write, tmp_path):

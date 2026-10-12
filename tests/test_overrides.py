@@ -1,7 +1,6 @@
 """Per-file ignores and per-rule severity overrides (#52)."""
 
 import json
-import subprocess
 
 import pytest
 
@@ -9,7 +8,7 @@ from slopfence import reporters
 from slopfence.cli import main
 from slopfence.config import ConfigError, ignored_rules, load_config
 from slopfence.models import RULES, Finding, Severity
-from tests.conftest import FakeBatchRegistry
+from tests.conftest import FakeBatchRegistry, git, pyproject
 
 PLACEHOLDER = "# In a real implementation, retry\n"  # SLOP010, medium
 CHAT = "# I hope this helps!\n"  # SLOP051, medium
@@ -28,12 +27,6 @@ def load(path):
     except Exception:
         pass
 """
-
-
-def pyproject(tmp_path, body):
-    """Write a pyproject.toml whose slopfence part is ``body``."""
-    text = "[project]\nname = 'demo'\n\n" + body
-    (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
 
 
 def reported(capsys, *args):
@@ -441,7 +434,7 @@ def test_list_rules_does_not_need_the_paths_to_exist(tmp_path, monkeypatch, caps
     """The listing checks no file, so a path that isn't there is no error (as in v0.2)."""
     pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "medium"\n')
     (tmp_path / "src").mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    git(tmp_path, "init", "-q")
     monkeypatch.chdir(tmp_path / "src")
     assert main(["no-such-folder/deeper/x.py", "--list-rules"]) == 0
     # The project is found from the nearest folder that exists: here, the repository

@@ -5,7 +5,6 @@ import difflib
 import json
 import os
 import random
-import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from slopfence.config import ignored_rules, load_config
 from slopfence.engine import run
 from slopfence.models import RULES, Finding, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
-from tests.conftest import FakeRegistry
+from tests.conftest import FakeRegistry, git, git_init
 
 APP = '''\
 import os
@@ -154,16 +153,9 @@ def edit(path, old, new):
     path.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def git(cwd, *args):
-    """Run a git command in ``cwd``."""
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
 def commit_all(cwd):
     """Make ``cwd`` a git repository with everything in it committed on main."""
-    git(cwd, "init", "-q", "-b", "main")
-    git(cwd, "config", "user.email", "t@example.com")
-    git(cwd, "config", "user.name", "t")
+    git_init(cwd)
     (cwd / ".gitignore").write_text("cache/\n", encoding="utf-8")
     git(cwd, "add", ".")
     git(cwd, "commit", "-q", "-m", "init")
