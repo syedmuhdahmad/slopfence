@@ -102,7 +102,6 @@ class SourceFile:
     text: str
     tree: ast.Module
     comments: list[TextSpan] = field(default_factory=list)
-    # line -> rule IDs to ignore on that line; None means every rule.
     # The rules that an ignore comment switches off, by line (see ``line_ignores``).
     ignores: dict[int, frozenset[str]] = field(default_factory=dict)
     ignore_file: bool = False

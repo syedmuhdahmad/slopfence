@@ -10,6 +10,7 @@ from slopfence import cli
 from slopfence.baseline import Baseline, key_of
 from slopfence.cli import main
 from slopfence.config import ConfigError, load_config, selected_rules, slop002_has_no_lookups
+from slopfence.detectors.notebooks import MAX_BYTES
 from slopfence.detectors.packages import PACKAGE_RULES, may_look_up
 from slopfence.detectors.squatting import NEW, QUARANTINED, SINGLE_RELEASE, assess
 from slopfence.engine import SLOP002_NEEDS_SLOP001, run
@@ -899,6 +900,152 @@ def test_one_request_per_package_and_one_finding_per_line(write, tmp_path, monke
         ("SLOP002", "requirements.txt", 2),
     ]
     assert asked == ["brand-new-lib"]
+
+
+# --- The files and lines that SLOP001 reads since #64 --------------------------------------
+
+
+def test_ignore_comment_at_the_end_of_a_hashed_pin_in_a_file_with_other_line_ends(tmp_path, check):
+    """Lines are counted as git counts them, and one line of the file can hold two for
+    pip (a form feed). A comment at the end of a requirement that goes on still covers
+    all of it, and a comment on a line of the file covers everything on that line."""
+    digest = "--hash=sha256:" + "a" * 64
+    text = (
+        f"quiet-new==1.0 \\\r\n    {digest} \\\r\n    {digest}  # slopfence: ignore[SLOP002]\r\n"
+        f"loud-new==1.0 \\\r\n    {digest}\r\n"
+        "first-new==1.0\x0csecond-new==1.0  # slopfence: ignore[SLOP002]\r\n"
+        f"hidden-new==1.0 \\\r\n    {digest}  # slopfence: ignore[SLOP001]\r\n"
+        "last-new==1.0\r\n"
+    )
+    (tmp_path / "requirements.txt").write_bytes(text.encode())
+    registry = pypi("quiet-new", "loud-new", "first-new", "second-new", "hidden-new", "last-new")
+    result = check(registry=registry, now=NOW)
+    assert findings(result) == [
+        ("SLOP002", "requirements.txt", 4),
+        ("SLOP002", "requirements.txt", 9),
+    ]
+    # A comment that covers SLOP001 keeps the name on the machine, wherever it counts from.
+    assert registry.queries == ["quiet-new", "loud-new", "first-new", "second-new", "last-new"]
+
+
+def test_ignore_comment_where_v02_reported_a_poetry_entry_names_its_rules(tmp_path, check):
+    """A Poetry entry that is a table of its own is reported on its header, and a
+    comment on the line where v0.2 reported it still counts. It switches off the rules
+    it names, like a comment on the entry's own line, and the two add up."""
+
+    def scan(on_table: str, on_entry: str = ""):
+        """The findings and the lookups with these comments on the two headers."""
+        text = (
+            f'[tool.poetry.dependencies]{on_table}\nplain-new = "*"\n\n'
+            f'[tool.poetry.dependencies.table-new]{on_entry}\nversion = "*"\n'
+        )
+        (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+        registry = pypi("plain-new", "table-new")
+        return findings(check(registry=registry, now=NOW)), registry.queries
+
+    plain, table = (("SLOP002", "pyproject.toml", line) for line in (2, 4))
+    assert scan("") == ([plain, table], ["plain-new", "table-new"])
+    assert scan("  # slopfence: ignore[SLOP002]") == ([plain], ["plain-new", "table-new"])
+    assert scan("  # slopfence: ignore[SLOP001]") == ([plain], ["plain-new"])
+    assert scan("  # slopfence: ignore") == ([plain], ["plain-new"])
+    assert scan("  # slopfence: ignore[SLOP010]") == ([plain, table], ["plain-new", "table-new"])
+    assert scan("  # slopfence: ignore[SLOP001]", "  # slopfence: ignore[SLOP002]") == (
+        [plain],
+        ["plain-new"],
+    )
+    assert scan("  # slopfence: ignore[SLOP010]", "  # slopfence: ignore[SLOP002]") == (
+        [plain],
+        ["plain-new", "table-new"],
+    )
+
+
+def test_notes_about_files_that_were_held_back_name_the_package_rules(write, tmp_path, check):
+    """The notes that came with #64 name the rules that ran, like the older ones: for a
+    file that can't be read and may set an index, and for a notebook that is too large."""
+    write("pyproject.toml", "[tool.poetry\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    brand-new-lib\n")
+    big = notebook(["%pip install other-new-lib\n"])
+    big["cells"][1]["outputs"] = [{"output_type": "display_data", "data": "x" * MAX_BYTES}]
+    (tmp_path / "big.ipynb").write_text(json.dumps(big), encoding="utf-8")
+    why = (
+        "pyproject.toml could not be read and may set a private package index, so names "
+        "missing from PyPI may be private packages. Repair or exclude that file, or set "
+        "detect-private-index = false."
+    )
+    for rules, named in (
+        ((), "SLOP001 and SLOP002"),
+        (("SLOP001",), "SLOP001"),
+        (("SLOP002",), "SLOP002"),
+    ):
+        registry = pypi("brand-new-lib", "other-new-lib")
+        result = check(*rules, registry=registry, now=NOW)
+        assert result.findings == [] and registry.queries == []
+        assert result.notes == [
+            f"{named} didn't look up the dependencies in setup.cfg: {why}",
+            f"{named} didn't read big.ipynb: a notebook larger than 20 MB is skipped.",
+        ]
+
+
+def test_names_that_slop001_keeps_on_the_machine_stay_there_for_slop002(write, tmp_path):
+    """SLOP002 reads SLOP001's answers, so it asks about nothing that #64 holds back: a
+    fixture package under a test folder, a document that is named like a requirements
+    file, a name that a notebook takes from git, or the imports of a notebook that
+    fetches code. The same names in other places are asked about."""
+    fixture = "from setuptools import setup\nsetup(install_requires=['fixture-new'])\n"
+    write("tests/fixtures/pkg/setup.py", fixture)
+    write("docs/requirements.txt", "Requirements\n============\n\ndoc-new\n")
+    write("train.ipynb", jupyter(["%pip install git+https://x.example/corp.git#egg=git-new\n"]))
+    write("fetch.ipynb", jupyter(["!git clone https://x.example/tools.git\nimport cloned_new\n"]))
+    write("requirements.txt", "git-new\nplain-new\n")
+    write("app.py", "import seen_new\n")
+    names = ("fixture-new", "doc-new", "git-new", "cloned-new", "plain-new", "seen-new")
+    for select in (None, ["SLOP001"], ["SLOP002"]):
+        registry = pypi(*names)
+        result = run([tmp_path], tmp_path, registry, select=select, check_imports=True, now=NOW)
+        assert registry.queries == ["plain-new", "seen-new", "seen_new"]
+        assert findings(result) == (
+            []
+            if select == ["SLOP001"]
+            else [("SLOP002", "app.py", 1), ("SLOP002", "requirements.txt", 2)]
+        )
+    # The look-alike cases: the same files where nothing holds their names back.
+    write("pkg/setup.py", fixture)
+    write("requirements-doc.txt", "doc-new\n")
+    write("fetch.ipynb", jupyter(["import cloned_new\n"]))
+    (tmp_path / "train.ipynb").unlink()
+    registry = pypi(*names)
+    result = run([tmp_path], tmp_path, registry, check_imports=True, now=NOW)
+    assert {f.subject for f in result.findings if f.rule == "SLOP002"} == {
+        "fixture-new",
+        "doc-new",
+        "git-new",
+        "cloned_new",
+        "plain-new",
+        "seen_new",
+    }
+
+
+def test_a_named_file_in_a_checkout_of_its_own_is_judged_with_it_for_slop002(write, tmp_path):
+    """A file that is named in a nested checkout is read with the dependency files of
+    that checkout. A private index there keeps its names on the machine, so SLOP002
+    has no answer to read. Without that index the name is looked up and reported."""
+    write("requirements.txt", "plain-new\n")
+    write("vendor/tool/.git/HEAD", "ref: refs/heads/main\n")
+    index = write("vendor/tool/requirements.txt", "--index-url https://pkgs.corp.example/simple\n")
+    named = write("vendor/tool/setup.cfg", "[options]\ninstall_requires =\n    nested-new\n")
+    for select in (None, ["SLOP002"]):
+        registry = pypi("plain-new", "nested-new")
+        result = run([named], tmp_path, registry, select=select, now=NOW)
+        assert result.findings == [] and registry.queries == []
+        assert result.notes[0].startswith(
+            f"{' and '.join(select or sorted(PACKAGE_RULES))} didn't look up the dependencies "
+            "in vendor/tool/setup.cfg: a private package index is set in "
+        )
+    index.unlink()
+    registry = pypi("plain-new", "nested-new")
+    result = run([named], tmp_path, registry, now=NOW)
+    assert findings(result) == [("SLOP002", "vendor/tool/setup.cfg", 3)]
+    assert registry.queries == ["nested-new"]
 
 
 # --- Time ----------------------------------------------------------------------------------
