@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import warnings
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -37,6 +38,13 @@ MOCK_TEST = (
     "from unittest.mock import Mock\n\n\ndef test_x():\n    m = Mock()\n    m.a = 1\n"
     "    assert m.a == 1\n"
 )
+# The ways a pool may start its workers on this Python: every way the platform has,
+# but only "fork" on Python 3.10 (see ``analysis._new_processes_are_safe``).
+POOL_METHODS = [
+    method
+    for method in multiprocessing.get_all_start_methods()
+    if sys.version_info >= (3, 11) or method == "fork"
+]
 
 
 @pytest.fixture
@@ -107,7 +115,7 @@ def test_same_result_with_one_job_and_many(project, monkeypatch):
     assert pools == [2, 4]  # worker processes really did the work
 
 
-@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+@pytest.mark.parametrize("method", POOL_METHODS)
 def test_every_start_method(project, method):
     """spawn (Windows, macOS), forkserver and fork all give the single-process result.
     The pool is called directly: it answers None when the workers could not do the work."""
@@ -117,7 +125,7 @@ def test_every_start_method(project, method):
     assert analysis._analyze_in_pool(tasks, options, 3, context) == serial
 
 
-@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+@pytest.mark.parametrize("method", POOL_METHODS)
 def test_warning_filters_of_this_process_do_not_change_the_result(write, tmp_path, capfd, method):
     """A program that turned warnings into errors (as ``pytest -W error`` does) gets the
     same result with workers as without. A "spawn" worker doesn't have those filters, so
@@ -224,35 +232,183 @@ if __name__ == "__main__":
 """
 
 
+# A project file that is named like a standard module. Importing it leaves a file
+# named "imported" next to it, and fails.
+SHADOW = (
+    "import os\n"
+    "open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'imported'), 'a').close()\n"
+    "raise ImportError('a project file was imported in place of a standard module')\n"
+)
+
+
+def shadowed_project(tmp_path, names, body=SHADOW):
+    """A project of six files with one finding each, plus a file for each of ``names``."""
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in names:
+        (project / f"{name}.py").write_text(body, encoding="utf-8")
+    for n in range(6):
+        (project / f"m{n}.py").write_text("# I hope this helps!\n", encoding="utf-8")
+    return project
+
+
+def run_in(project, command, jobs):
+    """Run a slopfence command in the project folder; return its exit code, its JSON
+    report and what it printed on stderr."""
+    options = [".", "--offline", "--format", "json", "--jobs", jobs, "--select", "SLOP051"]
+    done = subprocess.run([*command, *options], cwd=project, capture_output=True, text=True)
+    return done.returncode, done.stdout, done.stderr
+
+
+def console_script(tmp_path):
+    """The command that starts slopfence like the installed script, with "spawn" workers."""
+    script = tmp_path / "bin" / "run.py"
+    script.parent.mkdir()
+    script.write_text(CONSOLE_SCRIPT, encoding="utf-8")
+    return [sys.executable, str(script), str(Path(analysis.__file__).parent.parent)]
+
+
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="PYTHONSAFEPATH is new in Python 3.11")
 def test_project_file_named_like_a_standard_module_does_not_break_workers(tmp_path):
     """Run in a folder with a ``types.py``, as many projects have: the workers must not
     import it in place of the standard library's (they would die while starting)."""
-    script = tmp_path / "bin" / "run.py"
-    script.parent.mkdir()
-    script.write_text(CONSOLE_SCRIPT, encoding="utf-8")
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "types.py").write_text("X = 1\n", encoding="utf-8")
-    for n in range(6):
-        (project / f"m{n}.py").write_text("# I hope this helps!\n", encoding="utf-8")
-    source = str(Path(analysis.__file__).parent.parent)
-
-    def scan(jobs):
-        """Run the command in the project folder; return its report and what it warned."""
-        options = [".", "--offline", "--format", "json", "--jobs", jobs]
-        done = subprocess.run(
-            [sys.executable, str(script), source, *options],
-            cwd=project,
-            capture_output=True,
-            text=True,
-        )
-        return done.returncode, done.stdout, done.stderr
-
-    code, report, warnings = scan("2")
+    project = shadowed_project(tmp_path, ["types"], body="X = 1\n")
+    command = console_script(tmp_path)
+    code, report, warnings = run_in(project, command, "2")
     assert warnings == ""
-    assert (code, report) == scan("1")[:2]
+    assert (code, report) == run_in(project, command, "1")[:2]
     assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+
+
+def test_workers_never_run_a_file_of_the_checked_project(tmp_path):
+    """A new Python process looks for modules in the current folder first. A project
+    file named like a module that Python loads while a worker starts must not be
+    imported. On Python 3.10 that can't be switched off, so no worker is started."""
+    project = shadowed_project(tmp_path, ["threading", "types", "selectors"])
+    code, report, warnings = run_in(project, console_script(tmp_path), "2")
+    assert not (project / "imported").exists()
+    assert code == 1
+    assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+    if sys.version_info >= (3, 11):
+        assert warnings == ""
+    else:
+        assert "can't keep worker processes from importing project files" in warnings
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="without -E, Python 3.10 is covered above")
+def test_workers_are_not_started_when_python_ignores_its_environment(tmp_path):
+    """``python -E`` hands -E on to every worker, which then ignores PYTHONSAFEPATH too.
+    So with -E no worker is started, unless they are forked."""
+    project = shadowed_project(tmp_path, ["threading", "types", "selectors"])
+    command = console_script(tmp_path)
+    code, report, warnings = run_in(project, [command[0], "-E", *command[1:]], "2")
+    assert not (project / "imported").exists()
+    assert code == 1
+    assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+    assert "can't keep worker processes from importing project files" in warnings
+
+
+def test_python_m_never_runs_a_file_of_the_checked_project(tmp_path):
+    """``python -m slopfence`` starts with the current folder first on the import
+    path. Files there that are named like modules slopfence imports must not run."""
+    names = ["__future__", "argparse", "fnmatch", "random", "tempfile", "tomllib", "json"]
+    project = shadowed_project(tmp_path, names)
+    code, report, warnings = run_in(project, [sys.executable, "-m", "slopfence"], "1")
+    assert not (project / "imported").exists()
+    assert (code, warnings) == (1, "")
+    assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+
+
+@pytest.mark.parametrize(("first", "dropped"), [("cwd", True), ("", True), ("other", False)])
+def test_module_run_drops_only_the_current_folder(tmp_path, monkeypatch, first, dropped):
+    """The first entry of the import path goes when it is the folder slopfence was
+    started in, written out or as an empty string. Any other entry stays."""
+    entry = importlib.import_module("slopfence.__main__")
+    (tmp_path / "other").mkdir()
+    monkeypatch.chdir(tmp_path)
+    head = {"cwd": str(tmp_path), "": "", "other": str(tmp_path / "other")}[first]
+    monkeypatch.setattr(sys, "path", [head, *sys.path])
+    before = list(sys.path)
+    entry._leave_out_the_current_folder()
+    assert sys.path == (before[1:] if dropped else before)
+
+
+def test_module_run_keeps_the_folder_slopfence_itself_is_in(monkeypatch):
+    """Started in a source checkout that is not installed, slopfence is only found
+    through the current folder: that entry must stay."""
+    entry = importlib.import_module("slopfence.__main__")
+    home = Path(entry.__file__).resolve().parent.parent
+    monkeypatch.chdir(home)
+    monkeypatch.setattr(sys, "path", [str(home), *sys.path])
+    before = list(sys.path)
+    entry._leave_out_the_current_folder()
+    assert sys.path == before
+
+
+def test_import_path_is_left_alone_when_the_module_is_only_imported(tmp_path, monkeypatch):
+    """A worker process imports ``slopfence.__main__`` again, under another name. That
+    must not touch its import path: only a real ``python -m slopfence`` does."""
+    entry = importlib.import_module("slopfence.__main__")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    before = list(sys.path)
+    importlib.reload(entry)
+    assert sys.path == before
+
+
+def test_module_run_with_an_empty_import_path(monkeypatch):
+    """An import path without entries has nothing to drop."""
+    entry = importlib.import_module("slopfence.__main__")
+    monkeypatch.setattr(sys, "path", [])
+    entry._leave_out_the_current_folder()
+    assert sys.path == []
+
+
+def python_like(version, **flags):
+    """A stand-in for ``sys`` as a Python of that version sees it, started with ``flags``.
+    Python 3.10 has no ``safe_path`` flag."""
+    known = {"isolated": 0, "ignore_environment": 0}
+    if version >= (3, 11):
+        known["safe_path"] = False
+    return types.SimpleNamespace(
+        version_info=version, stderr=sys.stderr, flags=types.SimpleNamespace(**{**known, **flags})
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "flags", "any_method"),
+    [
+        ((3, 10, 12), {}, False),  # no PYTHONSAFEPATH before 3.11
+        ((3, 10, 12), {"isolated": 1, "ignore_environment": 1}, True),  # -I goes to the workers
+        ((3, 12, 3), {}, True),  # PYTHONSAFEPATH
+        ((3, 12, 3), {"ignore_environment": 1}, False),  # -E: the variable is ignored
+        ((3, 12, 3), {"ignore_environment": 1, "safe_path": True}, True),  # -E -P
+        ((3, 14, 0), {"isolated": 1, "ignore_environment": 1, "safe_path": True}, True),  # -I
+    ],
+)
+def test_which_pythons_may_start_new_interpreters(monkeypatch, version, flags, any_method):
+    """A worker that is a new interpreter needs something that keeps the current
+    folder off its import path: -I or -P on this Python, or PYTHONSAFEPATH where it
+    is read. Without one of these only forked workers are safe."""
+    monkeypatch.setattr(analysis, "sys", python_like(version, **flags))
+    for method in multiprocessing.get_all_start_methods():
+        context = multiprocessing.get_context(method)
+        assert analysis._new_processes_are_safe(context) is (any_method or method == "fork")
+    default_is_fork = multiprocessing.get_start_method() == "fork"
+    assert analysis._new_processes_are_safe(None) is (any_method or default_is_fork)
+
+
+@pytest.mark.parametrize(
+    "method", [m for m in multiprocessing.get_all_start_methods() if m != "fork"]
+)
+def test_pool_gives_up_before_it_starts_an_unsafe_process(project, monkeypatch, capsys, method):
+    """Where a new interpreter would not be safe, the pool answers None with a warning
+    and starts nothing: the files are then checked in one process."""
+    monkeypatch.setattr(analysis, "sys", python_like((3, 10, 12)))
+    tasks, options = tasks_and_options(project)
+    context = multiprocessing.get_context(method)
+    assert analysis._analyze_in_pool(tasks, options, 2, context) is None
+    assert "can't keep worker processes from importing project files" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("before", [None, "", "yes"])
@@ -443,7 +599,7 @@ def _ctrl_c_is_held_back(options, task):
 
 
 @needs_signal_mask
-@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
+@pytest.mark.parametrize("method", POOL_METHODS)
 def test_workers_start_with_ctrl_c_held_back(project, monkeypatch, method):
     """A worker can't be interrupted while it starts up (it would print a traceback):
     Ctrl-C is held back in every worker from its first moment, and not in this process."""

@@ -190,8 +190,9 @@ def _safe_import_path() -> Iterator[None]:
     imported in its place, and the worker dies before this process has given it the
     import path to use. ``PYTHONSAFEPATH`` switches that first entry off.
 
-    Python reads the variable from 3.11 on. On 3.10 it changes nothing: with such a
-    file there, the run still ends with a warning and one process.
+    Python reads the variable from 3.11 on, and not when it was started with ``-E``.
+    Where it is not read, no new interpreter is started at all (see
+    ``_new_processes_are_safe``).
     """
     before = os.environ.get("PYTHONSAFEPATH")
     os.environ["PYTHONSAFEPATH"] = "1"
@@ -204,6 +205,31 @@ def _safe_import_path() -> Iterator[None]:
             os.environ["PYTHONSAFEPATH"] = before
 
 
+def _new_processes_are_safe(mp_context: BaseContext | None) -> bool:
+    """Whether a worker can start without importing files of the checked project.
+
+    A new Python process looks for modules in the current folder first, and that
+    folder is the project. A project file named like a module that Python loads while
+    it starts (``threading.py``) would be imported, and so run. Three things prevent it:
+
+    * This Python was started with ``-I`` or ``-P``: Python starts its children with
+      the same option.
+    * ``_safe_import_path``, which works from Python 3.11 on, unless this Python was
+      started with ``-E`` and so ignores the variable.
+    * The "fork" start method: a forked worker is a copy of this process, not a new
+      interpreter.
+    """
+    flags = sys.flags
+    if flags.isolated or getattr(flags, "safe_path", False):
+        return True
+    if sys.version_info >= (3, 11) and not flags.ignore_environment:
+        return True
+    # Imported here: a run that starts no workers doesn't pay for it.
+    import multiprocessing
+
+    return (mp_context or multiprocessing).get_start_method() == "fork"
+
+
 def _analyze_in_pool(
     tasks: Sequence[Task], options: Options, workers: int, mp_context: BaseContext | None
 ) -> list[FileSummary] | None:
@@ -212,6 +238,14 @@ def _analyze_in_pool(
     Returns None, after a warning on stderr, when worker processes can't be used
     here or one of them died. The caller then does the work in this process.
     """
+    if not _new_processes_are_safe(mp_context):
+        print(
+            "slopfence: warning: this Python can't keep worker processes from importing "
+            "project files (Python 3.10, or -E without -I); checking files in one process "
+            "instead",
+            file=sys.stderr,
+        )
+        return None
     # Imported here: a run that starts no workers doesn't pay for it.
     from concurrent.futures import BrokenExecutor
 

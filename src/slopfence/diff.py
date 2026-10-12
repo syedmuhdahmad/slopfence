@@ -8,15 +8,30 @@ from pathlib import Path
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
+# How ``git diff`` is asked, so that the answer does not depend on the user's git config.
+_DIFF_OPTIONS = (
+    "--unified=0",
+    "--no-color",
+    # The lines of the files as they are: no external diff tool, and no conversion to
+    # text first (a ``textconv`` driver, as some tools set one for notebooks).
+    "--no-ext-diff",
+    "--no-textconv",
+    # The prefixes ``parse_unified_diff`` expects, whatever diff.mnemonicPrefix,
+    # diff.noprefix, diff.srcPrefix and diff.dstPrefix say.
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
+
 # path (relative to repo root) -> changed line numbers; None means the whole file is new.
 ChangedLines = dict[str, "set[int] | None"]
 
 
 class DiffError(RuntimeError):
-    pass
+    """git could not give the changed lines: it is not installed, or the ref is unknown."""
 
 
 def _git(root: Path, *args: str) -> str:
+    """What a git command prints when run in ``root``. Raises DiffError when it fails."""
     try:
         result = subprocess.run(
             ["git", *args],
@@ -35,6 +50,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 def repo_root(start: Path) -> Path | None:
+    """The top folder of the git repository ``start`` is in, or None outside of one."""
     try:
         return Path(_git(start, "rev-parse", "--show-toplevel").strip())
     except DiffError:
@@ -66,6 +82,7 @@ def unquote_git_path(path: str) -> str:
 
 
 def parse_unified_diff(diff_text: str) -> ChangedLines:
+    """The added and changed lines of each file in a diff whose new paths start with ``b/``."""
     changed: ChangedLines = {}
     current: str | None = None
     for line in diff_text.splitlines():
@@ -86,9 +103,7 @@ def parse_unified_diff(diff_text: str) -> ChangedLines:
 def changed_lines(root: Path, ref: str) -> ChangedLines:
     """Lines changed between merge-base(ref, HEAD) and the working tree, plus untracked files."""
     base = _git(root, "merge-base", ref, "HEAD").strip()
-    # The lines of the files as they are: no external diff tool, and no conversion to
-    # text first (a ``textconv`` driver, as some tools set one for notebooks).
-    diff = _git(root, "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
+    diff = _git(root, "diff", *_DIFF_OPTIONS, base)
     changed = parse_unified_diff(diff)
     untracked = _git(root, "ls-files", "-z", "--others", "--exclude-standard")
     for path in untracked.split("\0"):
@@ -98,6 +113,7 @@ def changed_lines(root: Path, ref: str) -> ChangedLines:
 
 
 def touches(changed: ChangedLines, path: str, line: int, end_line: int | None) -> bool:
+    """Whether any line from ``line`` to ``end_line`` of ``path`` was changed."""
     if path not in changed:
         return False
     lines = changed[path]

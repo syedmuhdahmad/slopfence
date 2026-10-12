@@ -36,10 +36,17 @@ runs:
       run: |
         # Use a private virtualenv: system Pythons on recent runners reject
         # `pip install` (PEP 668), and Windows usually has no `python3`.
+        # Every Python here runs with -I. The steps run in the repository that is
+        # checked, and without -I Python looks for modules in that folder first: a
+        # file there named like a standard module would be imported and run.
+        # pip starts Pythons of its own without -I, so this step also leaves the
+        # repository and drops a PYTHONPATH that may point into it.
+        cd "$RUNNER_TEMP"
+        unset PYTHONPATH
         py=""
         for candidate in python3 python; do
           if command -v "$candidate" >/dev/null 2>&1 \
-            && "$candidate" -c "import sys; sys.exit(sys.version_info < (3, 10))" >/dev/null 2>&1; then
+            && "$candidate" -I -c "import sys; sys.exit(sys.version_info < (3, 10))" >/dev/null 2>&1; then
             py="$candidate"
             break
           fi
@@ -49,12 +56,12 @@ runs:
           exit 1
         fi
         venv="$RUNNER_TEMP/slopfence-venv"
-        "$py" -m venv "$venv"
+        "$py" -I -m venv "$venv"
         if [ -x "$venv/bin/python" ]; then bin="$venv/bin"; else bin="$venv/Scripts"; fi
         if [ -n "$SLOPFENCE_VERSION" ]; then
-          "$bin/python" -m pip install --quiet --disable-pip-version-check "slopfence==$SLOPFENCE_VERSION"
+          "$bin/python" -I -m pip install --quiet --disable-pip-version-check "slopfence==$SLOPFENCE_VERSION"
         else
-          "$bin/python" -m pip install --quiet --disable-pip-version-check "$GITHUB_ACTION_PATH"
+          "$bin/python" -I -m pip install --quiet --disable-pip-version-check "$GITHUB_ACTION_PATH"
         fi
         echo "python=$bin/python" >> "$GITHUB_OUTPUT"
 
@@ -83,8 +90,8 @@ runs:
         if [ -n "$diff_ref" ]; then diff_args=(--diff "$diff_ref"); fi
         # shellcheck disable=SC2086
         if [ -n "$INPUT_SARIF" ]; then
-          "$PY" -m slopfence $INPUT_PATHS "${diff_args[@]}" $INPUT_ARGS \
+          "$PY" -I -m slopfence $INPUT_PATHS "${diff_args[@]}" $INPUT_ARGS \
             --format sarif --output "$INPUT_SARIF" --exit-zero
         fi
         # shellcheck disable=SC2086
-        "$PY" -m slopfence $INPUT_PATHS "${diff_args[@]}" $INPUT_ARGS
+        "$PY" -I -m slopfence $INPUT_PATHS "${diff_args[@]}" $INPUT_ARGS

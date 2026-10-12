@@ -45,6 +45,11 @@ jobs:
           git config user.name ci
           echo "slopfence-src/" > .gitignore
           mkdir -p src tests clean
+          # Files named like standard modules that venv, pip and slopfence import. If a
+          # step imports one from this folder, it leaves a marker and stops.
+          for name in argparse optparse fnmatch; do
+            printf 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imported-from-the-project"), "a").close()\nraise ImportError("a project file was imported in place of the standard library")\n' > "$name.py"
+          done
           # Old slop already on main: reported by full scans, not by diff scans.
           printf '# In a real implementation, use the cache\nx = 1\n' > src/app.py
           printf 'requests>=2\n' > requirements.txt
@@ -72,10 +77,14 @@ jobs:
           diff: none
           sarif-file: full.sarif
 
+      # A workflow may put the repository on PYTHONPATH (many do, for their tests).
+      # That must not bring its files onto the import path of the action's Pythons.
       - name: "diff: explicit ref"
         id: ref
         continue-on-error: true
         uses: ./slopfence-src
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         with:
           paths: src tests requirements.txt nb
           diff: origin/main
@@ -107,6 +116,14 @@ jobs:
           [ "$status" -eq 1 ] || { echo "::error::expected exit 1 (findings), got $status"; exit 1; }
           if grep -q Traceback err.txt; then echo "::error::slopfence crashed"; exit 1; fi
           grep -q "$(printf 'caf\xc3\xa9')" out.txt || { echo "::error::output is not UTF-8"; exit 1; }
+
+      # The fixture holds argparse.py, optparse.py and fnmatch.py. The action steps
+      # and the direct run above all started in this folder.
+      - name: No project file was imported in place of a standard module
+        run: |
+          if [ -e imported-from-the-project ]; then
+            echo "::error::slopfence, pip or venv imported a file of the checked project"; exit 1
+          fi
 
       # 260 files are enough for worker processes to start (one per 100 files, none under
       # 200). Both ways to start slopfence are run, with the start method of each
