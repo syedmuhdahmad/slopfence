@@ -2446,6 +2446,14 @@ SOURCED = {
         "nb/setup.ipynb",
         one_cell_notebook(f"!pip install requests 'corp-auth @ {GIT}'\n"),
     ),
+    "notebook path": (
+        "nb/local.ipynb",
+        one_cell_notebook('%pip install requests "corp-auth @ file:../corp-auth"\n'),
+    ),
+    "notebook path in one word": (
+        "nb/local.ipynb",
+        one_cell_notebook("!pip install corp-auth@file:../corp-auth\n%pip install corp-auth\n"),
+    ),
 }
 # The files that name the package again, without saying where it comes from.
 NAMED_AGAIN = {

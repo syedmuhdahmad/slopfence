@@ -127,6 +127,11 @@ def test_pip_install_lines(line, names):
         # A URL that names its package: declared, never looked up.
         ("pip install git+https://x.example/r.git@v1#egg=repo", ([], ["repo"], False, False)),
         ("pip install 'corp @ https://example.com/corp.whl'", ([], ["corp"], False, False)),
+        # A direct reference to a path names its package in the same way.
+        (
+            "pip install 'corp @ file:../corp' core@file:../core \"auth[sso] @ ./vendor/auth\"",
+            ([], ["corp", "core", "auth"], False, False),
+        ),
         # An index that is not PyPI.
         ("pip install --index-url https://corp.example/simple corp", (["corp"], [], True, False)),
         ("pip install --extra-index-url=https://c.example/w torch", (["torch"], [], True, False)),
@@ -188,6 +193,7 @@ def test_pip_install_lines_special_cases(line, expected):
         ("pip install requests 'flask[async]==2.*'", False),
         ("pip install -q -U --no-deps requests -c constraints.txt", False),
         ("pip install git+https://x.example/r.git#egg=repo", False),
+        ("pip install 'corp @ file:../corp'", False),
         ("pip install -i https://corp.example/simple corp", False),
         # A URL or a path that does not say what it installs.
         ("pip install git+https://github.com/x/detectron_zz.git", True),

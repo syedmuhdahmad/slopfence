@@ -214,19 +214,21 @@ def _short_options(cluster: str) -> tuple[str, str | None] | None:
 def _package(word: Word) -> tuple[str, Word, bool] | None:
     """The package a word of a ``pip install`` command names, or None if it names none.
 
-    A URL names one when it says so (``name @ https://...``, ``#egg=name``): that
-    package is declared, but it doesn't come from an index. Paths, archives and
-    anything else that is not a requirement name nothing.
+    A word names one when it says where the package comes from: a direct reference
+    (``name @ https://...``, ``name @ file:../name``) or a URL with ``#egg=name``.
+    That package is declared, but it doesn't come from an index. Paths, archives
+    and anything else that is not a requirement name nothing.
     """
     text = word.text
+    parsed = parse_requirement(text)
+    if parsed and parsed.direct:
+        return parsed.name, word, True  # "name @ ..." in one word: a URL, or a path
     if "://" in text or text.startswith(("git+", "hg+", "svn+", "bzr+")):
-        parsed = parse_requirement(text)  # "name @ https://..." in one quoted word
-        name = parsed.name if parsed else egg_name(text)
+        name = egg_name(text)
         return (name, word, True) if name else None
     if "/" in text or text.startswith((".", "~")):
         return None  # a local path
-    parsed = parse_requirement(text)
-    return (parsed.name, word, parsed.direct) if parsed else None
+    return (parsed.name, word, False) if parsed else None
 
 
 def _unread(arguments: list[Word]) -> PipInstall:
