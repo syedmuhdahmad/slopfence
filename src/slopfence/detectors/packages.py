@@ -44,6 +44,7 @@ from slopfence.detectors.dependency import (
     is_package_name,
     is_pip_option,
     kind_of,
+    leading_name,
     lists_other_packages,
     parse_requirement,
     requirements_comment,
@@ -80,7 +81,6 @@ _MARKUP_STARTS = ("-", ".", "=", "~", "*", "+", ">", "|", "`")
 # '3.9'", ". --config-settings x=y"), and a path, whose first word holds a separator
 # ("./local", ".wheels/a.whl", ".\\local", "~/wheels/a.whl").
 _OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[|\s*;|\s+--?[A-Za-z])|[.~]\S*[/\\]")
-_WORD_START = re.compile(r"[A-Za-z0-9]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
 _TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]\s](?:[^\]]*[^\]\s])?)\s*\]\]?\s*(#.*)?$")
@@ -501,7 +501,12 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
         parsed = parse_requirement(spec)
         if parsed is None:
             # "This file lists..." is prose; "{% if x %}" is templating and neither.
-            prose += bool(_WORD_START.match(line))
+            # The name a line starts with is declared, though never looked up: v0.2
+            # took "corp-auth=1.0" for a requirement, and an ignore comment on it
+            # kept the import of that package on the machine too.
+            if name := leading_name(line):
+                prose += 1
+                deps.append(Dependency(name, rel, lineno, validate=False, suppressed=suppressed))
             continue
         valid += 1
         pip_syntax = pip_syntax or not parsed.bare or spec != line
@@ -684,18 +689,25 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     private_index = found.private_index = uses_private_index(tool)
 
     def add_spec(table: str, array: str, spec: object) -> None:
-        """Record one PEP 508 requirement string from ``table.array``."""
-        parsed = parse_requirement(spec) if isinstance(spec, str) else None
+        """Record one PEP 508 requirement string from ``table.array``.
+
+        A string that is no requirement is never looked up. The name it starts with
+        is declared all the same (see ``dependency.leading_name``), and a
+        ``[tool.uv.sources]`` entry for it still counts.
+        """
+        if not isinstance(spec, str):
+            return
+        parsed = parse_requirement(spec)
+        name = parsed.name if parsed else leading_name(spec)
         # Not a self-reference like "pkg[extra]" either.
-        if parsed is None or normalize(parsed.name) == project_name:
+        if name is None or normalize(name) == project_name:
             return
         line = finder.spec(table, array, spec)
-        sourced = parsed.direct or normalize(parsed.name) in uv_sources
-        validate = not (private_index or sourced)
+        direct = parsed.direct if parsed else "://" in spec
+        sourced = direct or normalize(name) in uv_sources
+        validate = parsed is not None and not (private_index or sourced)
         deps.append(
-            Dependency(
-                parsed.name, rel, line, validate, finder.suppressed(line), own_source=sourced
-            )
+            Dependency(name, rel, line, validate, finder.suppressed(line), own_source=sourced)
         )
 
     for spec in _array(project.get("dependencies")):

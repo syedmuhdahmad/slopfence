@@ -293,7 +293,8 @@ def test_new_requirements_names_with_their_own_private_index(write, check, name)
 
 
 def test_requirement_lines_must_be_requirements(tmp_path, write):
-    """Options, URLs, templating and broken lines never give a name to look up."""
+    """Options, URLs, templating and broken lines never give a name to look up. The
+    name that a broken line starts with is declared all the same, as it was in v0.2."""
     path = write(
         "requirements.txt",
         """
@@ -318,6 +319,10 @@ def test_requirement_lines_must_be_requirements(tmp_path, write):
         ("Django", 5, True),
         ("from-git", 7, False),
         ("direct", 8, False),
+        ("typo", 9, False),
+        ("src", 10, False),
+        ("python", 11, False),
+        ("mypkg-1.0-py3-none-any.whl", 12, False),
     ]
 
 
@@ -363,7 +368,7 @@ def test_a_long_run_of_white_space_is_read_in_no_time(tmp_path, name, text):
     start = time.perf_counter()
     declared = parse_dependency_file(path, tmp_path).dependencies
     assert time.perf_counter() - start < 5
-    assert [dep.name for dep in declared] == ["requests"]
+    assert [dep.name for dep in declared if dep.validate] == ["requests"]
 
 
 def test_a_long_setup_cfg_line_is_split_in_no_time():
@@ -503,7 +508,7 @@ def test_a_cmake_file_in_a_requirements_folder_is_not_read(write, check):
     result = check("SLOP001", registry=registry)
     assert result.findings == [] and registry.queries == [] and result.files_checked == 0
     # Even when it is read as a requirements file, no line of it is a requirement.
-    assert parse_dependency_file(path, path.parent).dependencies == []
+    assert not any(dep.validate for dep in parse_dependency_file(path, path.parent).dependencies)
 
 
 @pytest.mark.parametrize(
@@ -2554,6 +2559,61 @@ def test_a_pyproject_string_is_read_like_a_requirement_in_any_other_file(write, 
     result = check("SLOP001", registry=registry)
     assert [f.subject for f in result.findings] == ["ghost-lib"]
     assert registry.queries == ["ghost-lib", "requests"]
+
+
+UV_SOURCE = f'\n[tool.uv.sources]\ncorp-auth = {{ git = "{GIT}" }}\n'
+# A file that names ``corp-auth`` in a string that is no requirement (a single "=",
+# Poetry's "^", a bracket that is no list of extras), and says in another way that
+# the package is not one to ask PyPI about.
+BROKEN_AND_EXPLAINED = {
+    "pyproject.toml with a uv source": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth=1.0", "requests"]\n' + UV_SOURCE,
+    ),
+    "pyproject.toml with an ignore comment": (
+        "pyproject.toml",
+        f'[project]\nname = "demo"\ndependencies = [\n  "corp-auth ^1.0",{IGNORED}\n]\n',
+    ),
+    "requirements.txt with an ignore comment": (
+        "requirements.txt",
+        f"requests\ncorp-auth=1.0{IGNORED}\n",
+    ),
+    "requirements.txt with ignore-file": (
+        "requirements.txt",
+        "# slopfence: ignore-file\ncorp-auth ^1.0\n",
+    ),
+    "requirements.txt with a bracket": (
+        "requirements.txt",
+        f"requests\ncorp-auth [platform:dpkg]{IGNORED}\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(BROKEN_AND_EXPLAINED))
+def test_a_string_that_is_no_requirement_still_declares_its_name(
+    write, check, not_installed, layout
+):
+    """``corp-auth=1.0`` is no requirement, so ``corp-auth`` is not looked up as a
+    dependency. v0.2 took it for one: with an ignore comment or a uv source, the name
+    stayed on the machine, and so did the import of the package. It still does."""
+    write(*BROKEN_AND_EXPLAINED[layout])
+    write("app.py", "import corp_auth\nimport ghost_mod_zz\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz"]
+    assert not any("corp" in name for name in registry.queries)
+
+
+def test_a_uv_source_for_a_string_that_is_no_requirement_counts_in_other_files(write, check):
+    """The same without imports: the uv source says where ``corp-auth`` comes from, so
+    the requirements file that names it again is not looked up for it. The broken
+    string itself is never sent, with a source or without one."""
+    broken = '[project]\nname = "demo"\ndependencies = ["corp-auth=1.0", "ghost-lib=2"]\n'
+    write("pyproject.toml", broken + UV_SOURCE)
+    write("requirements.txt", "corp-auth\nrequests\n")
+    registry = FakeRegistry({"requests"})
+    assert check("SLOP001", registry=registry).findings == []
+    assert registry.queries == ["requests"]
 
 
 def test_a_name_held_back_for_another_reason_is_still_looked_up_elsewhere(write, check):

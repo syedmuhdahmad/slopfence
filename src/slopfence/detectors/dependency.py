@@ -6,6 +6,7 @@
   ``DependencyFile`` is everything one file declares.
 * ``parse_requirement`` reads the package name out of a requirement string, and
   refuses everything that is not a requirement (URLs, paths, file names, prose).
+  ``leading_name`` gives the name such a string starts with.
 * ``is_pip_option`` knows pip's index and links options, also when they are cut short.
 * ``text_lines`` cuts a text into the lines that git and an editor count.
 
@@ -89,6 +90,8 @@ _REQUIREMENT = re.compile(
     \s*(?P<rest>$|[;@].*$|(?:\(\s*)?{_OPERATOR}\s*[A-Za-z0-9*${{].*$)""",
     re.X | re.S,
 )
+# What a string starts with when it starts like a package name, as v0.2 read it.
+_LEADING_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 # pip treats "#" as a comment only at line start or after whitespace (URLs contain "#egg=").
 REQ_COMMENT = re.compile(r"(^|\s)#.*$")
 # The name a URL gives its package: "git+https://host/repo.git#egg=name".
@@ -318,6 +321,18 @@ def parse_requirement(spec: str) -> Requirement | None:
     # pip. Whoever wrote it meant that URL all the same.
     direct = rest.startswith("@") or "://" in spec
     return Requirement(name, direct, not (rest or m.group("extras")))
+
+
+def leading_name(text: str) -> str | None:
+    """The name that a string starts with, or None when it starts with none.
+
+    For a string that is no requirement (``corp-auth=1.0``, ``corp-auth ^1.0``). Such
+    a name is never looked up. It is declared all the same, as it was in v0.2: an
+    ignore comment on it still counts, and the import of that package is not looked
+    up either.
+    """
+    m = _LEADING_NAME.match(text)
+    return m.group(1) if m else None
 
 
 def is_package_name(text: str) -> bool:
