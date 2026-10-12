@@ -101,7 +101,7 @@ SLOP040 = "medium"
 `per-file-ignores` turns rules off in the files that match a pattern. A pattern works exactly like an `exclude` pattern. Put it in quotes. If several patterns match a file, all their rules are skipped. Unlike `exclude`, every other rule still checks the file. Two details:
 
 - Dependencies and imports in a file where `SLOP001` is off are not looked up on PyPI at all.
-- `SLOP030` is off for the functions *in* a matching file. Code anywhere else that copies a helper from `legacy/` is still reported.
+- `SLOP030` is off for the functions *in* a matching file. Code anywhere else that copies a helper from `legacy/` is still reported, whichever of the two is older.
 
 `severity` gives a rule another severity: `high`, `medium` or `low`. Text, JSON and SARIF reports, `--fail-on` and `--list-rules` all use it. For example, with `SLOP040 = "high"` a swallowed exception fails a run that uses `--fail-on high`.
 
