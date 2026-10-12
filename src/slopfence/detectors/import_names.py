@@ -5,11 +5,14 @@ of it (``python-dateutil`` -> ``dateutil``, ``pyyaml`` -> ``yaml``,
 ``google-cloud-storage`` -> ``google``). ``provides`` handles those by rule.
 ``IMPORT_NAMES`` lists the rest: imports whose distribution has an unrelated
 name. Its keys are also known to be real, so they are never looked up on PyPI.
+
+``is_stdlib`` says which imports Python itself provides, on any version of it.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 
 from slopfence.registry import normalize
 
@@ -128,8 +131,47 @@ IMPORT_NAMES: dict[str, tuple[str, ...]] = {
     "typing_extensions": ("typing-extensions",),
 }
 
+# Modules that are part of the standard library of some Python 3 and not of every one
+# that slopfence runs on (3.10 to 3.14). Most were removed: ``imp``, ``asyncore``,
+# ``distutils``, ``lib2to3``, the modules of PEP 594, and the ones that went before
+# Python 3.10 (``formatter``, ``parser``, ``symbol``, ``macpath``...). The others were
+# added after 3.10 (``tomllib``, ``compression``, ``annotationlib``).
+# ``sys.stdlib_module_names`` only knows the Python that is running, and code is often
+# written for another one.
+STDLIB_ON_OTHER_PYTHONS = frozenset(
+    {
+        "aifc", "annotationlib", "asynchat", "asyncore", "audioop", "binhex", "cgi",
+        "cgitb", "chunk", "compression", "crypt", "distutils", "dummy_threading",
+        "formatter", "fpectl", "imghdr", "imp", "lib2to3", "macpath", "mailcap", "msilib",
+        "nis", "nntplib", "os2emxpath", "ossaudiodev", "parser", "pipes", "smtpd", "sndhdr",
+        "spwd", "sunau", "symbol", "telnetlib", "tomllib", "uu", "xdrlib",
+        "_android_support", "_apple_support", "_ast_unparse", "_bootsubprocess",
+        "_colorize", "_compression", "_crypt", "_dummy_thread", "_hmac", "_interpchannels",
+        "_interpqueues", "_interpreters", "_ios_support", "_msi", "_opcode_metadata",
+        "_py_warnings", "_pydatetime", "_pylong", "_pyrepl", "_remote_debugging", "_sha2",
+        "_sha256", "_sha512", "_suggestions", "_sysconfig", "_tokenize", "_types",
+        "_typing", "_wmi", "_zstd",
+    }
+)  # fmt: skip
+
 _PREFIXES = ("python-", "py-", "py")
 _SUFFIXES = ("-python", "python", "-py", "-py3", "-binary", "-headless")
+
+
+def is_stdlib(module: str) -> bool:
+    """Whether a top-level module comes with Python: with the one that is running, or
+    with any other Python 3.
+
+    The answer must not depend on the Python that slopfence runs on. ``import imp``
+    is no invented package on Python 3.14, where the module is gone, and
+    ``import tomllib`` is none on Python 3.10, which does not have it yet.
+    """
+    return (
+        module in sys.stdlib_module_names
+        or module in sys.builtin_module_names
+        or module == "__future__"
+        or module in STDLIB_ON_OTHER_PYTHONS
+    )
 
 
 def _squash(name: str) -> str:

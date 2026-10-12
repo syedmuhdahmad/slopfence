@@ -50,7 +50,7 @@ from slopfence.detectors.dependency import (
     suppresses_slop001,
     text_lines,
 )
-from slopfence.detectors.import_names import IMPORT_NAMES, provides
+from slopfence.detectors.import_names import IMPORT_NAMES, is_stdlib, provides
 from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
 from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
@@ -1011,9 +1011,7 @@ class PackageChecker:
         package, Python, the project's own code, or a declared or locked package."""
         return (
             self._is_known(name)
-            or name in sys.stdlib_module_names
-            or name == "__future__"
-            or name in sys.builtin_module_names
+            or is_stdlib(name)
             or name in self.index.local_modules
             or name in IMPORT_NAMES
             or any(provides(dist, name) for dist in self._provided_by)

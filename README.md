@@ -219,7 +219,7 @@ slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. 
 | Names sent to PyPI | When |
 |---|---|
 | Dependencies declared in requirements files, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `pip install` lines in notebooks (see [Where `SLOP001` finds dependencies](#where-slop001-finds-dependencies)) | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent, also where another file names the same package without the URL. Neither is a package of your own project, or any dependency that may come from a private index (see [Private package indexes](#private-package-indexes)) |
-| Imports in your source code and notebooks that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
+| Imports in your source code and notebooks that aren't in the standard library of any Python 3, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
 Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. With `--diff`, only the dependency files in the diff are looked up. `--offline` sends nothing at all.
 
@@ -254,6 +254,8 @@ If your company index only **mirrors** PyPI, set `detect-private-index = false` 
 ### Imports with a different package name
 
 With `--check-imports`, an import isn't looked up when a declared dependency or a locked package provides it, even if the names differ and the package isn't installed where slopfence runs. For example, `import bs4` is covered by `beautifulsoup4`, `import dateutil` by `python-dateutil`, and `from google.cloud import storage` by `google-cloud-storage`. slopfence reads `uv.lock`, `poetry.lock`, `pdm.lock` and `Pipfile.lock`, so indirect dependencies count too (`import idna` when only `requests` is declared).
+
+A module of Python's standard library is never looked up, also one that the Python slopfence runs on does not have. `imp`, `asyncore` and `cgi` were removed in Python 3.12 and 3.13, and `tomllib` came with Python 3.11. So the same file gets the same report on every Python.
 
 ### What the code-quality rules skip
 
