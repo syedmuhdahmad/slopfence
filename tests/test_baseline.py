@@ -1008,6 +1008,24 @@ def test_bad_write_targets_are_refused_before_the_scan(tmp_path, monkeypatch, ca
     assert sorted(p.name for p in tmp_path.iterdir()) == ["adir"]
 
 
+def test_write_target_that_cannot_be_read_is_refused(write, tmp_path, monkeypatch, capsys):
+    """Nobody can say what an unreadable file holds, so it is not replaced."""
+    write("app.py", "x = 1\n")
+    write("base.json", "{}")
+
+    def denied(path):
+        """Stand in for a file this user may not read."""
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(baselinemod, "_read_text", denied)
+    monkeypatch.setattr(cli, "run", None)  # refused before the scan: run() is never called
+    assert main([".", "--offline", "--write-baseline", "base.json"]) == 2
+    assert capsys.readouterr().err == (
+        "slopfence: error: can't write baseline base.json: Permission denied\n"
+    )
+
+
 def test_write_baseline_refuses_to_drop_findings_outside_the_checked_paths(
     project, capsys, monkeypatch
 ):
