@@ -69,6 +69,12 @@ else:  # pragma: no cover
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
 # How a line starts that is an option, a URL or a path, and so names no package.
 _NOT_A_NAME = ("-", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "file:", ".", "/")
+# Of the lines that start with "-" or ".", the ones that pip reads: an option ("-r",
+# "--hash=..."), the folder itself with or without extras (".", ".[dev]", ".."), and a
+# path, whose first word holds a separator ("./local", ".wheels/a.whl", ".\\local").
+# Any other is the underline, bullet or directive of a document ("-----", "- 4 GB RAM",
+# ".. toctree::").
+_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[)|\.\S*[/\\]")
 _WORD_START = re.compile(r"[A-Za-z0-9]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
@@ -395,7 +401,9 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
 
     A line must be a valid requirement. A file with more prose lines than
     requirements is a document that is only named like a requirements file, and
-    yields nothing. Neither does a list for another package manager. The index
+    yields nothing. So is a file with a line that only a document has: an underline,
+    a bullet or a directive (see ``_OPTION_OR_PATH``). pip takes no file with such a
+    line. Neither does a list for another package manager yield anything. The index
     options of the file count in every case.
     """
     lines = text.splitlines()
@@ -406,13 +414,17 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     deps = []
     valid = prose = 0
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
-    pip_syntax = False
+    # And whether any line is the markup of a document.
+    pip_syntax = markup = False
     for lineno, raw in enumerate(lines, start=1):
         suppressed = suppresses_slop001(requirements_comment(raw))
         line = REQ_COMMENT.sub("", raw).strip()
         if not line:
             continue
         if line.startswith(_NOT_A_NAME):
+            if line[0] in "-." and not _OPTION_OR_PATH.match(line):
+                markup = True
+                continue
             pip_syntax = True
             # Options and bare URLs/paths: the name is only known from #egg=.
             if name := egg_name(line):
@@ -441,7 +453,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
             )
         )
     found = DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
-    if prose <= valid:
+    if prose <= valid and not markup:
         found.dependencies = deps
         found.plain_list = valid > 0 and not pip_syntax
     return found

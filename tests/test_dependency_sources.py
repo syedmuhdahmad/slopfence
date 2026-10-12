@@ -354,6 +354,68 @@ def test_prose_named_like_requirements_is_skipped(write, check):
     assert registry.queries == []
 
 
+# Documents that are only named like a requirements file. Their one-word lines read
+# like package names.
+DOCUMENTS = {
+    # A Sphinx index kept as a text file.
+    "docs/requirements/index.txt": (
+        "Requirements\n============\n\n.. toctree::\n   :maxdepth: 1\n\n"
+        "   hardware\n   software\n   network\n"
+    ),
+    "system-requirements.txt": (
+        "Minimum\n-------\n- 4 GB RAM\n- Ubuntu 20.04 or later\n- Python 3.8+\n\n"
+        "Recommended\n-----------\n- 16 GB RAM\n- NVIDIA GPU with CUDA 11\n"
+    ),
+    "hardware-requirements.txt": "Hardware\n\n- 4 GB RAM\n- 2 CPUs\n\nSoftware\n\n- Ubuntu\n",
+    "requirements/README.txt": "Overview\n--------\n\nbase\n  at run time\ndev\n  for the tests\n",
+    "requirements.txt": "Usage\n-----\n\ninstall\n\n... then start the server\n",
+}
+WORDS = {"requirements", "hardware", "software", "minimum", "overview", "base", "usage"}
+
+
+@pytest.mark.parametrize("name", sorted(DOCUMENTS))
+@pytest.mark.parametrize("on_pypi", [set(), WORDS], ids=["no word on PyPI", "most words on PyPI"])
+def test_a_document_with_an_underline_a_bullet_or_a_directive_is_skipped(
+    write, check, name, on_pypi
+):
+    """A line that starts with "-" or "." and is no option and no path is the markup
+    of a document: pip takes no file with such a line. Nothing of the file is sent
+    or reported, whatever PyPI has."""
+    write(name, DOCUMENTS[name])
+    registry = FakeRegistry(on_pypi)
+    assert check("SLOP001", registry=registry).findings == []
+    assert registry.queries == []
+
+
+def test_options_and_paths_keep_a_file_a_pip_file(write, check):
+    """The look-alike: every line of pip's own that starts with "-" or ".". An option,
+    the folder itself, and a path, also one into a hidden folder or with a
+    backslash. The invented name next to them is still reported."""
+    lines = [
+        "--pre",
+        "-r other.txt",
+        "-rother.txt",
+        "-e .",
+        "-e.",
+        ".",
+        "..",
+        ".[dev]",
+        "./local",
+        "../up",
+        ".wheels/a-1.0-py3-none-any.whl",
+        ".\\local",
+        "asgiref==3.7.2 \\",
+        "    --hash=sha256:89b2ef2247e3b562a16eef663bc0e2e703ec6468e2fa8a5cd61cd449786d4f6e",
+        "ghost-lib==1.0",
+    ]
+    write("requirements/base.txt", "\n".join(lines) + "\n")
+    write("requirements/other.txt", "requests\n")
+    registry = FakeRegistry({"asgiref", "requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("requirements/base.txt", len(lines), 1)]
+    assert sorted(registry.queries) == ["asgiref", "ghost-lib", "requests"]
+
+
 def test_a_cmake_file_in_a_requirements_folder_is_not_read(write, check):
     """``tests/requirements/CMakeLists.txt`` is no pip file, and neither are its calls."""
     path = write(
