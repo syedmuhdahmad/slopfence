@@ -84,6 +84,11 @@ RULES: dict[str, Rule] = {
 }
 
 
+def plural(count: int, noun: str) -> str:
+    """The count with its noun, in the singular for one: "1 finding", "3 findings"."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 @dataclass(frozen=True)
 class Finding:
     rule: str

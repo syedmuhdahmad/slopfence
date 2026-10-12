@@ -59,6 +59,10 @@ class Dependency:
 
 
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock", "Pipfile"}
+# The rules whose findings depend on answers from PyPI. A run that got no answer finds
+# nothing for them, and that must never be read as "fixed". SLOP002 (#39) is named
+# before it exists, so that the two rules can never get two lists.
+PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
 
 
 @dataclass

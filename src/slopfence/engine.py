@@ -7,13 +7,19 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
 from slopfence.analysis import Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded
 from slopfence.detectors import FILE_DETECTORS
 from slopfence.detectors.duplicates import check_duplicates
-from slopfence.detectors.packages import LOCK_FILES, PackageChecker, build_index
-from slopfence.models import RULES, Finding, Severity
+from slopfence.detectors.packages import (
+    LOCK_FILES,
+    PACKAGE_RULES,
+    PackageChecker,
+    build_index,
+)
+from slopfence.models import RULES, Finding, Severity, plural
 from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
@@ -91,6 +97,8 @@ class Result:
     notes: list[str] = field(default_factory=list)
     # The severities the config sets (rule ID -> severity), for reports that list rules.
     severities: dict[str, Severity] = field(default_factory=dict)
+    # The findings the baseline hid. With --diff, only the ones on changed lines.
+    baselined: list[Finding] = field(default_factory=list)
 
 
 def _per_file_matcher(
@@ -126,6 +134,11 @@ def _with_severities(findings: list[Finding], severity: Mapping[str, Severity]) 
     ]
 
 
+def _on_changed_lines(findings: list[Finding], changed: diffmod.ChangedLines) -> list[Finding]:
+    """The findings that ``--diff`` reports: the ones that touch a changed line."""
+    return [f for f in findings if diffmod.touches(changed, f.path, f.line, f.end_line)]
+
+
 def run(
     paths: Sequence[Path],
     root: Path,
@@ -140,6 +153,7 @@ def run(
     jobs: int = 1,
     per_file_ignores: Mapping[str, Iterable[str]] | None = None,
     severity: Mapping[str, Severity] | None = None,
+    baseline: baselinemod.Baseline | None = None,
 ) -> Result:
     """Check ``paths`` and return the findings.
 
@@ -156,6 +170,8 @@ def run(
 
     ``per_file_ignores`` maps patterns (the kind ``exclude`` takes) to the rules that
     are switched off in the matching files. ``severity`` gives rules another severity.
+    ``baseline`` holds findings that were accepted earlier: they are left out of
+    ``Result.findings`` and listed in ``Result.baselined``.
     """
     rules = set(select) if select else set(RULES)
     rules -= set(ignore)
@@ -252,7 +268,7 @@ def run(
         )
 
     # The filters, always in this order: ignore comments, per-file ignores, severities
-    # from the config (they only change a label), then --diff.
+    # from the config (they only change a label), the baseline, then --diff.
     by_rel = {s.rel: s for s in sources}
     findings = [
         f
@@ -260,11 +276,35 @@ def run(
         if not (f.path in by_rel and by_rel[f.path].is_ignored(f.rule, f.line))
         and not switched_off(f.rule, f.path)
     ]
-    if changed is not None:
-        findings = [f for f in findings if diffmod.touches(changed, f.path, f.line, f.end_line)]
-
-    # The message breaks ties: ``import a, b`` gives two findings at one position, and
-    # without it their order would be the set's, which changes with the hash seed.
+    # The one sort. The message breaks ties: ``import a, b`` gives two findings at one
+    # position, and without it their order would be the set's, which changes with the
+    # hash seed.
     findings = sorted(set(findings), key=lambda f: (f.path, f.line, f.col, f.rule, f.message))
-    result.findings = _with_severities(findings, severity) if severity else findings
+    if severity:
+        findings = _with_severities(findings, severity)
+    if baseline is not None:
+        # Before --diff: an old finding outside the diff must use up its entry, or a
+        # new one like it on a changed line would be hidden in its place.
+        matched = baselinemod.match(findings, baseline, changed)
+        findings, result.baselined = matched.new, matched.hidden
+        # With --diff some rules only look at changed code, so an entry that nothing
+        # used says nothing. Nor does one of a package rule: PyPI may not have answered.
+        if changed is None:
+            gone = baselinemod.count_stale(
+                matched.unused,
+                rules - PACKAGE_RULES,
+                by_rel.keys(),
+                baselinemod.scope_of(paths, root),
+                root,
+            )
+            if gone:
+                result.notes.append(
+                    f"{plural(gone, 'finding')} in the baseline no longer "
+                    f"exist{'s' if gone == 1 else ''}. Run --write-baseline again to "
+                    "update the file."
+                )
+    if changed is not None:
+        findings = _on_changed_lines(findings, changed)
+        result.baselined = _on_changed_lines(result.baselined, changed)
+    result.findings = findings
     return result
