@@ -96,6 +96,9 @@ def shell_commands(text: str, i: int) -> tuple[list[list[Word]], int]:
     after a redirection (``>``, ``<``) is dropped from its command. A backslash in
     front of another character stays in the word: such a word is a Windows path or
     something escaped, never a package name. An unterminated quote gives no commands.
+
+    A line may end with a carriage return and a line feed: the source strings of a
+    notebook keep the line ends they were saved with.
     """
     commands: list[list[Word]] = [[]]
     chars: list[str] | None = None
@@ -132,6 +135,8 @@ def shell_commands(text: str, i: int) -> tuple[list[list[Word]], int]:
                 chars, start = [], i
             if ch == "\\":
                 i += 1
+                if text.startswith("\r\n", i):
+                    i += 1  # a Windows line end: the backslash continues the line too
                 if i < n and text[i] != "\n":
                     chars.append("\\" + text[i])
                 elif not chars:

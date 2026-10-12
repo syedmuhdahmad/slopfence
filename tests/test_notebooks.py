@@ -103,6 +103,7 @@ def pip(line):
         ("pip install -rrequirements.txt foo", ["foo"]),
         ("pip install --target ./lib --no-deps foo", ["foo"]),
         ("pip install foo \\\n    bar", ["foo", "bar"]),
+        ("pip install foo \\\r\n    bar", ["foo", "bar"]),  # a Windows line end
         ("pip install foo\\\nbar", ["foobar"]),  # the shell joins the two lines
         ("pip install discord.py ruamel.yaml", ["discord.py", "ruamel.yaml"]),
         ("pip install -r requirements.txt -c constraints.txt -e . ./local /abs/x.whl", []),
@@ -250,6 +251,11 @@ NAMES = [
 IMPORTS = ["requests", "os", "sys", "ghost_import", "numpy"]
 
 
+def crlf(cells):
+    """The cells with Windows line ends inside their source strings."""
+    return [cell.replace("\n", "\r\n") for cell in cells]
+
+
 def layouts():
     """The same notebook written the ways tools write it."""
     nb = notebook(CELLS)
@@ -268,6 +274,10 @@ def layouts():
         "source before outputs": json.dumps(reordered, indent=1),
         "source as one string": json.dumps(as_string, indent=1, ensure_ascii=False),
         "source as one string, minified": json.dumps(as_string, separators=(",", ":")),
+        "jupyter, Windows line ends in the sources": jupyter(crlf(CELLS)),
+        "minified, Windows line ends in the sources": json.dumps(
+            notebook(crlf(CELLS)), separators=(",", ":")
+        ),
     }
 
 
@@ -818,6 +828,76 @@ def test_crlf_files_and_bom(tmp_path, check):
     [finding] = check("SLOP001", registry=FakeRegistry(set())).findings
     line = text.split("\n")[finding.line - 1]
     assert line[finding.col - 1 :].startswith("ghost-crlf")
+
+
+# Every kind of notebook finding, and every kind of ignore comment.
+EVERY_KIND = [
+    "%pip install requests ghost-magic\nimport requests, ghost_import\n",
+    "!pip install ghost-first \\\n    ghost-continued\n",
+    "%%bash\npip install ghost-shell \\\n  ghost-shell-two\necho done\n",
+    "# slopfence: ignore\n!pip install ignored-above\n"
+    "!pip install ignored-inline  # slopfence: ignore\n"
+    "!pip install ignored-first \\\n    ignored-continued  # slopfence: ignore\n",
+    "from ghost_from import x\nimport ignored_import  # slopfence: ignore\n",
+]
+
+
+@pytest.mark.parametrize("minified", [False, True], ids=["jupyter", "minified"])
+def test_windows_line_ends_in_cell_sources_change_no_finding(
+    tmp_path, check, not_installed, minified
+):
+    """A notebook whose source strings end in a carriage return and a line feed gets
+    the findings of the same notebook without the carriage returns, each at its
+    name, and the same names are sent. In Jupyter's layout they are at the same
+    line and column too."""
+
+    def scan(cells):
+        """Write the notebook and return (its text, the result, the names sent)."""
+        nb = notebook(cells)
+        text = json.dumps(nb, separators=(",", ":")) if minified else jupyter(cells)
+        (tmp_path / "nb.ipynb").write_text(text, encoding="utf-8")
+        registry = FakeRegistry({"requests"})
+        result = check("SLOP001", registry=registry, check_imports=True)
+        return text, result, registry.queries
+
+    _, unix, unix_sent = scan(EVERY_KIND)
+    text, windows, windows_sent = scan(crlf(EVERY_KIND))
+    assert subjects(windows) == subjects(unix)
+    assert sorted(subjects(windows)) == [
+        "ghost-continued", "ghost-first", "ghost-magic", "ghost-shell", "ghost-shell-two",
+        "ghost_from", "ghost_import",
+    ]  # fmt: skip
+    assert windows_sent == unix_sent and not any("ignored" in name for name in windows_sent)
+    lines = text.split("\n")
+    for finding in windows.findings:
+        at = lines[finding.line - 1][finding.col - 1 :]
+        assert at.startswith((finding.subject, "import ", "from ")), finding
+    if not minified:
+        assert found(windows) == found(unix)
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        f"-i {PRIVATE}",
+        f"--index corp={PRIVATE}",
+        f"--default-index {PRIVATE}",
+        "-f https://pkgs.corp.example/wheels.html",
+        "--no-index",
+    ],
+)
+@pytest.mark.parametrize("command", ["!pip", "%pip", "pip", "!uv pip"])
+def test_a_source_option_on_a_continued_line_counts_with_windows_line_ends(
+    write, check, command, option
+):
+    """A backslash before a carriage return and a line feed continues the command, as
+    one before a line feed does. So the index or links option on the next line is
+    read, and none of the notebook's packages is sent."""
+    cells = [f"{command} install corp-auth \\\r\n    {option}\r\n", "%pip install corp-utils\r\n"]
+    write("nb.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
 
 
 def test_a_very_large_notebook_is_not_read(tmp_path, check):
