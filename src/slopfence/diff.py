@@ -27,10 +27,11 @@ ChangedLines = dict[str, "set[int] | None"]
 
 
 class DiffError(RuntimeError):
-    pass
+    """git could not give the changed lines: it is not installed, or the ref is unknown."""
 
 
 def _git(root: Path, *args: str) -> str:
+    """What a git command prints when run in ``root``. Raises DiffError when it fails."""
     try:
         result = subprocess.run(
             ["git", *args],
@@ -49,6 +50,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 def repo_root(start: Path) -> Path | None:
+    """The top folder of the git repository ``start`` is in, or None outside of one."""
     try:
         return Path(_git(start, "rev-parse", "--show-toplevel").strip())
     except DiffError:
@@ -80,6 +82,7 @@ def unquote_git_path(path: str) -> str:
 
 
 def parse_unified_diff(diff_text: str) -> ChangedLines:
+    """The added and changed lines of each file in a diff whose new paths start with ``b/``."""
     changed: ChangedLines = {}
     current: str | None = None
     for line in diff_text.splitlines():
@@ -110,6 +113,7 @@ def changed_lines(root: Path, ref: str) -> ChangedLines:
 
 
 def touches(changed: ChangedLines, path: str, line: int, end_line: int | None) -> bool:
+    """Whether any line from ``line`` to ``end_line`` of ``path`` was changed."""
     if path not in changed:
         return False
     lines = changed[path]

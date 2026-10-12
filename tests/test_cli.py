@@ -81,6 +81,7 @@ diff --git a/old.py b/old.py
 
 
 def test_diff_mode_only_reports_changed_lines(tmp_path, capsys, monkeypatch):
+    """With ``--diff``, findings on lines the branch did not touch are left out."""
     _git(tmp_path, "init", "-q", "-b", "main")
     _git(tmp_path, "config", "user.email", "t@example.com")
     _git(tmp_path, "config", "user.name", "t")
@@ -123,6 +124,7 @@ def test_diff_mode_does_not_depend_on_the_git_prefix_settings(tmp_path, setting)
 
 
 def test_diff_with_bad_ref(tmp_path, monkeypatch):
+    """A ref that git does not know is an error (exit code 2), not an empty diff."""
     _git(tmp_path, "init", "-q")
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "no-such-ref"]) == 2
