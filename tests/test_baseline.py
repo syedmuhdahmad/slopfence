@@ -15,7 +15,7 @@ from slopfence import baseline as baselinemod
 from slopfence import cli
 from slopfence.baseline import Baseline, BaselineError, Scope, key_of, normalize_fingerprint
 from slopfence.cli import main
-from slopfence.config import load_config
+from slopfence.config import ignored_rules, load_config
 from slopfence.engine import run
 from slopfence.models import RULES, Finding
 from slopfence.registry import OfflineRegistry, PyPIRegistry
@@ -847,32 +847,50 @@ def duplicates(root, project, **kwargs):
     return run([root], root, OfflineRegistry(), select=["SLOP030"], **kwargs)
 
 
-def test_diff_run_and_full_run_agree_about_duplicates(tmp_path):
+@pytest.mark.parametrize("ignores", [{}, {"svc/": ["SLOP030"]}])
+def test_diff_run_and_full_run_agree_about_duplicates(tmp_path, ignores):
     """With a baseline, a --diff run fails when a full run fails, and only then.
 
     150 small random projects with groups of identical functions, some in classes
     and some with the same name in one file. Each gets a baseline, then a random pull
     request. If the full run finds a new duplicate, the pull request added one, and
     --diff has to report something too. If it finds none, --diff must be silent.
+
+    With SLOP030 switched off in a folder, these pull requests show one exception and
+    no other: a copy of outside code is added to that folder. A file where the rule
+    is off never holds the copy that is reported, so the full run reports the copy
+    outside, on lines that did not change. The --diff run has nothing to report.
     """
     rng = random.Random(51)
     kinds = {True: 0, False: 0}
+    exceptions = 0
     for case in range(150):
         root = tmp_path / str(case)
         project = {}
         for rel in rng.sample(FILES, rng.randint(2, 6)):
             taken = set()
             project[rel] = [random_function(rng, taken) for _ in range(rng.randint(1, 3))]
-        accepted = Baseline(baselinemod.count_findings(duplicates(root, project).findings))
+        first = duplicates(root, project, per_file_ignores=ignores)
+        accepted = Baseline(baselinemod.count_findings(first.findings))
         before = {rel: module_text(functions) for rel, functions in project.items() if functions}
         random_pull_request(rng, project)
         after = {rel: module_text(functions) for rel, functions in project.items() if functions}
-        full = duplicates(root, project, baseline=accepted)
-        diff = duplicates(root, project, baseline=accepted, changed=changed_lines(before, after))
-        assert bool(diff.findings) == bool(full.findings), (case, full.findings, diff.findings)
+        changed = changed_lines(before, after)
+        full = duplicates(root, project, baseline=accepted, per_file_ignores=ignores)
+        diff = duplicates(
+            root, project, baseline=accepted, per_file_ignores=ignores, changed=changed
+        )
+        if bool(diff.findings) != bool(full.findings):
+            assert not diff.findings, (case, full.findings, diff.findings)
+            for finding in full.findings:
+                # "... is identical to 'name' in svc/y.py:3; reuse it ..."
+                copied = finding.message.split(" in ")[1].split(":")[0]
+                assert ignored_rules(copied, ignores) and copied in changed, (case, finding)
+            exceptions += 1
         kinds[bool(full.findings)] += 1
     # Both kinds of pull request came up often enough to mean something.
     assert min(kinds.values()) >= 30
+    assert (exceptions > 0) == bool(ignores)
 
 
 # --- a baseline file that can't be used -------------------------------------------------

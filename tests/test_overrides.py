@@ -257,6 +257,26 @@ def test_every_copy_of_ignored_code_is_reported(write, check):
     assert [f.path for f in check("SLOP030").findings] == ["app/y.py", "app/z.py", "vendor/a.py"]
 
 
+def test_copy_added_to_an_ignored_file_passes_a_diff_run(write, check):
+    """With --diff a copy is only reported when its own lines changed.
+
+    A change that adds a copy of outside code to the ignored folder touches no other
+    file. The full run reports the outside code, which is older. The --diff run has
+    no changed line to report it on: a known limit, said in the README.
+    """
+    write("app/dates.py", HELPER.format(name="format_date"))
+    write("vendor/lib.py", HELPER.format(name="vendored_format"))
+    ignores = {"vendor/": ["SLOP030"]}
+    full = check("SLOP030", per_file_ignores=ignores)
+    assert [(f.path, f.line) for f in full.findings] == [("app/dates.py", 1)]
+    assert "'vendored_format' in vendor/lib.py:1" in full.findings[0].message
+    added_inside = check("SLOP030", per_file_ignores=ignores, changed={"vendor/lib.py": None})
+    assert added_inside.findings == []
+    # The other way round, the new code is outside the folder, and both runs report it.
+    added_outside = check("SLOP030", per_file_ignores=ignores, changed={"app/dates.py": None})
+    assert added_outside.findings == full.findings
+
+
 def test_slop030_ignore_does_not_hide_copies_among_other_files(write, check):
     """Two copies outside the ignored folder, none inside: reported as usual."""
     write("app/x.py", HELPER.format(name="fx"))
