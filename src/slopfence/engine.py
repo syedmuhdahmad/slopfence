@@ -49,6 +49,20 @@ EXCLUDED_DIRS = {
 }
 
 
+def _is_pruned(folder: Path) -> bool:
+    """Whether the walk of a project never enters ``folder``.
+
+    That is so for an excluded tree (``.venv``, ``node_modules``, ``.git``...) and for
+    a nested checkout. A sub-folder that holds a ``.git`` file or folder is a
+    worktree, clone or submodule: another copy of a project, not this one. Its files
+    must not count as this project's code (SLOP030 would double-report; SLOP001
+    would treat its modules as local and its dependency files as this project's,
+    see #58).
+    """
+    name = folder.name
+    return name in EXCLUDED_DIRS or name.endswith(".egg-info") or (folder / ".git").exists()
+
+
 def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path], list[Path]]:
     """Return (python files, dependency files, lock files) under the given paths.
 
@@ -75,24 +89,44 @@ def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Pa
             add(path)
             continue
         for dirpath, dirnames, filenames in os.walk(path):
-            # Prune excluded trees (.venv, node_modules, .git...) and nested checkouts
-            # before descending. A sub-folder that holds a .git file or folder is a
-            # worktree, clone or submodule: another copy of a project, not this one.
-            # Its files must not count as this project's code (SLOP030 would
-            # double-report; SLOP001 would treat its modules as local and its
-            # dependency files as this project's, see #58). The path passed on the
-            # command line is the walk root and is never pruned, so an explicitly
-            # named checkout is still checked.
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in EXCLUDED_DIRS
-                and not d.endswith(".egg-info")
-                and not (Path(dirpath, d) / ".git").exists()
-            ]
+            # Pruned before descending. The path passed on the command line is the
+            # walk root and is never pruned, so an explicitly named checkout is still
+            # checked.
+            dirnames[:] = [d for d in dirnames if not _is_pruned(Path(dirpath, d))]
             for filename in filenames:
                 add(Path(dirpath, filename))
     return sorted(set(py_files)), sorted(set(dep_files)), sorted(set(lock_files))
+
+
+def _home(path: Path, root: Path) -> Path | None:
+    """The folder a named file belongs to when the walk of the project never reaches it.
+
+    None for a file that the walk reaches: it belongs to the project. The walk never
+    leaves ``root`` and never enters a pruned folder (see ``_is_pruned``). A file that
+    is named there is checked all the same. It belongs to its own checkout, the
+    nearest folder above it that holds a ``.git``, and without one to its own folder.
+    """
+    above = list(path.parents)
+    if root in above:
+        above = above[: above.index(root)]
+        if not any(_is_pruned(folder) for folder in above):
+            return None
+    return next((folder for folder in above if (folder / ".git").exists()), path.parent)
+
+
+def _beside_named_files(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path]]:
+    """The dependency and lock files that named files outside the project walk are
+    judged with: those of their own checkout or folder (see ``_home``).
+
+    Such a file is read like one of the project. Without its neighbours, a private
+    index that its own checkout sets would not cover it, and its names would be sent.
+    """
+    named = (Path(path).resolve() for path in paths)
+    homes = {home for path in named if path.is_file() and (home := _home(path, root))}
+    if not homes:
+        return [], []  # the usual case: every named file is one the project walk reaches
+    _, deps, locks = discover_all(sorted(homes), root)
+    return deps, locks
 
 
 def _not_excluded(files: list[Path], root: Path, exclude: Sequence[str]) -> list[Path]:
@@ -330,8 +364,10 @@ def run(
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        to_read = _dependency_files_to_read(project[1], dep_files, root, exclude)
-        index = build_index(root, project[0], to_read, project[2], imports=check_imports)
+        beside_deps, beside_locks = _beside_named_files(paths, root)
+        to_read = _dependency_files_to_read([*project[1], *beside_deps], dep_files, root, exclude)
+        lock_files = sorted({*project[2], *beside_locks})
+        index = build_index(root, project[0], to_read, lock_files, imports=check_imports)
         checker = PackageChecker(
             index,
             registry,

@@ -15,6 +15,7 @@ from slopfence.detectors.packages import parse_dependency_file
 from slopfence.detectors.setuptools_files import _cfg_lines
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry, PyPIRegistry
+from slopfence.source import relative_path
 from tests.conftest import DownRegistry, FakeRegistry
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
@@ -1916,6 +1917,59 @@ def test_a_dependency_file_outside_the_project_is_still_checked(write, tmp_path)
         outside = shared.resolve().as_posix()  # reported with its full path
         assert [(f.path, f.subject) for f in result.findings] == [(outside, "ghost-pin")]
         assert result.files_checked == 2
+
+
+# A named file that the walk of the project never reaches, with the folder that is its
+# own checkout (None: it has none) and the requirements file that sets its index.
+OFF_THE_WALK = {
+    "a nested clone": ("proj/vendor/lib/src/setup.py", "proj/vendor/lib", "requirements.txt"),
+    "a nested worktree": ("proj/wt/fix/setup.py", "proj/wt/fix", "deploy/requirements.txt"),
+    "another project": ("other/pkg/setup.py", "other", "requirements.txt"),
+    "outside, no checkout": ("other/setup.py", None, "requirements.txt"),
+    "a build folder": ("proj/build/lib/setup.py", None, "requirements.txt"),
+    "a virtual environment": ("proj/.venv/src/tool/setup.cfg", None, "requirements/prod.txt"),
+}
+OFF_THE_WALK_BODY = {
+    "setup.py": "from setuptools import setup\nsetup(name='x', install_requires=['corp-auth'])\n",
+    "setup.cfg": "[options]\ninstall_requires =\n    corp-auth\n",
+}
+
+
+@pytest.mark.parametrize("layout", sorted(OFF_THE_WALK))
+def test_a_named_file_off_the_project_walk_is_judged_with_its_own_checkout(write, tmp_path, layout):
+    """``slopfence . vendor/lib/setup.py``: the walk of the project skips a nested
+    checkout, a build folder and everything outside the project. A file that is
+    named there is checked all the same, together with the dependency files of its
+    own checkout, or of its own folder when it has none. So a private index that is
+    set there covers it, as it does when the folder is named."""
+    named, checkout, requirements = OFF_THE_WALK[layout]
+    path = write(named, OFF_THE_WALK_BODY[PurePosixPath(named).name])
+    home = tmp_path / checkout if checkout else path.parent
+    index = write((home / requirements).relative_to(tmp_path).as_posix(), INDEX + "corp-core\n")
+    if checkout and "worktree" in layout:
+        write(f"{checkout}/.git", "gitdir: ../../.git/worktrees/fix\n")
+    elif checkout:
+        write(f"{checkout}/.git/HEAD", "ref: refs/heads/main\n")
+    root = tmp_path / "proj"
+    write("proj/app.py", "x = 1\n")
+    for paths in ([root, path], [path], [root, home]):
+        registry = FakeRegistry(set())
+        result = run(paths, root, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == []
+        assert f"a private package index is set in {relative_path(index, root)}," in result.notes[0]
+        assert "secret" not in result.notes[0]
+
+
+def test_a_named_file_the_walk_reaches_is_judged_with_the_project_alone(write, tmp_path):
+    """The look-alike: a file of the project itself is named. A nested checkout is
+    still another project, so its private index covers nothing here."""
+    path = write("pkg/setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n")
+    write("vendor/lib/.git/HEAD", "ref: refs/heads/main\n")
+    write("vendor/lib/requirements.txt", INDEX + "corp-core\n")
+    registry = FakeRegistry(set())
+    result = run([path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("pkg/setup.cfg", 3, 1)] and registry.queries == ["ghost-lib"]
+    assert result.notes == []
 
 
 def test_sarif_location_of_a_setup_py_finding(tmp_path, monkeypatch, capsys):
