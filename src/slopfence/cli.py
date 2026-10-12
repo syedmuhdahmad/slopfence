@@ -12,7 +12,7 @@ from slopfence import __version__, reporters
 from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
 from slopfence.analysis import default_jobs
-from slopfence.config import FAIL_ON, ConfigError, load_config
+from slopfence.config import FAIL_ON, ConfigError, load_config, selected_rules
 from slopfence.engine import Result, run
 from slopfence.indexes import find_private_index
 from slopfence.models import RULES, Severity, plural
@@ -281,9 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.write_baseline is not None:
         # A run that writes a baseline uses none: it records every finding. The file
         # is looked at now, so that a mistake doesn't cost a whole run.
-        problem = baselinemod.write_problem(
-            args.write_baseline, baselinemod.scope_of(args.paths, root), root
-        )
+        scope = baselinemod.scope_of(args.paths, root, exclude, selected_rules(select, ignore))
+        problem = baselinemod.write_problem(args.write_baseline, scope, root)
         if problem:
             return _error(f"can't write baseline {args.write_baseline}: {problem}")
     else:

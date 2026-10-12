@@ -21,9 +21,10 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from slopfence.config import is_excluded
 from slopfence.diff import ChangedLines, touches
 from slopfence.files import replace_text
-from slopfence.models import Finding, plural
+from slopfence.models import RULES, Finding, plural
 from slopfence.source import relative_path
 
 # Raise this when the file format, the way a fingerprint is normalized or the subject
@@ -60,6 +61,18 @@ class Match:
     hidden: list[Finding]
     # The entries, or the part of their count, that no finding used.
     unused: dict[Key, int]
+
+
+@dataclass(frozen=True)
+class Scope:
+    """What a run checks: the paths it was given, without the files and rules it leaves out."""
+
+    # Named the way findings name their files: see ``scope_of``.
+    paths: Sequence[str]
+    # Patterns of files that are not checked, as ``config.is_excluded`` takes them.
+    exclude: Sequence[str] = ()
+    # The rules of this version that do not run.
+    skipped: Collection[str] = frozenset()
 
 
 def normalize_fingerprint(text: str) -> str:
@@ -182,14 +195,14 @@ def load(path: Path) -> Baseline:
     return _parse(data, path)
 
 
-def write_problem(path: Path, scope: Collection[str], root: Path) -> str | None:
+def write_problem(path: Path, scope: Scope, root: Path) -> str | None:
     """Why ``--write-baseline`` must not write to ``path``, or None if it may.
 
     Asked before the scan, so that a mistake costs neither a full run nor a file.
     The folder must exist. A file that is there must be empty or a baseline: a
     forgotten file name (``--write-baseline src/app.py``) must not replace source
-    code. And replacing it must not drop findings for files outside ``scope``, the
-    paths this run checks (see ``scope_of``).
+    code. And replacing it must not drop findings that a run with ``scope`` does not
+    check (see ``uncovered``).
     """
     # os.path, not Path: these two never raise, whatever was typed as the file name.
     if not os.path.isdir(os.path.dirname(os.path.abspath(path))):
@@ -215,10 +228,11 @@ def write_problem(path: Path, scope: Collection[str], root: Path) -> str | None:
         return None  # another format version or damaged rows: nothing of use to lose
     lost = uncovered(old.entries, scope, root)
     if lost:
+        example, rule, _ = min(lost)
         return (
-            f"it holds {plural(sum(lost.values()), 'finding')} for files outside the "
-            f"checked paths (for example {min(lost)}). Check the whole project, or delete "
-            "the file first"
+            f"it holds {plural(sum(lost.values()), 'finding')} that this run does not "
+            f"check (for example {rule} in {example}). Check everything the baseline "
+            "holds, or delete the file first"
         )
     return None
 
@@ -271,13 +285,23 @@ def match(
     )
 
 
-def scope_of(paths: Iterable[Path], root: Path) -> list[str]:
-    """The paths a run was given, named the way findings name their files.
+def scope_of(
+    paths: Iterable[Path],
+    root: Path,
+    exclude: Sequence[str] = (),
+    rules: Collection[str] | None = None,
+) -> Scope:
+    """What a run on ``paths`` checks when it skips ``exclude`` and runs ``rules`` (None: all).
 
-    That is a project-relative POSIX path, "." for the project itself, and an
-    absolute path for anything outside the project.
+    The paths are named the way findings name their files: a project-relative POSIX
+    path, "." for the project itself, and an absolute path for anything outside the
+    project.
     """
-    return sorted({relative_path(Path(path).resolve(), root) for path in paths})
+    return Scope(
+        paths=sorted({relative_path(Path(path).resolve(), root) for path in paths}),
+        exclude=tuple(exclude),
+        skipped=frozenset(() if rules is None else RULES.keys() - set(rules)),
+    )
 
 
 def _exists(root: Path, path: str) -> bool:
@@ -304,35 +328,42 @@ def _outside_project(path: str) -> bool:
     )
 
 
-def _in_scope(path: str, scope: Collection[str]) -> bool:
+def _in_paths(path: str, paths: Collection[str]) -> bool:
     """Whether the file of a baseline row is one of, or inside one of, the paths of a run."""
     return any(
         path == given
         or path.startswith(given + "/")
         # The project itself holds every file that is named relative to it.
         or (given == "." and not _outside_project(path))
-        for given in scope
+        for given in paths
     )
 
 
-def uncovered(entries: Mapping[Key, int], scope: Collection[str], root: Path) -> dict[str, int]:
-    """The baselined findings of each file that exists but lies outside ``scope``.
+def uncovered(entries: Mapping[Key, int], scope: Scope, root: Path) -> dict[Key, int]:
+    """The baselined findings that a run with ``scope`` can't find again.
 
-    A run with that scope can't tell whether those findings are still there, and a
-    baseline written from it would lose them.
+    That is a finding of a rule that does not run, and a finding of a file that
+    exists but is outside the paths of the run or excluded from it. The run can't
+    tell whether those findings are still there, and a baseline written from it would
+    lose them. A finding of a file that is gone is lost already.
 
     A file outside the project (see ``_outside_project``) is taken to exist. Nothing is
     looked at outside the project unless the run was asked to check it: a row is data
     that anyone may edit, and on Windows a path can name another computer.
     """
-    outside: Counter[str] = Counter()
-    for (path, _, _), count in entries.items():
-        if not _in_scope(path, scope):
-            outside[path] += count
+    unchecked: dict[str, bool] = {}
+
+    def is_unchecked(path: str) -> bool:
+        """Whether the file exists, as far as anyone may look, and the run leaves it out."""
+        if path not in unchecked:
+            left_out = not _in_paths(path, scope.paths) or is_excluded(path, scope.exclude)
+            unchecked[path] = left_out and (_outside_project(path) or _exists(root, path))
+        return unchecked[path]
+
     return {
-        path: count
-        for path, count in sorted(outside.items())
-        if _outside_project(path) or _exists(root, path)
+        key: entries[key]
+        for key in sorted(entries)
+        if key[1] in scope.skipped or is_unchecked(key[0])
     }
 
 
@@ -340,24 +371,29 @@ def count_stale(
     unused: Mapping[Key, int],
     rules: Collection[str],
     checked: Collection[str],
-    scope: Collection[str],
+    scope: Scope,
     root: Path,
 ) -> int:
     """How many baselined findings this run should have found again, and did not.
 
     ``unused`` is what ``match`` left over. ``rules`` are the rules whose findings a
     run can be trusted to find again, ``checked`` the files that were checked, and
-    ``scope`` the paths the run was given.
+    ``scope`` what the run set out to check.
 
     An entry only counts when its rule is one of ``rules`` and its file was checked
-    or is gone. And nothing counts unless the run covers the baseline, which means
-    that no unused entry is for a file that exists outside ``scope``: the count comes
-    with the advice to write the baseline again, and only then does that lose nothing.
+    or is gone. And nothing counts unless the run covers the baseline. That means no
+    unused entry is for something the run left out (see ``uncovered``), or for a file
+    that is there but was not checked after all, because it is not valid Python. The
+    count comes with the advice to write the baseline again, and only then does that
+    lose nothing.
     """
     if uncovered(unused, scope, root):
         return 0
-    return sum(
-        count
-        for (path, rule, _), count in unused.items()
-        if rule in rules and (path in checked or not _exists(root, path))
-    )
+    gone = 0
+    for (path, rule, _), count in unused.items():
+        if rule not in rules:
+            continue
+        if path not in checked and _exists(root, path):
+            return 0
+        gone += count
+    return gone

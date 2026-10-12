@@ -10,7 +10,7 @@ from pathlib import Path
 from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
 from slopfence.analysis import FileSummary, Options, Task, analyze_files
-from slopfence.config import ignored_rules, is_excluded
+from slopfence.config import ignored_rules, is_excluded, selected_rules
 from slopfence.detectors import FILE_DETECTORS
 from slopfence.detectors.duplicates import check_duplicates
 from slopfence.detectors.packages import (
@@ -153,7 +153,7 @@ def _finish(
     baseline: baselinemod.Baseline | None,
     changed: diffmod.ChangedLines | None,
     rules: set[str],
-    scope: Sequence[str],
+    scope: baselinemod.Scope,
     root: Path,
 ) -> None:
     """Filter, order and label the findings of every rule, and put them in ``result``.
@@ -164,8 +164,8 @@ def _finish(
 
     ``sources`` are the files that were checked and ``switched_off`` says where
     ``per-file-ignores`` switch a rule off. ``rules`` are the rules that ran and
-    ``scope`` the paths of the run (see ``baseline.scope_of``): the two say which
-    baselined findings the run should have found again.
+    ``scope`` is what the run set out to check (see ``baseline.scope_of``): the two
+    say which baselined findings the run should have found again.
     """
     by_rel = {s.rel: s for s in sources}
     findings = [
@@ -237,8 +237,7 @@ def run(
     ``baseline`` holds findings that were accepted earlier: they are left out of
     ``Result.findings`` and listed in ``Result.baselined``.
     """
-    rules = set(select) if select else set(RULES)
-    rules -= set(ignore)
+    rules = selected_rules(select, ignore)
     root = root.resolve()
 
     found_py, found_deps, found_locks = discover_all(paths)
@@ -344,7 +343,7 @@ def run(
         baseline=baseline,
         changed=changed,
         rules=rules,
-        scope=baselinemod.scope_of(paths, root),
+        scope=baselinemod.scope_of(paths, root, exclude, rules),
         root=root,
     )
     return result

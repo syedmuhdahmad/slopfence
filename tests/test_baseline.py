@@ -13,7 +13,7 @@ import pytest
 import slopfence
 from slopfence import baseline as baselinemod
 from slopfence import cli
-from slopfence.baseline import Baseline, BaselineError, key_of, normalize_fingerprint
+from slopfence.baseline import Baseline, BaselineError, Scope, key_of, normalize_fingerprint
 from slopfence.cli import main
 from slopfence.config import load_config
 from slopfence.engine import run
@@ -1078,9 +1078,9 @@ def test_write_baseline_refuses_to_drop_findings_outside_the_checked_paths(
         patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
         assert main(["src", "--write-baseline", "base.json"]) == 2
     assert capsys.readouterr().err == (
-        "slopfence: error: can't write baseline base.json: it holds 4 findings for files "
-        "outside the checked paths (for example requirements.txt). Check the whole project, "
-        "or delete the file first\n"
+        "slopfence: error: can't write baseline base.json: it holds 4 findings that this run "
+        "does not check (for example SLOP001 in requirements.txt). Check everything the "
+        "baseline holds, or delete the file first\n"
     )
     assert (project / "base.json").read_bytes() == before
     # Another file name is fine. So is the same name once those files are gone.
@@ -1091,6 +1091,32 @@ def test_write_baseline_refuses_to_drop_findings_outside_the_checked_paths(
     assert {row[0] for row in rows(project / "base.json")} == {"src/app.py", "src/utils.py"}
     # And naming every path the baseline has findings for is the same as naming the project.
     assert main(["src/app.py", "src/utils.py", "--write-baseline", "base.json"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("options", "lost"),
+    [
+        (["--select", "SLOP040"], "8 findings that this run does not check (for example SLOP001"),
+        (["--ignore", "SLOP010,SLOP011"], "2 findings that this run does not check (for example "),
+        (["--exclude", "tests"], "3 findings that this run does not check (for example SLOP020"),
+        (["--exclude", "*.txt"], "1 finding that this run does not check (for example SLOP001"),
+    ],
+)
+def test_write_baseline_refuses_to_drop_findings_of_skipped_rules_and_files(
+    project, capsys, monkeypatch, options, lost
+):
+    """A run that leaves rules or files out must not replace the baseline of the full run."""
+    main([".", "--write-baseline", "base.json"])
+    before = (project / "base.json").read_bytes()
+    capsys.readouterr()
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
+        assert main([".", *options, "--write-baseline", "base.json"]) == 2
+    assert f"can't write baseline base.json: it holds {lost}" in capsys.readouterr().err
+    assert (project / "base.json").read_bytes() == before
+    # A file of its own is fine. And so is writing that one again with the same options.
+    assert main([".", *options, "--write-baseline", "part.json"]) == 0
+    assert main([".", *options, "--write-baseline", "part.json"]) == 0
 
 
 def test_baseline_can_be_written_again_for_a_path_outside_the_project(
@@ -1323,6 +1349,12 @@ def test_gone_note_needs_a_run_that_covers_the_baseline(project, capsys):
     # Every file the baseline names is inside the given paths: now it is safe to say.
     assert notes("src", "tests", "requirements.txt") == [note]
     assert notes(".") == [note]
+    # Rules or files left out: the same command with --write-baseline would drop their rows.
+    assert notes(".", "--select", "SLOP010") == []
+    assert notes(".", "--ignore", "SLOP040") == []
+    assert notes(".", "--exclude", "tests") == []
+    # Left out, but the baseline holds nothing for it: the run still covers the baseline.
+    assert notes(".", "--exclude", "docs") == [note]
 
 
 def test_part_of_a_project_does_not_make_duplicates_look_gone(write, tmp_path, monkeypatch, capsys):
@@ -1507,14 +1539,17 @@ def test_scope_of_names_the_paths_of_a_run(tmp_path, monkeypatch):
     """Paths are named the way findings name their files: "." is the project itself."""
     root = tmp_path / "project"
     (root / "src").mkdir(parents=True)
-    assert baselinemod.scope_of([root], root) == ["."]
+    assert baselinemod.scope_of([root], root) == Scope(["."])
     paths = [root / "src", root / "src", root / "a.py"]
-    assert baselinemod.scope_of(paths, root) == ["a.py", "src"]
+    assert baselinemod.scope_of(paths, root).paths == ["a.py", "src"]
     # A path outside the project is absolute, however it was typed.
     monkeypatch.chdir(root)
     outside = (tmp_path / "other").resolve().as_posix()
-    assert baselinemod.scope_of([Path("../other")], root) == [outside]
-    assert baselinemod.scope_of([Path("src/.."), Path("./src")], root) == [".", "src"]
+    assert baselinemod.scope_of([Path("../other")], root).paths == [outside]
+    assert baselinemod.scope_of([Path("src/.."), Path("./src")], root).paths == [".", "src"]
+    # What the run leaves out: excluded files, and the rules of this version that are off.
+    narrow = baselinemod.scope_of([root], root, ["tests"], {"SLOP010", "SLOP999"})
+    assert (narrow.exclude, narrow.skipped) == (("tests",), set(RULES) - {"SLOP010"})
 
 
 def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp_path):
@@ -1529,17 +1564,37 @@ def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp
         ("tests/c.py", "SLOP010", "x"): 1,
         ("tests/gone.py", "SLOP010", "x"): 5,  # no such file: nothing to lose
     }
-    assert baselinemod.uncovered(entries, ["src"], root) == {"srcs/b.py": 3, "tests/c.py": 1}
-    assert baselinemod.uncovered(entries, ["src", "srcs/b.py", "tests"], root) == {}
-    assert baselinemod.uncovered(entries, ["."], root) == {}
+
+    def lost(*paths, **left_out):
+        """How many findings of each file a run on ``paths`` can't find again."""
+        counts = {}
+        for (path, _, _), count in baselinemod.uncovered(
+            entries, Scope(paths, **left_out), root
+        ).items():
+            counts[path] = counts.get(path, 0) + count
+        return counts
+
+    assert lost("src") == {"srcs/b.py": 3, "tests/c.py": 1}
+    assert lost("src", "srcs/b.py", "tests") == {}
+    assert lost(".") == {}
     # A file outside the project has an absolute path. The project does not hold it.
     elsewhere = write("elsewhere/d.py", "x = 1\n").resolve().as_posix()
     entries[(elsewhere, "SLOP010", "x")] = 2
-    assert baselinemod.uncovered(entries, ["."], root) == {elsewhere: 2}
-    assert baselinemod.uncovered(entries, [".", elsewhere.rsplit("/", 1)[0]], root) == {}
+    assert lost(".") == {elsewhere: 2}
+    assert lost(".", elsewhere.rsplit("/", 1)[0]) == {}
     # So is every path of another system, and one that climbs out. A name is not.
     rows = {(path, "SLOP010", "x"): 1 for path in [*OUTSIDE, "..hidden/gone.py", "c/gone.py"]}
-    assert list(baselinemod.uncovered(rows, ["."], root)) == sorted(OUTSIDE)
+    assert [path for path, _, _ in baselinemod.uncovered(rows, Scope(["."]), root)] == sorted(
+        OUTSIDE
+    )
+    # Inside the paths, but left out: an excluded file that exists, and a rule that is off.
+    del entries[(elsewhere, "SLOP010", "x")]
+    assert lost(".", exclude=["tests"]) == {"tests/c.py": 1}
+    assert lost(".", exclude=["c.py", "gone.py", "docs"]) == {"tests/c.py": 1}
+    assert lost(".", skipped={"SLOP011"}) == {"srcs/b.py": 1}
+    assert lost(".", skipped={"SLOP010"}) == {"src/a.py": 1, "srcs/b.py": 2, "tests/c.py": 1} | {
+        "tests/gone.py": 5  # a rule that is off loses its findings whatever became of the file
+    }
 
 
 # Rows for files outside the project, as slopfence writes them on Linux, macOS and
@@ -1577,7 +1632,7 @@ def test_no_file_outside_the_project_is_looked_at_for_a_baseline_row(
     code, after = report(capsys, "--offline", "--baseline", "base.json")
     assert (code, after["baselined"], after["notes"]) == (0, 1, [])  # not called gone
     assert main([".", "--offline", "--write-baseline", "base.json"]) == 2
-    assert f"(for example {row})" in capsys.readouterr().err
+    assert f"(for example SLOP010 in {row})" in capsys.readouterr().err
     assert not [path for path in asked if "zz_outside" in path]
 
 
@@ -1588,14 +1643,26 @@ def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):
     unused = {
         ("a.py", "SLOP010", "x"): 2,  # checked, the rule ran: gone
         ("a.py", "SLOP001", "pkg"): 1,  # the rule is not one to trust
-        ("skipped.py", "SLOP010", "x"): 1,  # the file is there but was not checked
+        ("a.py", "SLOP999", "x"): 1,  # nor is a rule this version does not know
         ("deleted.py", "SLOP010", "x"): 4,  # the file is gone: so are its findings
     }
-    assert baselinemod.count_stale(unused, {"SLOP010"}, {"a.py"}, ["."], tmp_path) == 6
-    assert (
-        baselinemod.count_stale(unused, {"SLOP010"}, {"a.py"}, ["a.py", "skipped.py"], tmp_path)
-        == 6
-    )
-    # skipped.py is outside the paths of the run: the run does not cover the baseline.
-    assert baselinemod.count_stale(unused, {"SLOP010"}, {"a.py"}, ["a.py"], tmp_path) == 0
-    assert baselinemod.count_stale({}, {"SLOP010"}, {"a.py"}, ["."], tmp_path) == 0
+
+    def stale(*paths, checked=("a.py",), **left_out):
+        """The count for a run on ``paths`` that ran SLOP010 and checked ``checked``."""
+        return baselinemod.count_stale(
+            unused, {"SLOP010"}, checked, Scope(paths, **left_out), tmp_path
+        )
+
+    assert stale(".") == 6
+    assert stale("a.py", "deleted.py") == 6
+    assert stale(".", skipped={"SLOP040"}, exclude=["docs"]) == 6  # nothing of theirs is unused
+    # A rule that did not run has an unused entry: the run does not cover the baseline.
+    assert stale(".", skipped={"SLOP001"}) == 0
+    # Nor does it with an unused entry for a file that is there and was not checked:
+    # outside the paths of the run, excluded, or not valid Python.
+    unused["skipped.py", "SLOP010", "x"] = 1
+    assert stale("a.py") == 0
+    assert stale(".", exclude=["skipped.py"]) == 0
+    assert stale(".") == 0
+    assert stale(".", checked=("a.py", "skipped.py")) == 7
+    assert baselinemod.count_stale({}, {"SLOP010"}, {"a.py"}, Scope(["."]), tmp_path) == 0

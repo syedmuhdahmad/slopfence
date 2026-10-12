@@ -194,6 +194,11 @@ def load_config(root: Path) -> Config:
     return config
 
 
+def selected_rules(select: Iterable[str] | None, ignore: Iterable[str]) -> set[str]:
+    """The rules that run: the ``select`` list, or every rule, without the ``ignore`` list."""
+    return (set(select) if select else set(RULES)) - set(ignore)
+
+
 def ignored_rules(rel_path: str, per_file_ignores: Mapping[str, Iterable[str]]) -> frozenset[str]:
     """The rules that ``per-file-ignores`` switches off for a project-relative POSIX path.
 
