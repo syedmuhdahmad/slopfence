@@ -37,6 +37,12 @@ _HASH_CHARS = 12
 _NOT_A_BASELINE = (
     "the file exists and is not a slopfence baseline (delete it first, or choose another name)"
 )
+# What to do about a baseline that ``names_no_file``. {} is the project root.
+_NO_FILE_HERE = (
+    "no file that exists in {}. A baseline's paths are relative to the project root, and "
+    "without a git repository the root depends on where slopfence is run. Run slopfence "
+    "from the folder the baseline was written from"
+)
 
 # (project-relative POSIX path, rule ID, fingerprint)
 Key = tuple[str, str, str]
@@ -201,8 +207,9 @@ def write_problem(path: Path, scope: Scope, root: Path) -> str | None:
     Asked before the scan, so that a mistake costs neither a full run nor a file.
     The folder must exist. A file that is there must be empty or a baseline: a
     forgotten file name (``--write-baseline src/app.py``) must not replace source
-    code. And replacing it must not drop findings that a run with ``scope`` does not
-    check (see ``uncovered``).
+    code. It must be a baseline of this project (see ``names_no_file``). And replacing
+    it must not drop findings that a run with ``scope`` does not check (see
+    ``uncovered``).
     """
     # os.path, not Path: these two never raise, whatever was typed as the file name.
     if not os.path.isdir(os.path.dirname(os.path.abspath(path))):
@@ -226,6 +233,8 @@ def write_problem(path: Path, scope: Scope, root: Path) -> str | None:
         old = _parse(data, path)
     except BaselineError:
         return None  # another format version or damaged rows: nothing of use to lose
+    if names_no_file(old.entries, root):
+        return f"it names {_NO_FILE_HERE.format(root)}, or delete the file first"
     lost = uncovered(old.entries, scope, root)
     if lost:
         example, rule, _ = min(lost)
@@ -328,6 +337,19 @@ def _outside_project(path: str) -> bool:
     )
 
 
+def names_no_file(entries: Mapping[Key, int], root: Path) -> bool:
+    """Whether a baseline names files of the project and not one of them exists.
+
+    Then it was most likely written for another folder: every path in the file is
+    relative to the project root, and without a git repository that is the folder
+    slopfence is run from (see ``cli._project_root``). Or the files are all gone.
+    Nobody can tell the two apart, so such a baseline is neither called out of date
+    nor replaced.
+    """
+    inside = {path for path, _, _ in entries if not _outside_project(path)}
+    return bool(inside) and not any(_exists(root, path) for path in inside)
+
+
 def _in_paths(path: str, paths: Collection[str]) -> bool:
     """Whether the file of a baseline row is one of, or inside one of, the paths of a run."""
     return any(
@@ -397,3 +419,30 @@ def count_stale(
             return 0
         gone += count
     return gone
+
+
+def stale_note(
+    baseline: Baseline,
+    unused: Mapping[Key, int],
+    rules: Collection[str],
+    checked: Collection[str],
+    scope: Scope,
+    root: Path,
+) -> str | None:
+    """What to tell the user about baselined findings that a run did not find again.
+
+    None when there is nothing to say. ``unused`` and the arguments after it are those
+    of ``count_stale``.
+    """
+    if names_no_file(baseline.entries, root):
+        return (
+            f"The baseline names {_NO_FILE_HERE.format(root)}. If its files are gone for "
+            "good, delete the baseline and write it again."
+        )
+    gone = count_stale(unused, rules, checked, scope, root)
+    if not gone:
+        return None
+    return (
+        f"{plural(gone, 'finding')} in the baseline no longer exist{'s' if gone == 1 else ''}. "
+        "Run --write-baseline again to update the file."
+    )

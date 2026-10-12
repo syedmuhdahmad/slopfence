@@ -19,7 +19,7 @@ from slopfence.detectors.packages import (
     PackageChecker,
     build_index,
 )
-from slopfence.models import RULES, Finding, Severity, plural
+from slopfence.models import RULES, Finding, Severity
 from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
@@ -188,15 +188,11 @@ def _finish(
         # With --diff some rules only look at changed code, so an entry that nothing
         # used says nothing. Nor does one of a package rule: PyPI may not have answered.
         if changed is None:
-            gone = baselinemod.count_stale(
-                matched.unused, rules - PACKAGE_RULES, by_rel.keys(), scope, root
+            note = baselinemod.stale_note(
+                baseline, matched.unused, rules - PACKAGE_RULES, by_rel.keys(), scope, root
             )
-            if gone:
-                result.notes.append(
-                    f"{plural(gone, 'finding')} in the baseline no longer "
-                    f"exist{'s' if gone == 1 else ''}. Run --write-baseline again to "
-                    "update the file."
-                )
+            if note:
+                result.notes.append(note)
     if changed is not None:
         findings = _on_changed_lines(findings, changed)
         result.baselined = _on_changed_lines(result.baselined, changed)

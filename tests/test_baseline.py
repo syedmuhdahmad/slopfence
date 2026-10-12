@@ -968,12 +968,13 @@ def test_odd_paths_in_a_baseline_never_crash(write, tmp_path, monkeypatch, capsy
     odd = [
         ["a" * 5000 + ".py", "SLOP010", "x", 1],
         ["nul\x00byte.py", "SLOP010", "x", 2],
+        ["app.py", "SLOP010", "x", 1],  # a file that is there: the baseline is for this project
     ]
     (tmp_path / "base.json").write_text(json.dumps({"version": 1, "findings": odd}))
     monkeypatch.chdir(tmp_path)
     code, after = report(capsys, "--offline", "--baseline", "base.json")
-    assert (code, after["notes"]) == (0, [GONE.format("3 findings", "exist")])
-    # Writing over it works too: none of those files exists, so nothing is lost.
+    assert (code, after["notes"]) == (0, [GONE.format("4 findings", "exist")])
+    # Writing over it works too: the odd files don't exist, so nothing is lost.
     assert main([".", "--offline", "--write-baseline", "base.json"]) == 0
     assert rows(tmp_path / "base.json") == []
 
@@ -1016,7 +1017,7 @@ def test_write_baseline_never_replaces_a_file_that_is_not_a_baseline(
         "\n",
         '{"version": 2, "findings": [{"new": "format"}]}',
         '{"version": 1, "findings": [["damaged row"]]}',
-        '{"version": 1, "findings": [["gone.py", "SLOP010", "x", 1]]}',
+        '{"version": 1, "findings": [["app.py", "SLOP010", "x", 1]]}',
     ],
 )
 def test_write_baseline_replaces_empty_files_and_old_baselines(
@@ -1355,6 +1356,58 @@ def test_gone_note_needs_a_run_that_covers_the_baseline(project, capsys):
     assert notes(".", "--exclude", "tests") == []
     # Left out, but the baseline holds nothing for it: the run still covers the baseline.
     assert notes(".", "--exclude", "docs") == [note]
+
+
+def test_baseline_used_from_another_folder_is_not_called_gone(write, tmp_path, monkeypatch, capsys):
+    """Without git the project is the folder slopfence runs in, and a baseline's paths are
+    relative to it. From another folder no row matches. That is said as it is: nothing
+    is called gone, and --write-baseline does not replace the project's baseline."""
+    # No repository above the project, wherever the tests are run.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve()))
+    write("proj/src/app.py", "# I hope this helps!\n")
+    write("proj/tests/test_a.py", "def test_nothing():\n    assert True\n")
+    monkeypatch.chdir(tmp_path / "proj")
+    assert main([".", "--offline", "--write-baseline", "base.json"]) == 0
+    before = (tmp_path / "proj" / "base.json").read_bytes()
+
+    monkeypatch.chdir(tmp_path / "proj" / "src")
+    code, after = report(capsys, "--offline", "--baseline", "../base.json")
+    assert (code, [f["path"] for f in after["findings"]], after["baselined"]) == (1, ["app.py"], 0)
+    here = (tmp_path / "proj" / "src").resolve()
+    [note] = after["notes"]
+    assert note.startswith(f"The baseline names no file that exists in {here}. ")
+    assert "no longer exist" not in note and "Run --write-baseline again" not in note
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
+        assert main([".", "--offline", "--write-baseline", "../base.json"]) == 2
+        problem = f"can't write baseline {Path('../base.json')}: it names no file that exists in"
+        assert f"{problem} {here}. " in capsys.readouterr().err
+        # The same from the folder above the project.
+        monkeypatch.chdir(tmp_path)
+        assert main(["proj", "--offline", "--write-baseline", "proj/base.json"]) == 2
+    assert (tmp_path / "proj" / "base.json").read_bytes() == before
+
+    # In the folder it was written from, it works as before.
+    monkeypatch.chdir(tmp_path / "proj")
+    code, after = report(capsys, "--offline", "--baseline", "base.json")
+    assert (code, after["baselined"], after["notes"]) == (0, 2, [])
+    assert main([".", "--offline", "--write-baseline", "base.json"]) == 0
+
+
+def test_baseline_whose_files_are_all_gone_is_not_called_gone_either(
+    write, tmp_path, monkeypatch, capsys
+):
+    """Nobody can tell deleted files from the wrong folder, so the note names both."""
+    write("app.py", "x = 1\n")
+    old = [["old/a.py", "SLOP010", "x", 1], ["/elsewhere/b.py", "SLOP010", "x", 1]]
+    (tmp_path / "base.json").write_text(json.dumps({"version": 1, "findings": old}))
+    monkeypatch.chdir(tmp_path)
+    code, after = report(capsys, "--offline", "--baseline", "base.json")
+    [note] = after["notes"]
+    assert code == 0 and note.endswith("delete the baseline and write it again.")
+    # A baseline with nothing but files outside the project names no project file at all.
+    (tmp_path / "base.json").write_text(json.dumps({"version": 1, "findings": old[1:]}))
+    assert report(capsys, "--offline", "--baseline", "base.json")[1]["notes"] == []
 
 
 def test_part_of_a_project_does_not_make_duplicates_look_gone(write, tmp_path, monkeypatch, capsys):
