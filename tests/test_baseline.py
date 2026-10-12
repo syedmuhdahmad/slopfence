@@ -1080,10 +1080,9 @@ def test_bad_write_targets_are_refused_before_the_scan(tmp_path, monkeypatch, ca
     assert sorted(p.name for p in tmp_path.iterdir()) == ["adir"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows names its devices in another way")
 def test_write_target_that_is_not_a_regular_file_is_refused(write, tmp_path, monkeypatch, capsys):
     """A device or a named pipe is never read: on a pipe, that read would wait for ever."""
-    if os.path.isfile(os.devnull) or not os.path.exists(os.devnull):
-        pytest.skip("this system does not show its null device as a file that is not regular")
     write("app.py", "x = 1\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "run", None)  # refused before the scan: run() is never called
