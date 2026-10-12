@@ -70,12 +70,16 @@ else:  # pragma: no cover
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
 # How a line starts that is an option, a URL or a path, and so names no package.
 _NOT_A_NAME = ("-", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "file:", ".", "/")
-# Of the lines that start with "-" or ".", the ones that pip reads: an option ("-r",
-# "--hash=..."), the folder itself with or without extras (".", ".[dev]", ".."), and a
-# path, whose first word holds a separator ("./local", ".wheels/a.whl", ".\\local").
-# Any other is the underline, bullet or directive of a document ("-----", "- 4 GB RAM",
-# ".. toctree::").
-_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[)|\.\S*[/\\]")
+# How the markup of a document starts: an underline ("-----", "=====", "~~~~~"), a
+# bullet ("- 4 GB RAM", "* 4 GB RAM", "+ 2 CPUs"), a directive (".. toctree::"), a
+# quote ("> note"), the row of a table ("| a | b |"), literal text ("``pip``").
+_MARKUP_STARTS = ("-", ".", "=", "~", "*", "+", ">", "|", "`")
+# Of the lines that start like that, the ones that pip reads a requirement or an
+# option from: an option ("-r", "--hash=..."), the folder itself (".", "..") with or
+# without extras, a marker or an option of its own (".[dev]", ". ; python_version >=
+# '3.9'", ". --config-settings x=y"), and a path, whose first word holds a separator
+# ("./local", ".wheels/a.whl", ".\\local", "~/wheels/a.whl").
+_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[|\s*;|\s+--?[A-Za-z])|[.~]\S*[/\\]")
 _WORD_START = re.compile(r"[A-Za-z0-9]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
@@ -450,10 +454,16 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
 
     A line must be a valid requirement. A file with more prose lines than
     requirements is a document that is only named like a requirements file, and
-    yields nothing. So is a file with a line that only a document has: an underline,
-    a bullet or a directive (see ``_OPTION_OR_PATH``). pip takes no file with such a
-    line. Neither does a list for another package manager yield anything. The index
-    options of the file count in every case.
+    none of its names is looked up. So is a file with a line that only a document
+    has: an underline, a bullet, a directive (see ``_MARKUP_STARTS``). pip reads no
+    package from such a line: it turns the file down, or takes the line for an
+    option that says nothing. A line that goes on from the one before (it ended
+    with a backslash) is part of that line, whatever it starts with. What a
+    document says still counts: its names are
+    declared, and an entry with a source of its own (``name @ git+...``) keeps that
+    package from being looked up in every other file. A wrong guess about a file can
+    so only keep names on the machine. A list for another package manager yields
+    nothing. The index options of the file count in every case.
     """
     lines = text_lines(text)
     pip_lines = _pip_lines(lines)
@@ -464,18 +474,20 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     deps = []
     valid = prose = 0
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
-    # And whether any line is the markup of a document.
-    pip_syntax = markup = False
+    # Whether any line is the markup of a document. And whether the line before
+    # ended with a backslash: pip then reads the two as one.
+    pip_syntax = markup = continued = False
     for lineno, raw in pip_lines:
         # An ignore comment covers the line of the file that it is on, all of it.
         suppressed = suppresses_slop001(requirements_comment(lines[lineno - 1]))
         line = REQ_COMMENT.sub("", raw).strip()
+        goes_on, continued = continued, line.endswith("\\")
         if not line:
             continue
+        if not goes_on and line.startswith(_MARKUP_STARTS) and not _OPTION_OR_PATH.match(line):
+            markup = True
+            continue
         if line.startswith(_NOT_A_NAME):
-            if line[0] in "-." and not _OPTION_OR_PATH.match(line):
-                markup = True
-                continue
             pip_syntax = True
             # Options and bare URLs/paths: the name is only known from #egg=.
             if name := egg_name(line):
@@ -506,9 +518,11 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
                 own_source=sourced,
             )
         )
-    found = DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
-    if prose <= valid and not markup:
-        found.dependencies = deps
+    found = DependencyFile(rel, Kind.REQUIREMENTS, deps, private_index=private_index)
+    if prose > valid or markup:
+        for dep in deps:
+            dep.validate = False
+    else:
         found.plain_list = valid > 0 and not pip_syntax
     return found
 

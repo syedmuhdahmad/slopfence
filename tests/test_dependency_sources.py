@@ -411,7 +411,25 @@ DOCUMENTS = {
     "hardware-requirements.txt": "Hardware\n\n- 4 GB RAM\n- 2 CPUs\n\nSoftware\n\n- Ubuntu\n",
     "requirements/README.txt": "Overview\n--------\n\nbase\n  at run time\ndev\n  for the tests\n",
     "requirements.txt": "Usage\n-----\n\ninstall\n\n... then start the server\n",
+    # The same kinds of document with other markup: "=" and "~" underlines, "*" and
+    # "+" bullets, a quote, a table, literal text, an editor's mode line.
+    "docs/requirements/install.txt": (
+        "Requirements\n============\n\n* Python 3.8 or later\n* 4 GB RAM\n\n"
+        "Installation\n============\n\n1. Clone the repository\n2. Run make\n"
+    ),
+    "network-requirements.txt": (
+        "Hardware\n========\n\n* 4 GB RAM\n\nSoftware\n========\n\n* Ubuntu 20.04\n\n"
+        "Network\n=======\n\n* Port 443 open\n"
+    ),
+    "os-requirements.txt": "# Needs\n\nHardware\n\n+ 4 GB RAM\n\nSoftware\n\n> Ubuntu only\n",
+    "docs/requirements/usage.txt": "Overview\n~~~~~~~~\n\nUsage\n~~~~~\n",
+    "requirements/NOTES.txt": "Requirements\n\n| name | version |\n\nNotes\n\n``pip install``\n",
+    "requirements/index.txt": ".. -*- mode: rst -*-\n\nbase\ndev\n",
+    # Not a document, and no file pip takes either: a merge that is not finished.
+    "requirements-dev.txt": "<<<<<<< HEAD\nbase==2.0\n=======\nghost-lib==1.0\n>>>>>>> dev\n",
 }
+# Some words are missing on purpose: with as many names found as not, a file that is
+# read as a plain list is reported.
 WORDS = {"requirements", "hardware", "software", "minimum", "overview", "base", "usage"}
 
 
@@ -420,9 +438,10 @@ WORDS = {"requirements", "hardware", "software", "minimum", "overview", "base", 
 def test_a_document_with_an_underline_a_bullet_or_a_directive_is_skipped(
     write, check, name, on_pypi
 ):
-    """A line that starts with "-" or "." and is no option and no path is the markup
-    of a document: pip takes no file with such a line. Nothing of the file is sent
-    or reported, whatever PyPI has."""
+    """A line that starts like markup ("-", ".", "=", "~", "*", "+", ">", "|", a
+    backquote) and is no option and no path is the markup of a document: pip reads
+    no package from such a line. Nothing of the file is sent or reported, whatever
+    PyPI has."""
     write(name, DOCUMENTS[name])
     registry = FakeRegistry(on_pypi)
     assert check("SLOP001", registry=registry).findings == []
@@ -430,9 +449,11 @@ def test_a_document_with_an_underline_a_bullet_or_a_directive_is_skipped(
 
 
 def test_options_and_paths_keep_a_file_a_pip_file(write, check):
-    """The look-alike: every line of pip's own that starts with "-" or ".". An option,
-    the folder itself, and a path, also one into a hidden folder or with a
-    backslash. The invented name next to them is still reported."""
+    """The look-alike: every line of pip's own that starts like markup. An option, the
+    folder itself (also with a marker or an option of its own), a path (also one
+    into a hidden folder, with a backslash, or from the home folder), and a line
+    that goes on from the one before. The invented name next to them is still
+    reported."""
     lines = [
         "--pre",
         "-r other.txt",
@@ -446,7 +467,17 @@ def test_options_and_paths_keep_a_file_a_pip_file(write, check):
         "../up",
         ".wheels/a-1.0-py3-none-any.whl",
         ".\\local",
+        "~/wheels/a-1.0-py3-none-any.whl",
+        ". ; python_version >= '3.9'",
+        ".; python_version >= '3.9'",
+        ".. ; python_version >= '3.9'",
+        ". --config-settings editable_mode=strict",
         "asgiref==3.7.2 \\",
+        "    --hash=sha256:89b2ef2247e3b562a16eef663bc0e2e703ec6468e2fa8a5cd61cd449786d4f6e",
+        "requests \\",
+        "    >=2.0",
+        "asgiref \\",
+        "    ==3.7.2 \\",
         "    --hash=sha256:89b2ef2247e3b562a16eef663bc0e2e703ec6468e2fa8a5cd61cd449786d4f6e",
         "ghost-lib==1.0",
     ]
@@ -455,7 +486,7 @@ def test_options_and_paths_keep_a_file_a_pip_file(write, check):
     registry = FakeRegistry({"asgiref", "requests"})
     result = check("SLOP001", registry=registry)
     assert found(result) == [("requirements/base.txt", len(lines), 1)]
-    assert sorted(registry.queries) == ["asgiref", "ghost-lib", "requests"]
+    assert sorted(set(registry.queries)) == ["asgiref", "ghost-lib", "requests"]
 
 
 def test_a_cmake_file_in_a_requirements_folder_is_not_read(write, check):
@@ -2390,6 +2421,20 @@ SOURCED = {
         "setup.cfg",
         f"[options]\ninstall_requires =\n    corp-auth @ {GIT}\n    requests\n",
     ),
+    # A file that is taken for a document: none of its names is looked up, and what
+    # it says about a package still counts.
+    "document with an underline": (
+        "requirements.txt",
+        f"Internal packages\n-----------------\ncorp-auth @ {GIT}\nrequests==2.32.0\n",
+    ),
+    "document with an underline and an egg": (
+        "requirements.txt",
+        f"Internal packages\n-----------------\n-e {GIT}#egg=corp-auth\n",
+    ),
+    "document with more prose": (
+        "requirements.txt",
+        f"This file lists what we use.\nIt is kept by hand.\nAsk first.\ncorp-auth @ {GIT}\n",
+    ),
     # A notebook is read in every run, also when it is not among the checked files.
     "notebook egg": ("nb/train.ipynb", one_cell_notebook(f"%pip install {GIT}#egg=corp-auth\n")),
     "notebook direct reference": (
@@ -2424,6 +2469,32 @@ def test_a_package_with_a_source_of_its_own_is_not_looked_up_in_any_file(write, 
         result = run(paths, tmp_path, registry, select=["SLOP001"])
         assert result.findings == [] and set(registry.queries) <= {"requests"}
         assert result.notes == []
+
+
+PROSE = "This file lists what we use.\nIt is kept by hand.\nAsk the team first.\n"
+# Requirements files that are taken for a document, and name ``corp-auth`` all the same.
+DECLARING_DOCUMENTS = {
+    "an underline and an ignore comment": f"Internal\n--------\ncorp-auth==1.0{IGNORED}\n",
+    "an underline and a git entry": f"Internal\n--------\ncorp-auth @ {GIT}\n",
+    "a bullet and a links option": "-f ./wheels\ncorp-auth==1.0\n- 4 GB RAM\n",
+    "prose and an ignore comment": PROSE + "corp-auth==1.0  # slopfence: ignore\n",
+    "prose and a git entry": PROSE + f"corp-auth @ {GIT}\n",
+}
+
+
+@pytest.mark.parametrize("document", sorted(DECLARING_DOCUMENTS))
+def test_a_package_that_a_document_declares_is_not_looked_up_as_an_import(
+    write, check, not_installed, document
+):
+    """None of a document's names is looked up, and each still counts as declared: an
+    import of such a package was never sent, and is not now. Taking a real
+    requirements file for a document can so only keep names on the machine."""
+    write("requirements.txt", DECLARING_DOCUMENTS[document])
+    write("app.py", "import corp_auth\nimport ghost_mod_zz\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz"]
+    assert registry.queries == ["ghost-mod-zz", "ghost_mod_zz"]
 
 
 # What ``pip freeze`` prints for a project with two packages from git.
