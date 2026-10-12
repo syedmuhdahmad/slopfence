@@ -184,6 +184,8 @@ That is the file, the rule, what the finding is about, and how many there are. "
 
 A requirements file is a `.txt` or `.in` file whose name starts or ends with `requirements` or `constraints`: `requirements-dev.txt`, `dev-requirements.txt`, `requirements.in`, `constraints.txt`. Any `.txt` or `.in` file inside a folder named `requirements` is one too: `requirements/base.txt`. When the name mentions another package manager (`apt-requirements.txt`, `requirements-conda.txt`), the packages in the file are not read: they are not PyPI names. A private index that such a file names still counts. `CMakeLists.txt` is never read.
 
+A requirements file that is not UTF-8 is not looked up. Windows PowerShell 5 writes UTF-16, for example with `pip freeze > requirements.txt`. What such a file says about package sources still counts: its index options, and its entries from a URL, a path or git.
+
 Some names are read and never looked up:
 
 - **Your own packages.** The `name` in any `pyproject.toml`, `setup.cfg` or `setup.py` of the project is a package of this repository, so a dependency on it is not a hallucination.

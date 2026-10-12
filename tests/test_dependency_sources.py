@@ -1721,6 +1721,37 @@ def test_a_package_with_a_source_of_its_own_is_not_looked_up_in_any_file(write, 
         assert result.notes == []
 
 
+# What ``pip freeze`` prints for a project with two packages from git.
+FROZEN = (
+    f"certifi==2024.8.30\r\ncorp-auth @ {GIT}@3f2a9c1\r\n"
+    f"-e {GIT.replace('corp-auth', 'corp-kit')}#egg=corp-kit\r\nrequests==2.32.3\r\n"
+)
+FROZEN_NOT_UTF8 = {
+    "UTF-16": codecs.BOM_UTF16_LE + FROZEN.encode("utf-16-le"),
+    "Latin-1": "# Abh\u00e4ngigkeiten\r\n".encode("latin-1") + FROZEN.encode(),
+}
+
+
+@pytest.mark.parametrize("encoding", sorted(FROZEN_NOT_UTF8))
+def test_a_source_in_a_requirements_file_that_is_not_utf8_still_counts(tmp_path, encoding):
+    """``pip freeze > requirements.txt`` in Windows PowerShell writes UTF-16. The
+    packages of such a file are not looked up, as in v0.2. An entry from git still
+    says where its package comes from, so the same name in another file is not
+    sent, also when that file is checked alone."""
+    (tmp_path / "requirements.txt").write_bytes(FROZEN_NOT_UTF8[encoding])
+    setup = tmp_path / "setup.py"
+    setup.write_text(
+        "from setuptools import setup\n"
+        'setup(name="demo", install_requires=["corp-auth", "corp-kit", "requests"])\n',
+        encoding="utf-8",
+    )
+    for paths in ([tmp_path], [setup]):
+        registry = FakeRegistry({"requests"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        # Asked once: for setup.py. The names in the unread file are not asked about.
+        assert result.findings == [] and registry.queries == ["requests"]
+
+
 def test_a_name_held_back_for_another_reason_is_still_looked_up_elsewhere(write, check):
     """Only an entry that says where its package comes from speaks for other files. A
     file-wide ``--find-links``, or an ignore comment, covers its own line and no more."""

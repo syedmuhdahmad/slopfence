@@ -281,24 +281,27 @@ def _is_too_large(path: Path) -> bool:
         return False  # it can't be read at all, which the caller finds out next
 
 
-def _unread_requirements_name_an_index(path: Path) -> bool:
-    """Whether a requirements file that can't be read as UTF-8 names a private index.
+def _unread_requirements(path: Path, rel: str) -> DependencyFile:
+    """What a requirements file that can't be read as UTF-8 says about package sources.
 
     pip reads more than UTF-8: UTF-16 with a byte order mark (what ``>`` writes in
     Windows PowerShell), and the encoding of the user's locale. The packages of such
-    a file stay unread, as in v0.2. Its index options are plain ASCII in each of
-    these encodings, so they are found all the same, and the files that inherit from
-    this one keep their names on the machine.
+    a file are not looked up, as in v0.2. What the file says about where packages
+    come from is plain ASCII in each of these encodings, so it is read all the same:
+    its index options, and its entries with a source of their own
+    (``name @ git+...``, ``-e ...#egg=name``). The files that inherit from this one,
+    and the files that name such a package again, keep their names on the machine.
     """
     try:
         data = path.read_bytes()
     except OSError:
-        return False
+        return DependencyFile(rel, Kind.REQUIREMENTS)
     mark, encoding = next(
         (found for found in _BYTE_ORDER_MARKS if data.startswith(found[0])), (b"", "latin-1")
     )
-    text = data[len(mark) :].decode(encoding, "replace")
-    return _requirements_sources(text.splitlines())[0]
+    found = _parse_requirements(data[len(mark) :].decode(encoding, "replace"), rel)
+    found.dependencies = [dep for dep in found.dependencies if dep.own_source]
+    return found
 
 
 def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> DependencyFile:
@@ -324,8 +327,9 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
         return DependencyFile(rel, kind, too_large=True)
     text = read_source(path)
     if text is None:
-        private = kind is Kind.REQUIREMENTS and _unread_requirements_name_an_index(path)
-        return DependencyFile(rel, kind, private_index=private)
+        if kind is Kind.REQUIREMENTS:
+            return _unread_requirements(path, rel)
+        return DependencyFile(rel, kind)
     if kind is Kind.NOTEBOOK:
         return scan_notebook(text, rel, imports)
     if kind is Kind.SETUP_CFG:
