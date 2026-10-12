@@ -36,7 +36,7 @@ python3 .claude/tools/preflight.py                          # everything CI chec
 - `.github/action-fixture/` is sloppy on purpose, because CI scans it. Don't fix it.
 - Index URLs can hold credentials. Never print or log them.
 - slopfence's own rules run on this repo in CI: a duplicated function, a silent `except Exception: pass` or a placeholder comment fails the build.
-- CI fails if the sdist grows past 300 KB. It ships `src/`, `tests/`, `pyproject.toml`, `README.md`, `CHANGELOG.md` and `LICENSE`, and nothing from `docs/` or `.github/`.
+- CI fails if the sdist grows past 400 KB. It ships `src/`, `tests/`, `pyproject.toml`, `README.md`, `CHANGELOG.md` and `LICENSE`, and nothing from `docs/` or `.github/`.
 
 ## Compaction
 

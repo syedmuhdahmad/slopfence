@@ -134,9 +134,9 @@ jobs:
           # The limit keeps a demo GIF, a logo or a fixture folder from slipping in. It
           # was 100 KB until v0.3. Tests ship in the sdist, because people who package
           # slopfence run them, and the README is in it twice (as README.md and inside
-          # PKG-INFO). So it grows with every feature: v0.3 adds about 100 KB, most of
+          # PKG-INFO). So it grows with every feature: v0.3 adds about 200 KB, most of
           # it tests. The check above is the real guard against shipping assets.
-          [ "$size" -lt 300000 ] || { echo "::error::the sdist is larger than 300 KB"; exit 1; }
+          [ "$size" -lt 400000 ] || { echo "::error::the sdist is larger than 400 KB"; exit 1; }
       - name: Build a wheel from the sdist and run its tests
         run: |
           mkdir /tmp/from-sdist && tar xzf dist/*.tar.gz -C /tmp/from-sdist
