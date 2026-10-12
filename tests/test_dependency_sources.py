@@ -600,6 +600,9 @@ def test_a_plain_list_with_one_invented_name_is_reported(write, check):
         "libpq-dev[extra]\nlibxml2-dev\n",  # an extra
         'libpq-dev ; python_version < "3.12"\nlibxml2-dev\n',  # a marker
         "libpq-dev \\\n    --hash=sha256:abc\nlibxml2-dev\n",  # a hash
+        # A version in parentheses is pip syntax too, although Debian writes one the
+        # same way. Only PyPI's answers could tell the two apart: a limit in the README.
+        "libssl-dev (>= 1.1)\nlibpq-dev\nlibxml2-dev\n",
     ],
 )
 def test_a_file_with_pip_syntax_is_a_pip_file(write, check, body):
