@@ -296,8 +296,9 @@ def run(
             and (changed is None or s.rel in changed)
             and not switched_off("SLOP001", s.rel)
         ]
+        imported = [name for s in in_scope for name, _, _ in s.imports]
         # One batch with every name the two checks below will ask about.
-        checker.prefetch(checked_deps, (name for s in in_scope for name, _, _ in s.imports))
+        checker.prefetch(checked_deps, imported)
         findings.extend(checker.check_dependencies(only_paths=checked_deps))
         if private_index:
             result.notes.append(
@@ -313,7 +314,7 @@ def run(
             )
         for summary in in_scope:
             findings.extend(checker.check_imports(summary.rel, summary.imports))
-        if checker.lookups_unanswered(checked_deps, bool(in_scope)):
+        if checker.lookups_unanswered(checked_deps, imported):
             result.unchecked_rules = sorted(rules & PACKAGE_RULES)
 
     if "SLOP030" in rules:

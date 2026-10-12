@@ -1282,6 +1282,28 @@ def test_write_baseline_says_when_package_findings_may_be_missing(project, capsy
     assert report(capsys, "--offline", "--baseline", "base.json")[1]["notes"] == []
 
 
+def test_nothing_is_missing_when_there_was_no_name_to_ask_about(
+    write, tmp_path, monkeypatch, capsys
+):
+    """Without lookups, findings can only be missing for a name that would be looked up.
+    A known package and the standard library never are, so there is nothing to warn about."""
+    write("requirements.txt", "corp-auth\n")
+    write("app.py", "import os\nimport json\n\nx = os.sep\n")
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    options = ["--check-imports", "--known-packages", "corp-*", "--write-baseline", "base.json"]
+    wrote = "Wrote 0 findings to the baseline base.json."
+
+    assert report(capsys, "--offline", *options)[1]["notes"] == [wrote]
+    monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.corp.example/simple")
+    assert report(capsys, *options)[1]["notes"][1:] == [wrote]
+    # One import that would be looked up, and the warning is back in both kinds of run.
+    write("app.py", "import made_up_zz\n")
+    assert report(capsys, *options)[1]["notes"][1:] == [wrote, MAY_BE_MISSING]
+    monkeypatch.delenv("PIP_INDEX_URL")
+    assert report(capsys, "--offline", *options)[1]["notes"] == [wrote, MAY_BE_MISSING]
+
+
 @pytest.mark.parametrize(
     "unanswered", [{"requests", "flask-jwt-simple-auth"}, {"flask-jwt-simple-auth"}]
 )
@@ -1326,6 +1348,10 @@ def test_offline_import_checks_count_as_unanswered(write, check):
     write("app.py", "import made_up_zz\n")
     assert check("SLOP001").unchecked_rules == []  # imports are not checked: nothing to miss
     assert check("SLOP001", check_imports=True).unchecked_rules == ["SLOP001"]
+    # The file itself uses a private index: its imports are never looked up, online or
+    # not. That is how this project is always checked, so no finding is missing.
+    write("requirements.txt", "--index-url https://pypi.corp.example/simple\ncorp-auth\n")
+    assert check("SLOP001", check_imports=True).unchecked_rules == []
 
 
 # --- baselined findings that are gone ---------------------------------------------------
