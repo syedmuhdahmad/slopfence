@@ -962,6 +962,10 @@ EVERY_KIND = [
     "!pip install ignored-inline  # slopfence: ignore\n"
     "!pip install ignored-first \\\n    ignored-continued  # slopfence: ignore\n",
     "from ghost_from import x\nimport ignored_import  # slopfence: ignore\n",
+    # A continued line that is empty: the imports below it must stay on their lines.
+    "!pip install ghost-blank \\\n\nimport ignored_below  # slopfence: ignore\n"
+    "import ghost_below\nimport os\n",
+    "%pip install requests \\\n\nimport ghost_last\n",
 ]
 
 
@@ -987,8 +991,8 @@ def test_windows_line_ends_in_cell_sources_change_no_finding(
     text, windows, windows_sent = scan(crlf(EVERY_KIND))
     assert subjects(windows) == subjects(unix)
     assert sorted(subjects(windows)) == [
-        "ghost-continued", "ghost-first", "ghost-magic", "ghost-shell", "ghost-shell-two",
-        "ghost_from", "ghost_import",
+        "ghost-blank", "ghost-continued", "ghost-first", "ghost-magic", "ghost-shell",
+        "ghost-shell-two", "ghost_below", "ghost_from", "ghost_import", "ghost_last",
     ]  # fmt: skip
     assert windows_sent == unix_sent and not any("ignored" in name for name in windows_sent)
     lines = text.split("\n")

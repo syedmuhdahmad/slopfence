@@ -306,6 +306,10 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     A command line starts with ``!`` or ``%``, or is a bare ``pip install``. The
     replaced lines keep their indentation, so the result parses where the cell was
     Python around its magics. ``skip_first`` blanks the first line: a cell magic.
+
+    A carriage return at the end of a line is no indentation. Kept in front of
+    ``pass``, it would be one more line for Python's parser, and every import below
+    it would be found one line too low.
     """
     python = list(lines)
     commands: list[tuple[int, int]] = []
@@ -313,7 +317,8 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     offset = 0
     for n, line in enumerate(lines):
         stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
+        body = line.removesuffix("\r")
+        indent = len(body) - len(body.lstrip())
         if n == 0 and skip_first:
             python[n] = ""
         elif continued or _is_magic_line(stripped):
