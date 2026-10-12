@@ -123,7 +123,17 @@ def test_guard_allows_on_feature_branch(project: Path, command: str) -> None:
     assert bash_decision(command, project) == "allow"
 
 
-@pytest.mark.parametrize("command", ["ls -la", "git status", "echo git commit", "git log main"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la",
+        "git status",
+        "echo git commit",
+        "git log main",
+        "# git commit -m x",
+        "echo done # ; git commit -m x",
+    ],
+)
 def test_guard_ignores_other_commands(project: Path, command: str) -> None:
     """Commands that neither commit nor push are never touched."""
     assert bash_decision(command, project) == "allow"
@@ -149,6 +159,24 @@ def test_guard_follows_variables_set_on_the_command_line(project: Path, tmp_path
 
 
 @pytest.mark.parametrize(
+    "second_assignment",
+    ["W=$(pwd)", "W+=/sub", "read W", "for W in a b", "unset W", "declare W"],
+)
+def test_guard_forgets_a_variable_that_gets_an_unknown_value(
+    project: Path, tmp_path: Path, second_assignment: str
+) -> None:
+    """A variable set again to something the guard can't follow no longer has its old value.
+
+    Started in a feature-branch worktree, ``W`` first names the main checkout. If the
+    guard kept that value it would refuse a commit that happens somewhere else.
+    """
+    worktree = tmp_path / "wt"
+    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
+    command = f'W={project}; {second_assignment}; cd "$W" && git commit -m x'
+    assert bash_decision(command, project, cwd=worktree) == "allow"
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "cd $NO_SUCH_VARIABLE_HERE && git commit -m x",
@@ -170,6 +198,9 @@ def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) ->
         "cat > notes.txt <<EOF\ngit push origin main\nEOF",
         "cat <<-EOF > notes.txt\n\tgit commit --amend\n\tEOF\necho done",
         "python3 - <<'PY' && echo ok\ntext = 'git push'\nPY",
+        "cat <<'EOF'\n$(git commit -m x)\nEOF",
+        "cat <<\\EOF\n`git commit -m x`\nEOF",
+        "echo \"$(cat <<'EOF'\nhow to: git commit, then git push\nEOF\n)\"",
     ],
 )
 def test_guard_ignores_here_document_bodies(project: Path, command: str) -> None:
@@ -182,12 +213,42 @@ def test_guard_ignores_here_document_bodies(project: Path, command: str) -> None
     [
         "cat > notes.txt <<EOF\nsome notes\nEOF\ngit commit -m x",
         "git commit -F - <<'EOF'\nfix: it's done\nEOF",
+        "git commit -m \"$(cat <<'EOF'\nfix: it's done\nEOF\n)\"",
         "python3 -c 'print(1 << 4)' && git commit -m x",
+        "echo $((1 << n))\ngit commit -m x\nn",
         "echo hi <<< text && git push",
     ],
 )
 def test_guard_still_sees_commands_around_a_here_document(project: Path, command: str) -> None:
     """A real commit before, after or fed by a here-document is still denied on main."""
+    assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<EOF\n$(git commit -m x)\nEOF",
+        "cat <<EOF\nresult: `git commit -m x`\nEOF",
+        "bash <<'EOF'\ngit commit -m x\nEOF",
+        "/bin/sh -s <<EOF\ncd . && git push\nEOF",
+    ],
+)
+def test_guard_reads_here_document_text_the_shell_runs(project: Path, command: str) -> None:
+    """A command substitution in an unquoted body runs, and so does a body given to a shell."""
+    assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo '<<EOF'\ngit commit -m x",
+        'echo "<<EOF"\ngit commit -m x',
+        "echo hi # <<EOF\ngit commit -m x",
+        "echo \\<<EOF\ngit commit -m x\nEOF",
+    ],
+)
+def test_guard_takes_only_real_here_document_openers(project: Path, command: str) -> None:
+    """``<<`` in quotes or in a comment opens nothing, so the next line is still a command."""
     assert bash_decision(command, project) == "deny"
 
 
