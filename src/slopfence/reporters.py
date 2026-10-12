@@ -80,7 +80,10 @@ def sarif(result: Result, strict: bool = False) -> str:
             "name": rule.name,
             "shortDescription": {"text": rule.summary},
             "helpUri": "https://github.com/syedmuhdahmad/slopfence#planned-detectors",
-            "defaultConfiguration": {"level": _SARIF_LEVEL[rule.severity]},
+            # The severity this run used: the config can give a rule another one.
+            "defaultConfiguration": {
+                "level": _SARIF_LEVEL[result.severities.get(rule.id, rule.severity)]
+            },
         }
         for rule in RULES.values()
     ]

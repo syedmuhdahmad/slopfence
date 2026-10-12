@@ -1,16 +1,40 @@
 """Per-file ignores and per-rule severity overrides (#52)."""
 
+import json
+import subprocess
+
 import pytest
 
+from slopfence import reporters
 from slopfence.cli import main
 from slopfence.config import ConfigError, ignored_rules, load_config
-from slopfence.models import Severity
+from slopfence.models import RULES, Finding, Severity
+from tests.conftest import FakeBatchRegistry
+
+PLACEHOLDER = "# In a real implementation, retry\n"  # SLOP010, medium
+CHAT = "# I hope this helps!\n"  # SLOP051, medium
+# SLOP040, low
+SWALLOW = """
+def load(path):
+    try:
+        return open(path).read()
+    except Exception:
+        pass
+"""
 
 
 def pyproject(tmp_path, body):
     """Write a pyproject.toml whose slopfence part is ``body``."""
     text = "[project]\nname = 'demo'\n\n" + body
     (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+
+
+def reported(capsys, *args):
+    """Run the command line with JSON output: (path, rule, severity) of each finding."""
+    capsys.readouterr()
+    main([*args, "--offline", "--format", "json"])
+    report = json.loads(capsys.readouterr().out)
+    return [(f["path"], f["rule"], f["severity"]) for f in report["findings"]]
 
 
 # --- per-file-ignores: the config -------------------------------------------------------
@@ -97,6 +121,86 @@ def test_ignored_rules_use_exclude_patterns(path, expected):
     assert ignored_rules(path, table) == expected
 
 
+# --- per-file-ignores: what a run reports -----------------------------------------------
+
+
+def test_rule_is_off_only_in_matching_files(write, tmp_path, monkeypatch, capsys):
+    """The rule is skipped in matching files. Other rules and other files are not."""
+    write("scripts/run.py", PLACEHOLDER + CHAT)
+    write("src/app.py", PLACEHOLDER + CHAT)
+    pyproject(tmp_path, '[tool.slopfence.per-file-ignores]\n"scripts/*" = ["SLOP010"]\n')
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline"]) == 1
+    assert [f[:2] for f in reported(capsys, ".")] == [
+        ("scripts/run.py", "SLOP051"),
+        ("src/app.py", "SLOP010"),
+        ("src/app.py", "SLOP051"),
+    ]
+    # --ignore still applies on top.
+    assert [f[:2] for f in reported(capsys, ".", "--ignore", "SLOP051")] == [
+        ("src/app.py", "SLOP010")
+    ]
+    # A file passed by name, as pre-commit does, is matched by its path in the project.
+    assert [f[:2] for f in reported(capsys, "scripts/run.py")] == [("scripts/run.py", "SLOP051")]
+
+
+def test_per_file_ignore_can_leave_a_file_without_findings(write, check):
+    """With every rule a file breaks switched off for it, the run finds nothing there."""
+    write("scripts/run.py", PLACEHOLDER + CHAT + SWALLOW)
+    ignores = {"scripts/": ["SLOP010", "SLOP051", "SLOP040"]}
+    assert len(check().findings) == 3
+    result = check(per_file_ignores=ignores)
+    assert (result.findings, result.files_checked) == ([], 1)
+
+
+def test_per_file_ignore_for_a_rule_that_is_not_selected_changes_nothing(write, check):
+    """A pattern may name a rule that this run doesn't use."""
+    write("app.py", PLACEHOLDER + CHAT)
+    result = check("SLOP051", per_file_ignores={"app.py": ["SLOP010"]})
+    assert [f.rule for f in result.findings] == ["SLOP051"]
+
+
+def test_slop001_is_not_looked_up_in_ignored_files(write, check):
+    """Dependencies and imports of a file where SLOP001 is switched off are never sent."""
+    write("requirements.txt", "made-up-public-zz\n")
+    write("requirements-internal.txt", "corp-secret-zz\n")
+    write("src/app.py", "import made_up_import_zz\n")
+    write("src/internal.py", "import corp_secret_import_zz\n")
+    # This registry also takes a batch of names up front, like the real one. The names
+    # of an ignored file must be in neither the batch nor a single question.
+    registry = FakeBatchRegistry(set())
+    result = check(
+        "SLOP001",
+        registry=registry,
+        check_imports=True,
+        per_file_ignores={"requirements-internal.txt": ["SLOP001"], "internal.py": ["SLOP001"]},
+    )
+    assert [(f.path, f.line) for f in result.findings] == [
+        ("requirements.txt", 1),
+        ("src/app.py", 1),
+    ]
+    asked = " ".join([*registry.queries, *(name for batch in registry.batches for name in batch)])
+    assert "made-up-public-zz" in asked and "made_up_import_zz" in asked
+    assert "corp" not in asked
+    assert len(registry.batches) == 1  # the batch was really used
+
+
+def test_dependencies_of_an_ignored_file_still_count_as_declared(write, check):
+    """Switching SLOP001 off for pyproject.toml stops its lookups, not what it declares."""
+    write("pyproject.toml", '[project]\nname = "demo"\ndependencies = ["corp-auth-zz"]\n')
+    write("app.py", "import corp_auth_zz\nimport made_up_import_zz\n")
+    registry = FakeBatchRegistry(set())
+    result = check(
+        "SLOP001",
+        registry=registry,
+        check_imports=True,
+        per_file_ignores={"pyproject.toml": ["SLOP001"]},
+    )
+    # corp_auth_zz is provided by a declared dependency, so only the other import is asked.
+    assert [(f.path, f.line) for f in result.findings] == [("app.py", 2)]
+    assert "corp" not in " ".join(registry.queries + registry.batches[0])
+
+
 # --- severity: the config ---------------------------------------------------------------
 
 
@@ -150,3 +254,114 @@ def test_invalid_severity_exits_2(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline"]) == 2
     assert "'severity': SLOP040 must be one of high, medium, low" in capsys.readouterr().err
+
+
+def test_list_rules_with_an_invalid_config_exits_2(tmp_path, monkeypatch, capsys):
+    """--list-rules reads the config, so a config that is wrong is an error there too."""
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "critical"\n')
+    monkeypatch.chdir(tmp_path)
+    assert main(["--list-rules"]) == 2
+    captured = capsys.readouterr()
+    assert "'severity': SLOP040 must be one of high, medium, low" in captured.err
+    assert captured.out == ""
+
+
+# --- severity: what a run reports -------------------------------------------------------
+
+
+def test_overridden_severity_shows_in_every_format(write, tmp_path, monkeypatch, capsys):
+    """Text, JSON and SARIF all show the severity the config sets."""
+    write("app.py", SWALLOW + CHAT)
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "high"\nSLOP051 = "low"\n')
+    monkeypatch.chdir(tmp_path)
+
+    main([".", "--offline", "--no-color"])
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].startswith("  4:5      SLOP040  ") and lines[1].endswith("  [high]")
+    assert lines[2].startswith("  6:1      SLOP051  ") and lines[2].endswith("  [low]")
+    assert lines[-1] == "2 issues (1 high, 1 low)"
+
+    assert reported(capsys, ".") == [("app.py", "SLOP040", "high"), ("app.py", "SLOP051", "low")]
+
+    main([".", "--offline", "--format", "sarif"])
+    sarif = json.loads(capsys.readouterr().out)["runs"][0]
+    assert {r["ruleId"]: r["level"] for r in sarif["results"]} == {
+        "SLOP040": "error",
+        "SLOP051": "note",
+    }
+    # The rule's own level follows too, and a rule without an override keeps its level.
+    levels = {r["id"]: r["defaultConfiguration"]["level"] for r in sarif["tool"]["driver"]["rules"]}
+    assert (levels["SLOP040"], levels["SLOP051"], levels["SLOP010"]) == ("error", "note", "warning")
+
+
+def test_overridden_severity_shows_in_colour(write, check):
+    """The colour of a finding follows the severity the config sets, like its label."""
+    write("app.py", SWALLOW)
+    plain = reporters.text(check(), color=True)
+    red = reporters.text(check(severity={"SLOP040": Severity.HIGH}), color=True)
+    assert "\x1b[36mlow\x1b[0m" in plain and "\x1b[31m" not in plain
+    assert "\x1b[31mhigh\x1b[0m" in red and "\x1b[36m" not in red
+
+
+def test_overridden_severity_drives_fail_on(write, tmp_path, monkeypatch):
+    """--fail-on compares with the severity the config sets."""
+    write("app.py", SWALLOW)
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--fail-on", "high"]) == 0  # SLOP040 is low by default
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "high"\n')
+    assert main([".", "--offline", "--fail-on", "high"]) == 1
+    write("app.py", CHAT)  # SLOP051 is medium by default
+    assert main([".", "--offline", "--fail-on", "medium"]) == 1
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP051 = "low"\n')
+    assert main([".", "--offline", "--fail-on", "medium"]) == 0
+    assert main([".", "--offline"]) == 1  # still reported, and it fails at the default "low"
+
+
+def test_overrides_never_change_the_shared_rules_table(write, check):
+    """An override lives on the findings of one run. RULES and later runs keep the defaults."""
+    write("app.py", SWALLOW)
+    result = check(severity={"SLOP040": Severity.HIGH})
+    [finding] = result.findings
+    assert finding.severity is Severity.HIGH
+    assert result.severities == {"SLOP040": Severity.HIGH}
+    assert RULES["SLOP040"].severity is Severity.LOW
+    assert Finding("SLOP040", "app.py", 1, 1, "x").severity is Severity.LOW
+    later = check()
+    [again] = later.findings
+    assert again.severity is Severity.LOW and again.severity_override is None
+    assert later.severities == {}
+    # An override equal to the rule's own severity leaves the finding as it is.
+    assert check(severity={"SLOP040": Severity.LOW}).findings == [again]
+
+
+def test_list_rules_shows_configured_severities(tmp_path, monkeypatch, capsys):
+    """--list-rules shows the severity this project uses, and the rule's own next to it."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["--list-rules"]) == 0
+    plain = capsys.readouterr().out
+    assert "SLOP040  low     swallowed-exception:" in plain and "(default:" not in plain
+    assert len(plain.splitlines()) == len(RULES)
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "medium"\nSLOP001 = "high"\n')
+    assert main(["--list-rules"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    [slop040] = [line for line in lines if line.startswith("SLOP040")]
+    assert slop040.startswith("SLOP040  medium  swallowed-exception:")
+    assert slop040.endswith("(default: low)")
+    # Set to its own severity: there is nothing to point out.
+    [slop001] = [line for line in lines if line.startswith("SLOP001")]
+    assert slop001 in plain
+
+
+def test_list_rules_does_not_need_the_paths_to_exist(tmp_path, monkeypatch, capsys):
+    """The listing checks no file, so a path that isn't there is no error (as in v0.2)."""
+    pyproject(tmp_path, '[tool.slopfence.severity]\nSLOP040 = "medium"\n')
+    (tmp_path / "src").mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path / "src")
+    assert main(["no-such-folder/deeper/x.py", "--list-rules"]) == 0
+    # The project is found from the nearest folder that exists: here, the repository
+    # above src/, where the config is.
+    assert "SLOP040  medium" in capsys.readouterr().out
+    # Any other run still says that the path does not exist.
+    assert main(["no-such-folder/deeper/x.py", "--offline"]) == 2
+    assert "no-such-folder" in capsys.readouterr().err

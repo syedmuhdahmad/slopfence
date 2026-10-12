@@ -97,8 +97,10 @@ class Finding:
     # flagged comment. Baselines match findings on it, so it must stay the same when
     # the code moves: no line number, no other file's location. Every rule sets it.
     subject: str | None = None
+    # Set by the engine when the config gives this rule another severity.
+    severity_override: Severity | None = None
 
     @property
     def severity(self) -> Severity:
-        """The severity of the finding's rule."""
-        return RULES[self.rule].severity
+        """The severity the config sets for the finding's rule, or else the rule's own."""
+        return self.severity_override or RULES[self.rule].severity

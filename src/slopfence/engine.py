@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from slopfence import diff as diffmod
 from slopfence.analysis import Options, Task, analyze_files
-from slopfence.config import is_excluded
+from slopfence.config import ignored_rules, is_excluded
 from slopfence.detectors import FILE_DETECTORS
 from slopfence.detectors.duplicates import check_duplicates
 from slopfence.detectors.packages import LOCK_FILES, PackageChecker, build_index
-from slopfence.models import RULES, Finding
+from slopfence.models import RULES, Finding, Severity
 from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
@@ -89,6 +89,41 @@ class Result:
     parse_errors: list[str] = field(default_factory=list)
     # Things the user should know about the run, e.g. why lookups were skipped.
     notes: list[str] = field(default_factory=list)
+    # The severities the config sets (rule ID -> severity), for reports that list rules.
+    severities: dict[str, Severity] = field(default_factory=dict)
+
+
+def _per_file_matcher(
+    per_file_ignores: Mapping[str, Iterable[str]],
+) -> Callable[[str, str], bool]:
+    """A function that says whether ``per-file-ignores`` switches a rule off for a file.
+
+    It takes a rule ID and a project-relative POSIX path. The patterns are matched
+    once per file: findings come in runs of the same path.
+    """
+    off: dict[str, frozenset[str]] = {}
+
+    def switched_off(rule: str, rel: str) -> bool:
+        """Whether ``rule`` is switched off for the file ``rel``."""
+        if rel not in off:
+            off[rel] = ignored_rules(rel, per_file_ignores)
+        return rule in off[rel]
+
+    return switched_off
+
+
+def _with_severities(findings: list[Finding], severity: Mapping[str, Severity]) -> list[Finding]:
+    """``findings``, each with the severity the config sets for its rule.
+
+    A finding whose rule keeps its own severity is not touched, so it stays equal to
+    the finding of a run without the config.
+    """
+    return [
+        replace(f, severity_override=level)
+        if (level := severity.get(f.rule)) not in (None, RULES[f.rule].severity)
+        else f
+        for f in findings
+    ]
 
 
 def run(
@@ -103,6 +138,8 @@ def run(
     check_imports: bool = False,
     private_index: str | None = None,
     jobs: int = 1,
+    per_file_ignores: Mapping[str, Iterable[str]] | None = None,
+    severity: Mapping[str, Severity] | None = None,
 ) -> Result:
     """Check ``paths`` and return the findings.
 
@@ -116,6 +153,9 @@ def run(
     Files are parsed and checked in up to ``jobs`` worker processes when there are
     enough of them (see ``analysis.analyze_files``). The result does not depend on
     ``jobs``. Registry lookups always happen in this process.
+
+    ``per_file_ignores`` maps patterns (the kind ``exclude`` takes) to the rules that
+    are switched off in the matching files. ``severity`` gives rules another severity.
     """
     rules = set(select) if select else set(RULES)
     rules -= set(ignore)
@@ -153,7 +193,8 @@ def run(
     summaries = analyze_files(tasks, options, jobs)
     checked, compared_with = summaries[: len(py_files)], summaries[len(py_files) :]
 
-    result = Result()
+    result = Result(severities=dict(severity or {}))
+    switched_off = _per_file_matcher(per_file_ignores or {})
     result.parse_errors = [s.rel for s in checked if not s.parsed]
     sources = [s for s in checked if s.parsed]
     result.files_checked = len(sources) + len(dep_files)
@@ -165,10 +206,21 @@ def run(
         checker = PackageChecker(
             index, registry, known_packages=known_packages, private_index=private_index
         )
-        checked_deps = {_rel_to(p, root) for p in dep_files}
+        # The names of these files, and of no other file, may go to PyPI. A file where
+        # per-file-ignores switch SLOP001 off is left out here, where the two collections
+        # are made: the batch below and both checks are fed from them.
+        checked_deps = {
+            rel for p in dep_files if not switched_off("SLOP001", rel := _rel_to(p, root))
+        }
         # Imports are only sent to PyPI when the user opts in (they can reveal private
         # names), and never for files outside the diff.
-        in_scope = [s for s in sources if check_imports and (changed is None or s.rel in changed)]
+        in_scope = [
+            s
+            for s in sources
+            if check_imports
+            and (changed is None or s.rel in changed)
+            and not switched_off("SLOP001", s.rel)
+        ]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, (name for s in in_scope for name, _, _ in s.imports))
         findings.extend(checker.check_dependencies(only_paths=checked_deps))
@@ -193,17 +245,20 @@ def run(
         functions = [f for s in (*sources, *compared_with) for f in s.functions]
         findings.extend(check_duplicates(functions, {s.rel for s in sources}, changed))
 
-    # The filters, always in this order: ignore comments, then --diff.
+    # The filters, always in this order: ignore comments, per-file ignores, severities
+    # from the config (they only change a label), then --diff.
     by_rel = {s.rel: s for s in sources}
     findings = [
-        f for f in findings if not (f.path in by_rel and by_rel[f.path].is_ignored(f.rule, f.line))
+        f
+        for f in findings
+        if not (f.path in by_rel and by_rel[f.path].is_ignored(f.rule, f.line))
+        and not switched_off(f.rule, f.path)
     ]
     if changed is not None:
         findings = [f for f in findings if diffmod.touches(changed, f.path, f.line, f.end_line)]
 
     # The message breaks ties: ``import a, b`` gives two findings at one position, and
     # without it their order would be the set's, which changes with the hash seed.
-    result.findings = sorted(
-        set(findings), key=lambda f: (f.path, f.line, f.col, f.rule, f.message)
-    )
+    findings = sorted(set(findings), key=lambda f: (f.path, f.line, f.col, f.rule, f.message))
+    result.findings = _with_severities(findings, severity) if severity else findings
     return result

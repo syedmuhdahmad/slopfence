@@ -5,7 +5,7 @@ import contextlib
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from slopfence import __version__, reporters
@@ -111,7 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--exit-zero", action="store_true", help="exit 0 even if issues are found")
     parser.add_argument("--no-color", action="store_true")
-    parser.add_argument("--list-rules", action="store_true", help="list rules and exit")
+    parser.add_argument(
+        "--list-rules",
+        action="store_true",
+        help="list the rules with the severities this project uses, and exit",
+    )
     parser.add_argument("--version", action="version", version=f"slopfence {__version__}")
     return parser
 
@@ -142,6 +146,36 @@ def _end_like_an_interrupted_program() -> None:
         signal.raise_signal(signal.SIGINT)
 
 
+def _project_root(first_path: Path) -> Path:
+    """The project a run belongs to, found from the first path it was given.
+
+    That is the git repository the path is in. Without one, it is the current folder
+    when the path is inside it, and else the path's own folder.
+    """
+    start = first_path.resolve()
+    folder = start if start.is_dir() else start.parent
+    # --list-rules takes a path that doesn't exist: the nearest folder that does stands in.
+    while not folder.is_dir() and folder != folder.parent:
+        folder = folder.parent
+    root = diffmod.repo_root(folder)
+    if root is None:
+        cwd = Path.cwd().resolve()
+        root = cwd if folder == cwd or cwd in folder.parents else folder
+    return root
+
+
+def _print_rules(severity: Mapping[str, Severity]) -> None:
+    """Print every rule with the severity this project uses for it.
+
+    ``severity`` holds what the config sets. A rule it changes also shows its own
+    severity, so nobody takes the project's choice for the built-in one.
+    """
+    for rule in RULES.values():
+        level = severity.get(rule.id, rule.severity)
+        default = "" if level is rule.severity else f" (default: {rule.severity.value})"
+        print(f"{rule.id}  {level.value:<6}  {rule.name}: {rule.summary}{default}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run slopfence from the command line and return the exit code.
 
@@ -150,28 +184,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     _use_utf8_output()
     args = build_parser().parse_args(argv)
 
-    if args.list_rules:
-        for rule in RULES.values():
-            print(f"{rule.id}  {rule.severity.value:<6}  {rule.name}: {rule.summary}")
-        return EXIT_OK
+    missing = next((path for path in args.paths if not path.exists()), None)
+    # --list-rules checks no file, so it doesn't mind a path that isn't there.
+    if missing is not None and not args.list_rules:
+        print(f"slopfence: error: {missing} does not exist", file=sys.stderr)
+        return EXIT_ERROR
 
-    for path in args.paths:
-        if not path.exists():
-            print(f"slopfence: error: {path} does not exist", file=sys.stderr)
-            return EXIT_ERROR
-
-    start = args.paths[0].resolve()
-    start_dir = start if start.is_dir() else start.parent
-    root = diffmod.repo_root(start_dir)
-    if root is None:
-        cwd = Path.cwd().resolve()
-        root = cwd if start_dir == cwd or cwd in start_dir.parents else start_dir
-
+    root = _project_root(args.paths[0])
     try:
         config = load_config(root)
     except ConfigError as err:
         print(f"slopfence: error: {err}", file=sys.stderr)
         return EXIT_ERROR
+    if args.list_rules:
+        _print_rules(config.severity)
+        return EXIT_OK
+
     # Command-line options replace the matching config values.
     select = args.select if args.select is not None else config.select
     ignore = args.ignore if args.ignore is not None else config.ignore
@@ -215,6 +243,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             check_imports=check_imports,
             private_index=private_index,
             jobs=jobs,
+            per_file_ignores=config.per_file_ignores,
+            severity=config.severity,
         )
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.
