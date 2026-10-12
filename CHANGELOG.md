@@ -10,10 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - On projects with 200 or more Python files, slopfence now starts worker processes: one for every 100 files, up to one per CPU and at most 8. Findings are the same. To switch this off, pass `--jobs 1` or set `jobs = 1` in `[tool.slopfence]` ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12)).
+- **Starting on a project that already has findings is easier.** Record them once with `--write-baseline`, then fail only on new ones with `--baseline`. See "Baseline: start with the code you have" in the README ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51)).
+- `--list-rules` now reads `[tool.slopfence]`. With a config that is not valid it exits with code `2`, where v0.2 printed the rules ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52)).
+- JSON reports have a new `baselined` key. It is `0` when no baseline is used ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51)).
 
 ### Added
 
 - `--jobs N` option and `jobs` config key: files are read, parsed and checked in up to `N` worker processes. Default: one per CPU, at most 8. The report is the same with any number of jobs. If worker processes can't start, a warning is printed and the files are checked in one process ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- **Baseline mode:** `--write-baseline FILE` records the findings of a run. `--baseline FILE`, or `baseline = "FILE"` in `[tool.slopfence]`, hides them, so only new findings are reported and only new findings fail the run. `--no-baseline` shows everything again. A finding is matched by its file, its rule and what it is about (a package, function or test name, or the text of the flagged comment), not by its line number. So it stays hidden when code moves or is reformatted. It comes back when the function, the test or the file is renamed, or the comment is reworded. It works with `--diff`, `--fail-on` and every output format ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51))
+- With a baseline, the summary says how many findings were hidden, JSON reports have a `baselined` count, and SARIF reports leave baselined findings out and say how many there were. A note says when baselined findings are gone, so the file can be written again. It only comes when the run checks everything the baseline holds ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51))
+- `--write-baseline` is careful with the file it replaces. It stops before the scan when the file is not a baseline (a forgotten file name can't destroy source code), and when the file holds findings that the run does not check: for files outside the checked paths, for excluded files, or for rules that are switched off. The file is replaced in one step. A note says when `SLOP001` findings may be missing because PyPI was not asked or did not answer ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51))
+- **Per-file ignores:** `[tool.slopfence.per-file-ignores]` turns rules off in the files that match a pattern. A pattern works like an `exclude` pattern. Dependencies and imports in a file where `SLOP001` is off are not sent to PyPI ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
+- **Severity overrides:** `[tool.slopfence.severity]` gives a rule another severity. Text, JSON and SARIF reports, `--fail-on` and `--list-rules` use it ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 
 ### Changed
 
@@ -22,10 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PyPI lookups are sent 8 at a time instead of one by one. 200 uncached names took more than 90 seconds and now take about 10. What is sent has not changed. A name is requested once per run, also when PyPI gives no answer for it ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
 - The PyPI cache file is written in one step, so two runs at the same time can't leave a broken file ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
 - Ctrl-C during a scan prints `slopfence: interrupted` and exits with status `130`, instead of a traceback. On Windows, worker processes that are still starting can print tracebacks of their own ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- With `--check-imports`, an import under an ignore comment (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`) is no longer looked up on PyPI. Its finding was already hidden. Dependencies with such a comment were never looked up ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
+- `--list-rules` reads the project's config and shows the severities the project uses. A rule with another severity than its own also shows `(default: ...)`. Without overrides the output is the same as before ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
+- SARIF: a rule's `defaultConfiguration.level` is the severity the run used. It only differs from before when `[tool.slopfence.severity]` changes the rule ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 
 ### Fixed
 
 - Findings at the same position (`import a, b` where neither exists) could be listed in a different order from run to run. They are now ordered by message ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- `SLOP030`: checking a folder or a few files now reports the same duplicates in them as checking the whole project. Before, one copy could be missed when the first copy was outside the checked paths, or when folder names sort differently as folders and as text (`a/` and `a-b/`) ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - A file that Python only warns about (an invalid escape sequence such as `"\d"`) counted as unparseable when warnings were turned into errors (`python -W error`). Such a file is now always parsed, and Python's warning about it is no longer printed ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 
 ## [0.2.0] - 2026-10-03

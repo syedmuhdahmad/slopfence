@@ -8,13 +8,10 @@ from slopfence.cli import main
 from slopfence.config import ConfigError, load_config
 from slopfence.engine import run
 from tests.conftest import FakeRegistry, rule_lines
+from tests.conftest import pyproject as _pyproject
 
 MEDIUM_ONLY = "# I hope this helps!\n"  # SLOP051 is medium
 BROKEN = "def broken(:\n"
-
-
-def _pyproject(tmp_path, body):
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n\n" + body)
 
 
 # --- known-packages (#15) ---------------------------------------------------

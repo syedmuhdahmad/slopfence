@@ -59,12 +59,15 @@ slopfence --diff main
 | `--known-packages` | Comma-separated private package names or globs that `SLOP001` must accept, e.g. `--known-packages corp-*` |
 | `--detect-private-index` / `--no-detect-private-index` | Skip PyPI lookups when pip or uv is set up with a private index (on by default). Turn it off if that index only mirrors PyPI. See [Private package indexes](#private-package-indexes) |
 | `--fail-on high\|medium\|low` | Lowest severity that fails the run (default `low`: any issue). All issues are still reported |
+| `--baseline FILE` | Hide the findings recorded in `FILE` and report only new ones. See [Baseline: start with the code you have](#baseline-start-with-the-code-you-have) |
+| `--write-baseline FILE` | Record the current findings in `FILE`. They are not reported, and later runs with `--baseline FILE` hide them |
+| `--no-baseline` | Ignore the `baseline` set in the config and report every finding |
 | `--strict` / `--no-strict` | Exit `2` if any Python file can't be parsed (by default it's skipped with a warning) |
 | `--jobs N` | Check files in up to `N` processes. Default: one per CPU, at most 8. `--jobs 1` uses a single process. See [Speed](#speed) |
 | `--exit-zero` | Always exit 0 (report only) |
-| `--list-rules` | Show all rules |
+| `--list-rules` | Show all rules with the severities this project uses |
 
-Exit codes: `0` no issues (or none at or above `--fail-on`), `1` issues found, `2` error (bad options or config, or unparseable files with `--strict`), `130` stopped with Ctrl-C.
+Exit codes: `0` no issues (or none at or above `--fail-on`, or none that the baseline doesn't hide), `1` issues found, `2` error (bad options or config, a baseline file that is missing, not valid or can't be written, or unparseable files with `--strict`), `130` stopped with Ctrl-C.
 
 Run slopfence with a Python at least as new as the syntax your code uses; otherwise newer syntax can't be parsed.
 
@@ -83,11 +86,28 @@ detect-private-index = true                  # false if your private index only 
 fail-on = "high"                             # only high-severity issues fail the run
 strict = true                                # unparseable files are an error
 jobs = 4                                     # worker processes (default: one per CPU, at most 8)
+baseline = ".slopfence-baseline.json"       # hide the findings recorded in this file
+
+[tool.slopfence.per-file-ignores]            # rules to skip in some files
+"scripts/*" = ["SLOP040"]
+"legacy/" = ["SLOP030", "SLOP011"]
+
+[tool.slopfence.severity]                    # give a rule another severity
+SLOP040 = "medium"
 ```
 
 `exclude` works like `.gitignore`: a pattern without a `/` in the middle matches any file or folder name anywhere (`migrations`, `*_pb2.py`), and a pattern with one is relative to the project root (`tests/fixtures/`). Excluded files are never checked, but imports of excluded modules still count as your own code.
 
-Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`) replace the matching config values. Unknown keys and rule IDs are reported as errors (exit code `2`).
+`per-file-ignores` turns rules off in the files that match a pattern. A pattern works exactly like an `exclude` pattern. Put it in quotes. If several patterns match a file, all their rules are skipped. Unlike `exclude`, every other rule still checks the file. Two details:
+
+- Dependencies and imports in a file where `SLOP001` is off are not looked up on PyPI at all.
+- `SLOP030` is off for the functions *in* a matching file. Code anywhere else that copies a helper from `legacy/` is still reported, whichever of the two is older. With `--diff`, it is only reported when its own lines changed. So a change that only adds a copy of your code *inside* `legacy/` passes a `--diff` run, and the next full run reports the older code outside the folder.
+
+`severity` gives a rule another severity: `high`, `medium` or `low`. Text, JSON and SARIF reports, `--fail-on` and `--list-rules` all use it. For example, with `SLOP040 = "high"` a swallowed exception fails a run that uses `--fail-on high`.
+
+`baseline` is explained in [Baseline: start with the code you have](#baseline-start-with-the-code-you-have).
+
+Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`, `--baseline`) replace the matching config values. `per-file-ignores` and `severity` can only be set in the config. Unknown keys, rule IDs and severities are reported as errors (exit code `2`).
 
 ### Ignoring a finding
 
@@ -98,9 +118,58 @@ x = legacy()  # slopfence: ignore
 
 Put `# slopfence: ignore-file` anywhere in a file to skip it. In `requirements.txt`, add `# slopfence: ignore` to a line.
 
+To skip a rule in whole files or folders, use [`per-file-ignores`](#configuration). To accept everything a project has today and only see new findings, use a [baseline](#baseline-start-with-the-code-you-have).
+
 **Private packages:** if your project uses internal packages that aren't on PyPI, list them once in `known-packages` instead of adding ignore comments everywhere. Names are matched case-insensitively with `-`, `_` and `.` treated alike (so `corp_auth` matches `corp-auth`), and `*` globs work. Known packages are never looked up on PyPI, and imports of them are never flagged.
 
 `SLOP010` (placeholders) also skips test code and demo or example code: files under `demo/`, `examples/` or `samples/` folders, or named like `demo.py` or `auth_example.py`.
+
+### Baseline: start with the code you have
+
+An existing project may have hundreds of findings. A baseline records them once, so slopfence only reports what is new:
+
+```bash
+slopfence --write-baseline .slopfence-baseline.json   # record today's findings
+git add .slopfence-baseline.json
+slopfence --baseline .slopfence-baseline.json          # from now on: new findings only
+```
+
+Or set it once in `pyproject.toml`. Then every run, the pre-commit hook and the GitHub Action use it:
+
+```toml
+[tool.slopfence]
+baseline = ".slopfence-baseline.json"
+```
+
+With a baseline, only new findings are reported, and only new findings fail the run. The summary says how many were hidden:
+
+```text
+1 issue (1 medium); 42 more hidden by the baseline
+```
+
+**What is recorded.** The file has one line per finding:
+
+```json
+["src/auth.py", "SLOP011", "validate_token", 1]
+```
+
+That is the file, the rule, what the finding is about, and how many there are. "What it is about" is the package name, the function or test name, or the text of the flagged comment. There is no line number. So a finding stays hidden when you add lines above it, change the code around it, or reformat the file.
+
+**When a finding comes back.** When you rename the function or the test, reword the comment, or rename or move the file. slopfence then sees a new finding.
+
+**Good to know:**
+
+- It works with `--diff`: only findings on changed lines are reported, and baselined ones stay hidden. It works with `--fail-on` and with every output format. JSON reports have a `baselined` count. SARIF reports leave baselined findings out.
+- Two findings in one file that are about the same thing (two `except Exception: pass` in one function) are counted. If a third appears, one is reported: the one on your changed lines with `--diff`, otherwise the last one in the file.
+- Duplicate functions (`SLOP030`): a full run reports every copy except the first, so the first copy has no line in the file. It is accepted all the same. With `--diff`, editing either copy does not bring the pair back, also when the two are only 90% alike afterwards. (If every line of the first copy changes, it can count as a new function.) Near-copies are only looked for with `--diff`, so a baseline never records one. A near-copy that a change adds is reported. And when you write the baseline again, a pair that is no longer identical drops out of it. A later change to one of the two is then reported, as long as they are still 90% alike. To keep a near-copy, add `# slopfence: ignore[SLOP030]` to its `def` line. A copy added to a file where `SLOP030` is switched off is not reported by a `--diff` run: see [`per-file-ignores`](#configuration).
+- When baselined findings are gone, slopfence says so in a note. Run `--write-baseline` again to drop them from the file. The note only comes when the run checks everything the baseline holds. So it never comes with `--diff`, and not when the paths you give, or `exclude`, `select` and `ignore`, leave out files or rules that the baseline has findings for. It never counts `SLOP001`: a missing answer from PyPI must not look like a fix.
+- `--write-baseline` records every finding of that run and reports none. Use the options your normal runs use (`--select`, `--check-imports`…). Run it online: without answers from PyPI there are no `SLOP001` findings to record, and a note says so. It can't be combined with `--diff`.
+- `--write-baseline` only replaces a baseline. It stops if `FILE` is some other file. It also stops if `FILE` holds findings that this run does not check: for files outside the paths you give, for files you exclude, or for rules that are switched off. Check everything the baseline holds, or delete `FILE` first.
+- `baseline` in the config is relative to the project root. `--baseline FILE` is relative to the folder you are in, and it replaces the config value. `--no-baseline` shows everything again.
+- The paths inside the file are relative to the project root. That is the git repository the checked path is in. Without git, it is the folder you run slopfence from (or the checked folder, when that is somewhere else), so run slopfence the same way every time. If no file that the baseline names exists there, slopfence says so in a note, and `--write-baseline` does not replace the file.
+- A file outside the project (`slopfence . ../shared`) is recorded with its full path. That row only matches on a machine where the file has the same path. slopfence only looks at such a file when you give its path to the run.
+- A baseline file that is missing or can't be read is an error (exit code `2`), not an empty baseline.
+- Files that can't be parsed are not findings, so they can't be baselined. Use `exclude` for those.
 
 ### What slopfence sends over the network
 
@@ -111,7 +180,7 @@ slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. 
 | Dependencies declared in `requirements*.txt` and `pyproject.toml` | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent. Neither is any dependency in a file that uses a private index: `--index-url` / `--extra-index-url` in a requirements file, a `[[tool.poetry.source]]` or `[[tool.uv.index]]` that isn't PyPI (unless it's `explicit`, which only affects the dependencies that name it), or a per-dependency Poetry `source` or `[tool.uv.sources]` entry |
 | Imports in your source code that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
-Names in `known-packages` are never sent. Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. `--offline` sends nothing at all.
+Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. `--offline` sends nothing at all.
 
 ### Private package indexes
 
@@ -139,7 +208,7 @@ With `--check-imports`, an import isn't looked up when a declared dependency or 
 To keep false positives low, the newer rules are deliberately conservative:
 
 - **`SLOP011` stub functions** needs a docstring that promises work (it starts with a verb like *validate*, *fetch*, *send*, *calculate*) or admits it isn't done (*placeholder*, *TODO*, *for now*). The body must then return hardcoded data while ignoring every input, or return nothing although the return type promises a value. A placeholder docstring over a body that does nothing (`pass`, `...`, `return None`) is reported even without a return type. `.pyi` stub files are never checked. Abstract methods, `@overload`, properties, `Protocol`/ABC classes, `if TYPE_CHECKING:` blocks, documented hooks ("override this", "does nothing by default") and tests are skipped.
-- **`SLOP030` duplicate functions** ignores functions with fewer than 3 statements and test code. Parameter and variable names and docstrings don't matter; called functions, attributes and constants do. A full scan reports **identical** copies (every copy except the first). With `--diff`, functions you changed are also compared with the rest of the project and reported when they're **≥90% similar** to an existing function, because that's when an assistant re-writes a helper that already exists. Never reported: methods with the same name in different classes (plugins, drivers), functions defined twice in one file (under `if`/`try`), near-duplicate methods, and parallel families that differ only by swapped names, operators or constants (`md5_utf8`/`sha_utf8`, `polyadd`/`polysub`).
+- **`SLOP030` duplicate functions** ignores functions with fewer than 3 statements and test code. Parameter and variable names and docstrings don't matter; called functions, attributes and constants do. A full scan reports **identical** copies (every copy except the first). "The first" is the first by path, and files where `SLOP030` is switched off with `per-file-ignores` always count as first. With `--diff`, functions you changed are also compared with the rest of the project and reported when they're **≥90% similar** to an existing function, because that's when an assistant re-writes a helper that already exists. Never reported: methods with the same name in different classes (plugins, drivers), functions defined twice in one file (under `if`/`try`), near-duplicate methods, and parallel families that differ only by swapped names, operators or constants (`md5_utf8`/`sha_utf8`, `polyadd`/`polysub`).
 - **`SLOP040` swallowed exceptions** only flags `except Exception`, `except BaseException` and bare `except:` whose body is just `pass` or `...`. A comment in the handler (`# best effort`), cleanup code (`__del__`, `__exit__`, `close()`, `atexit` handlers, `try: os.unlink(...)`, also in a loop), optional imports (`try: import ujson`), `contextlib.suppress`, tests and examples are skipped.
 
 ### Speed
@@ -175,6 +244,8 @@ jobs:
 
 On pull requests it automatically checks only the changed lines (set `diff: none` to check everything, or `diff: <ref>` for a specific ref). To show findings inline on the pull request, set `sarif-file: slopfence.sarif` and upload it with `github/codeql-action/upload-sarif` (needs `security-events: write`).
 
+A `baseline` in your `pyproject.toml` applies here too: baselined findings are not reported, and they are left out of the SARIF file.
+
 ### pre-commit
 
 ```yaml
@@ -185,6 +256,8 @@ repos:
     hooks:
       - id: slopfence
 ```
+
+The hook reads the same `[tool.slopfence]` config, so `per-file-ignores`, `severity` and `baseline` apply to it too.
 
 ## The problem
 
@@ -308,7 +381,7 @@ tests/test_user.py
 
 | Challenge | Why it's hard | Plan |
 |---|---|---|
-| **False positives** | Every noisy warning erodes trust; one bad week and teams disable the tool. | Conservative rules, severity levels, `# slopfence: ignore[SLOP0xx]` comments, and a test corpus of real-world false positives. |
+| **False positives** | Every noisy warning erodes trust; one bad week and teams disable the tool. | Conservative rules, severity levels, `# slopfence: ignore[SLOP0xx]` comments, per-file ignores, a baseline for the findings a project already has, and a test corpus of real-world false positives. |
 | **Private / internal packages** | Internal packages look identical to hallucinated ones. | Allowlists, private registry support, and reading local lockfiles and workspace packages. |
 | **Registry rate limits** | Checking every import against PyPI/npm on every run is slow and gets throttled. | Local cache with TTL, batch lookups, offline mode. |
 | **"Is this really junk?"** | Some patterns (defensive code, stubs) are legitimate in context. | Flag only high-confidence cases by default; stricter checks are opt-in. |
@@ -368,6 +441,8 @@ Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/mil
 
 - [ ] `SLOP050` comments that only restate the code ([#23](https://github.com/syedmuhdahmad/slopfence/issues/23))
 - [x] Parallel processing for large repos ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- [x] Baseline mode: fail only on new findings ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51))
+- [x] Per-file ignores and per-rule severity overrides ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - [ ] JavaScript / TypeScript (npm registry)
 - [ ] Slopsquatting risk scoring (`SLOP002`)
 - [ ] VS Code extension

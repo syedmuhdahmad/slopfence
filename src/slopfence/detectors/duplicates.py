@@ -35,7 +35,7 @@ import difflib
 import itertools
 import zlib
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 
 from slopfence.diff import ChangedLines, touches
@@ -302,45 +302,84 @@ def check_duplicates(
     functions: list[Function],
     checked: set[str],
     changed: ChangedLines | None = None,
+    *,
+    ignored: Collection[str] = (),
+    report_unchanged: bool = False,
 ) -> Iterator[Finding]:
     """SLOP030 for functions in ``checked`` files, compared with all ``functions``.
 
-    ``functions`` are those of the whole project (see ``index_functions``), the ones
-    of the checked files first. The order matters: a function with many identical
-    copies is only linked to the first two in this list.
+    ``functions`` are those of the whole project (see ``index_functions``), in any
+    order.
 
     In a full scan, identical copies are reported, each except the first (by path
     and line) pointing at the first. With ``changed``, every changed function that is
     identical or near-identical to another one is reported, pointing at an unchanged
     copy where possible, so a new copy is caught even when it sorts first.
+
+    ``ignored`` are the files where SLOP030 is switched off (``per-file-ignores``).
+    They come before every other file. So a copy of their code somewhere else is
+    never "the first copy", and it is always reported.
+
+    A baseline is written from a full scan, so it has an entry for every identical
+    copy except the first. Three things make a run with ``changed`` agree with it:
+
+    * A changed function that is the first copy names a ``peer``: an identical copy,
+      an unchanged one where possible. That copy has the entry.
+    * So does a changed function that has no identical copy left, only near-copies,
+      when it was the first of them before the diff: it sorts before each of them,
+      and some of its lines did not change. A small edit to the first copy of an
+      accepted pair leaves exactly that. A function the diff added names no peer.
+    * With ``report_unchanged``, the unchanged functions that a full scan reports are
+      reported here too. They use up their entries before a changed function with
+      the same name can. The caller's ``--diff`` filter drops them afterwards.
     """
 
-    def order(k: int) -> tuple[str, int]:
+    def position(func: Function) -> tuple[bool, str, int]:
+        """Sort key: files where SLOP030 is switched off first, then by path and line."""
+        return func.path not in ignored, func.path, func.line
+
+    # One order decides everything: which copies find_duplicates links (a function
+    # with many identical copies is only linked to the first two), which copy is "the
+    # first" and which one a message points at. The caller's order can't be used: it
+    # changes with the paths that are checked.
+    functions = sorted(functions, key=position)
+
+    def order(k: int) -> tuple[bool, str, int]:
         """Sort key: where the function is."""
-        return functions[k].path, functions[k].line
+        return position(functions[k])
 
     def is_changed(k: int) -> bool:
         """Whether the function overlaps lines changed in the diff."""
         f = functions[k]
         return changed is not None and touches(changed, f.path, f.line, f.end_line)
 
+    def was_there(k: int) -> bool:
+        """Whether a changed function is older than the diff: one of its lines did not change."""
+        f = functions[k]
+        lines = (changed or {}).get(f.path)  # None: the whole file is new
+        return lines is not None and any(n not in lines for n in range(f.line, f.end_line + 1))
+
     # Near-duplicates are only reported for changed functions (see the module docstring).
     near_for = {k for k in range(len(functions)) if is_changed(k)}
     for i, others in find_duplicates(functions, near_for).items():
         func = functions[i]
-        if changed is None:
-            others = [(j, score) for j, score in others if score >= 1.0]
         if func.path not in checked or not others:
             continue
-        if changed is not None:
-            if not is_changed(i):
-                continue
-            others = sorted(others, key=lambda m: (is_changed(m[0]), order(m[0])))
+        identical = sorted((j for j, score in others if score >= 1.0), key=order)
+        # The first copy: a full scan does not report it, the other copies point here.
+        is_first = bool(identical) and order(i) < order(identical[0])
+        peer = None
+        if is_changed(i):
+            j, score = min(others, key=lambda m: (is_changed(m[0]), order(m[0])))
+            if is_first:
+                twin = functions[min(identical, key=lambda k: (is_changed(k), order(k)))]
+                peer = (twin.path, twin.name)
+            elif not identical and was_there(i) and all(order(i) < order(k) for k, _ in others):
+                peer = (functions[j].path, functions[j].name)
+        elif identical and not is_first and (changed is None or report_unchanged):
+            j, score = identical[0], 1.0
         else:
-            if all(order(i) < order(j) for j, _ in others):
-                continue  # the first copy: the others point here
-            others = sorted(others, key=lambda m: order(m[0]))
-        j, score = others[0]
+            continue
         other = functions[j]
         how = "identical to" if score >= 1.0 else f"{int(score * 100)}% similar to"
         yield Finding(
@@ -351,4 +390,6 @@ def check_duplicates(
             f"Function '{func.name}' is {how} '{other.name}' in {other.path}:{other.line}; "
             "reuse it instead of keeping two copies",
             end_line=func.end_line,
+            subject=func.name,
+            peer=peer,
         )

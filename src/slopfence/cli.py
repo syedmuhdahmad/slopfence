@@ -5,16 +5,17 @@ import contextlib
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from slopfence import __version__, reporters
+from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
 from slopfence.analysis import default_jobs
-from slopfence.config import FAIL_ON, ConfigError, load_config
-from slopfence.engine import run
+from slopfence.config import FAIL_ON, ConfigError, load_config, selected_rules
+from slopfence.engine import Result, run
 from slopfence.indexes import find_private_index
-from slopfence.models import RULES, Severity
+from slopfence.models import RULES, Severity, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
@@ -109,9 +110,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="check files in up to N processes (default: one per CPU, at most 8; "
         "1 uses no worker processes; overrides config)",
     )
+    baseline = parser.add_mutually_exclusive_group()
+    baseline.add_argument(
+        "--baseline",
+        metavar="FILE",
+        type=Path,
+        help="hide the findings recorded in FILE and report only new ones (overrides config)",
+    )
+    baseline.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="ignore the baseline set in the config and report every finding",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        metavar="FILE",
+        type=Path,
+        help="record the current findings in FILE and report none of them; later runs "
+        "with --baseline FILE only report new findings",
+    )
     parser.add_argument("--exit-zero", action="store_true", help="exit 0 even if issues are found")
     parser.add_argument("--no-color", action="store_true")
-    parser.add_argument("--list-rules", action="store_true", help="list rules and exit")
+    parser.add_argument(
+        "--list-rules",
+        action="store_true",
+        help="list the rules with the severities this project uses, and exit",
+    )
     parser.add_argument("--version", action="version", version=f"slopfence {__version__}")
     return parser
 
@@ -142,36 +166,101 @@ def _end_like_an_interrupted_program() -> None:
         signal.raise_signal(signal.SIGINT)
 
 
+def _project_root(first_path: Path) -> Path:
+    """The project a run belongs to, found from the first path it was given.
+
+    That is the git repository the path is in. Without one, it is the current folder
+    when the path is inside it, and else the path's own folder.
+    """
+    start = first_path.resolve()
+    folder = start if start.is_dir() else start.parent
+    # --list-rules takes a path that doesn't exist: the nearest folder that does stands in.
+    while not folder.is_dir() and folder != folder.parent:
+        folder = folder.parent
+    root = diffmod.repo_root(folder)
+    if root is None:
+        cwd = Path.cwd().resolve()
+        root = cwd if folder == cwd or cwd in folder.parents else folder
+    return root
+
+
+def _print_rules(severity: Mapping[str, Severity]) -> None:
+    """Print every rule with the severity this project uses for it.
+
+    ``severity`` holds what the config sets. A rule it changes also shows its own
+    severity, so nobody takes the project's choice for the built-in one.
+    """
+    for rule in RULES.values():
+        level = severity.get(rule.id, rule.severity)
+        default = "" if level is rule.severity else f" (default: {rule.severity.value})"
+        print(f"{rule.id}  {level.value:<6}  {rule.name}: {rule.summary}{default}")
+
+
+def _error(message: str) -> int:
+    """Say on stderr why the run can't go on, and return the exit code for an error."""
+    print(f"slopfence: error: {message}", file=sys.stderr)
+    return EXIT_ERROR
+
+
+def _baseline_to_use(
+    given: Path | None, configured: str | None, root: Path
+) -> baselinemod.Baseline | None:
+    """The baseline whose findings a run hides, or None when it has none.
+
+    ``given`` is ``--baseline``, relative to the current folder. It replaces
+    ``configured``, the config key, which is relative to the project root. Raises
+    BaselineError when the file is missing or is not a baseline.
+    """
+    path = root / configured if given is None and configured else given
+    return baselinemod.load(path) if path is not None else None
+
+
+def _record_baseline(path: Path, result: Result) -> None:
+    """Write the findings of ``result`` to the baseline ``path``, and report none of them.
+
+    The report then says what the next run with this baseline will say: nothing new.
+    Raises OSError when the file can't be written.
+    """
+    baselinemod.write(path, result.findings)
+    result.notes.append(f"Wrote {plural(len(result.findings), 'finding')} to the baseline {path}.")
+    if result.unchecked_rules:
+        # Otherwise the next run that reaches PyPI fails, and nobody knows why.
+        result.notes.append(
+            f"{' and '.join(result.unchecked_rules)} findings may be missing from the "
+            "baseline: PyPI was not asked, or did not answer, about some packages (offline, "
+            "a private package index, or PyPI could not be reached). Write it again when "
+            "lookups work."
+        )
+    result.baselined, result.findings = result.findings, []
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run slopfence from the command line and return the exit code.
 
     0 ok, 1 issues, 2 error, 130 stopped with Ctrl-C.
     """
     _use_utf8_output()
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.write_baseline is not None and args.diff:
+        parser.error("--write-baseline records every finding, so it can't be used with --diff")
+    if args.write_baseline is not None and args.baseline is not None:
+        parser.error("--write-baseline can't be used with --baseline")
 
-    if args.list_rules:
-        for rule in RULES.values():
-            print(f"{rule.id}  {rule.severity.value:<6}  {rule.name}: {rule.summary}")
-        return EXIT_OK
+    missing = next((path for path in args.paths if not path.exists()), None)
+    # --list-rules checks no file, so it doesn't mind a path that isn't there.
+    if missing is not None and not args.list_rules:
+        return _error(f"{missing} does not exist")
 
-    for path in args.paths:
-        if not path.exists():
-            print(f"slopfence: error: {path} does not exist", file=sys.stderr)
-            return EXIT_ERROR
-
-    start = args.paths[0].resolve()
-    start_dir = start if start.is_dir() else start.parent
-    root = diffmod.repo_root(start_dir)
-    if root is None:
-        cwd = Path.cwd().resolve()
-        root = cwd if start_dir == cwd or cwd in start_dir.parents else start_dir
-
+    root = _project_root(args.paths[0])
     try:
         config = load_config(root)
     except ConfigError as err:
-        print(f"slopfence: error: {err}", file=sys.stderr)
-        return EXIT_ERROR
+        return _error(str(err))
+    if args.list_rules:
+        _print_rules(config.severity)
+        return EXIT_OK
+
     # Command-line options replace the matching config values.
     select = args.select if args.select is not None else config.select
     ignore = args.ignore if args.ignore is not None else config.ignore
@@ -188,13 +277,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     fail_on = Severity(args.fail_on or config.fail_on)
     strict = args.strict if args.strict is not None else config.strict
 
+    baseline = None
+    if args.write_baseline is not None:
+        # A run that writes a baseline uses none: it records every finding. The file
+        # is looked at now, so that a mistake doesn't cost a whole run.
+        scope = baselinemod.scope_of(args.paths, root, exclude, selected_rules(select, ignore))
+        problem = baselinemod.write_problem(args.write_baseline, scope, root)
+        if problem:
+            return _error(f"can't write baseline {args.write_baseline}: {problem}")
+    else:
+        configured = None if args.no_baseline else config.baseline
+        try:
+            baseline = _baseline_to_use(args.baseline, configured, root)
+        except baselinemod.BaselineError as err:
+            return _error(str(err))
+
     changed = None
     if args.diff:
         try:
             changed = diffmod.changed_lines(root, args.diff)
         except diffmod.DiffError as err:
-            print(f"slopfence: error: --diff {args.diff}: {err}", file=sys.stderr)
-            return EXIT_ERROR
+            return _error(f"--diff {args.diff}: {err}")
 
     jobs = args.jobs if args.jobs is not None else config.jobs
     if jobs is None:
@@ -215,6 +318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             check_imports=check_imports,
             private_index=private_index,
             jobs=jobs,
+            per_file_ignores=config.per_file_ignores,
+            severity=config.severity,
+            baseline=baseline,
         )
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.
@@ -223,6 +329,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_INTERRUPTED
     if isinstance(registry, PyPIRegistry):
         registry.save()
+
+    if args.write_baseline is not None:
+        try:
+            _record_baseline(args.write_baseline, result)
+        except OSError as err:
+            return _error(f"can't write baseline {args.write_baseline}: {err.strerror or err}")
 
     if args.format == "json":
         report = reporters.as_json(result)

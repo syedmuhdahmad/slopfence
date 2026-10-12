@@ -16,6 +16,9 @@ from slopfence.source import SourceFile, child_statements
 # --- SLOP040 ------------------------------------------------------------------------
 
 BROAD_EXCEPTIONS = {"Exception", "BaseException"}
+# The subject of a finding for a handler outside any function. No function can have
+# this name, so it never collides with one.
+MODULE_LEVEL = "<module>"
 # Functions where ignoring every error is the norm: finalizers and shutdown paths.
 CLEANUP_FUNCTIONS = {
     "__del__",
@@ -162,6 +165,7 @@ def check_swallowed_exceptions(src: SourceFile) -> Iterator[Finding]:
             f"'{caught}' silently swallows every error; catch a specific exception, "
             "or log or re-raise it",
             end_line=handler.end_lineno,
+            subject=func or MODULE_LEVEL,
         )
 
 
@@ -367,4 +371,5 @@ def check_stub_functions(src: SourceFile) -> Iterator[Finding]:
             stmt.col_offset + 1,
             f"Function '{func.name}' {what}, but its docstring says {summary!r}",
             end_line=func.end_lineno,
+            subject=func.name,
         )
