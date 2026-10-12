@@ -1806,6 +1806,46 @@ def test_cli_passes_detect_private_index_on(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
 
+PRIVATE_LOCK = json.dumps({"_meta": {"sources": [{"name": "corp", "url": PRIVATE}]}})
+
+
+@pytest.mark.parametrize(
+    ("files", "listed"),
+    [
+        (
+            {
+                "Pipfile": f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n',
+                "deploy/requirements.txt": INDEX + "corp-b\n",
+                "deploy-eu/requirements.txt": INDEX + "corp-b\n",
+            },
+            "Pipfile, deploy-eu/requirements.txt, deploy/requirements.txt",
+        ),
+        (
+            dict.fromkeys(
+                ["backend/Pipfile.lock", "Pipfile.lock", "backend-eu/Pipfile.lock"], PRIVATE_LOCK
+            ),
+            "Pipfile.lock, backend-eu/Pipfile.lock, backend/Pipfile.lock",
+        ),
+    ],
+    ids=["dependency files", "lock files"],
+)
+def test_a_note_lists_files_in_the_order_of_their_paths_as_text(
+    write, check, not_installed, files, listed
+):
+    """The files in a note come in the order of their project-relative paths as text:
+    the order of the findings, and the same on every operating system. ``Path``
+    objects compare folder by folder, and without case on Windows, where ``Pipfile``
+    came after ``deploy/requirements.txt``."""
+    for name, body in files.items():
+        write(name, body)
+    write("setup.cfg", "[options]\ninstall_requires = corp-c\n")
+    write("app.py", "import corp_mod_zz\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert result.findings == []
+    assert f"didn't look up imports on PyPI: {listed} uses" in result.notes[0]
+    assert f"a private package index is set in {listed}, so" in result.notes[1]
+
+
 def test_the_note_names_only_checked_files_and_stays_short(write, tmp_path):
     """The note lists the files whose names were held back in this run, three at most,
     and comes with no run that asks PyPI nothing anyway."""

@@ -124,7 +124,7 @@ class ProjectIndex:
 
     root: Path
     local_modules: set[str] = field(default_factory=set)
-    # Every dependency file that was read, in the order it was given.
+    # Every dependency file that was read, in the order of ``_by_project_path``.
     files: list[DependencyFile] = field(default_factory=list)
     # Distributions named in lock files (normalized), including indirect ones.
     locked: set[str] = field(default_factory=set)
@@ -199,8 +199,9 @@ def build_index(
     """Collect the project's own modules, its dependencies and its locked packages.
 
     Every dependency file is read once, and everything SLOP001 knows about it comes
-    from that one reading. With ``imports`` False only the dependency check is
-    prepared: the project's modules, the names in lock files and the imports in
+    from that one reading. The files may come in any order: they are put in one order
+    here (see ``_by_project_path``). With ``imports`` False only the dependency check
+    is prepared: the project's modules, the names in lock files and the imports in
     notebooks are left out, because only the import check asks for them.
     """
     index = ProjectIndex(root=root)
@@ -210,12 +211,12 @@ def build_index(
             if parent == root or root not in parent.parents:
                 break
             index.local_modules.add(parent.name)
-    for path in dep_files:
+    for path in _by_project_path(dep_files, root):
         file = parse_dependency_file(path, root, imports)
         file.fixture = file.kind in _FIXTURE_KINDS and _in_test_folder(path, root)
         index.files.append(file)
     _share_setuptools_sources(index.files)
-    for path in lock_files:
+    for path in _by_project_path(lock_files, root):
         if not imports and path.name not in INDEX_LOCK_FILES:
             continue  # a big lock file is only worth reading for its names
         names, private = parse_lock_file(path)
@@ -225,6 +226,17 @@ def build_index(
         elif private is None:
             index.unreadable_lock_files.append(_rel(path, root))
     return index
+
+
+def _by_project_path(paths: Iterable[Path], root: Path) -> list[Path]:
+    """``paths`` without doubles, ordered by their project-relative POSIX path.
+
+    The one place that orders the dependency and lock files of a run. A note lists
+    them in this order, and their names are looked up in it. It is the order of the
+    findings, and the same on every operating system: ``Path`` objects themselves
+    compare without case on Windows, and folder by folder everywhere.
+    """
+    return sorted(set(paths), key=lambda path: _rel(path, root))
 
 
 def _in_test_folder(path: Path, root: Path) -> bool:

@@ -137,7 +137,7 @@ def _not_excluded(files: list[Path], root: Path, exclude: Sequence[str]) -> list
 
 def _dependency_files_to_read(
     project: list[Path], checked: list[Path], root: Path, exclude: Sequence[str]
-) -> list[Path]:
+) -> set[Path]:
     """The dependency files that SLOP001 reads: the checked ones, and the rest of the project.
 
     Every file of the project is read, wherever it is and whichever paths the run
@@ -145,15 +145,15 @@ def _dependency_files_to_read(
     package that one file takes from git or a URL counts for the whole project. An
     excluded notebook is the one exception. A notebook is the biggest kind of file
     to read, and ``exclude`` is how a project leaves its notebooks out.
+
+    In no order: ``packages.build_index`` puts the files in the one order of the run.
     """
     notebooks = _not_excluded(project, root, exclude)
-    return sorted(
-        {
-            *checked,
-            *(p for p in project if p.suffix != NOTEBOOK_SUFFIX),
-            *(p for p in notebooks if p.suffix == NOTEBOOK_SUFFIX),
-        }
-    )
+    return {
+        *checked,
+        *(p for p in project if p.suffix != NOTEBOOK_SUFFIX),
+        *(p for p in notebooks if p.suffix == NOTEBOOK_SUFFIX),
+    }
 
 
 @dataclass
@@ -354,7 +354,7 @@ def run(
     if "SLOP001" in rules:
         beside_deps, beside_locks = _beside_named_files(paths, root)
         to_read = _dependency_files_to_read([*project[1], *beside_deps], dep_files, root, exclude)
-        lock_files = sorted({*project[2], *beside_locks})
+        lock_files = [*project[2], *beside_locks]
         index = build_index(root, project[0], to_read, lock_files, imports=check_imports)
         checker = PackageChecker(
             index,
