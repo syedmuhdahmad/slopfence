@@ -404,8 +404,22 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     return found
 
 
-def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
+def _pip_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """The lines of a requirements file as pip reads them, each with the number
+    (1-based) of the line of the file that it is on.
+
+    pip ends a line wherever ``str.splitlines`` ends one: also at a form feed, at
+    U+0085 and at U+2028. git and an editor do not (see ``text_lines``, which gives
+    ``lines``). So one line of the file can hold several lines for pip, and an index
+    option or a git entry after such a character is one of them.
+    """
+    return [(number, piece) for number, line in enumerate(lines, 1) for piece in line.splitlines()]
+
+
+def _requirements_sources(lines: Iterable[str]) -> tuple[bool, bool]:
     """Which package sources other than PyPI a requirements file names itself.
+
+    ``lines`` are the lines as pip reads them (see ``_pip_lines``).
 
     The first answer is a non-PyPI ``--index-url`` or ``--extra-index-url``. The
     second is ``--find-links`` or ``--no-index``: no index, but a name that PyPI
@@ -442,8 +456,9 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     options of the file count in every case.
     """
     lines = text_lines(text)
+    pip_lines = _pip_lines(lines)
     # With another source than PyPI, a name missing from PyPI may be a private package.
-    private_index, links = _requirements_sources(lines)
+    private_index, links = _requirements_sources(line for _, line in pip_lines)
     if lists_other_packages(PurePosixPath(rel)):
         return DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
     deps = []
@@ -451,8 +466,9 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
     # And whether any line is the markup of a document.
     pip_syntax = markup = False
-    for lineno, raw in enumerate(lines, start=1):
-        suppressed = suppresses_slop001(requirements_comment(raw))
+    for lineno, raw in pip_lines:
+        # An ignore comment covers the line of the file that it is on, all of it.
+        suppressed = suppresses_slop001(requirements_comment(lines[lineno - 1]))
         line = REQ_COMMENT.sub("", raw).strip()
         if not line:
             continue

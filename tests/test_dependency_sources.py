@@ -26,6 +26,7 @@ from tests.conftest import DownRegistry, FakeRegistry, needs_parser_depth_limit
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
 INDEX = f"--extra-index-url {PRIVATE}\n"
+GIT = "git+https://git.corp.example/corp/corp-auth.git"
 
 
 def found(result):
@@ -870,6 +871,85 @@ def test_a_form_feed_or_line_separator_does_not_shift_requirements_lines(
     text = f"# pins{char}\nrequests==2.31\nghost-pin==1.0\n"
     (tmp_path / name).write_text(text, encoding="utf-8")
     assert found(check("SLOP001", registry=FakeRegistry({"requests"}))) == [(name, 3, 1)]
+
+
+# What may stand in front of such a character, on the same line of the file: a
+# comment, a path, a sentence.
+BEFORE_A_BREAK = ["# internal packages", "./vendor/pkg", "Internal packages below"]
+SOURCE_OPTIONS = [f"--index-url {PRIVATE}", f"--extra-index-url={PRIVATE}", "--find-links ./wheels"]
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+@pytest.mark.parametrize("before", BEFORE_A_BREAK)
+@pytest.mark.parametrize("option", SOURCE_OPTIONS)
+def test_an_option_after_a_line_break_that_only_pip_sees_still_counts(
+    tmp_path, check, char, before, option
+):
+    """pip ends a line at a form feed, U+0085 or U+2028 too. So for pip the option
+    after such a character is a line of its own, and the file's packages come from
+    there: none of them is sent, as in v0.2. The line numbers stay the ones of git."""
+    text = f"requests==2.31\n{before}{char}{option}\ncorp-auth==1.0\n"
+    (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+    (tmp_path / "requirements.txt").write_text(text.replace(option, "--pre"), encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [("requirements.txt", 3, 1)]
+
+
+# In a file that is not UTF-8 nothing turns a lone carriage return into a line feed.
+ENCODED_BREAKS = [
+    *((encoding, char) for encoding in ("utf-8", "utf-16") for char in NOT_LINE_ENDS),
+    ("latin-1", "\x0c"),
+    ("latin-1", "\r"),
+]
+
+
+@pytest.mark.parametrize(("encoding", "char"), ENCODED_BREAKS)
+def test_an_index_after_such_a_line_break_covers_the_files_that_inherit(
+    tmp_path, check, encoding, char
+):
+    """The same for the files that inherit a private index, also from a requirements
+    file that is not UTF-8. There a lone carriage return is such a line break too."""
+    text = f"# caf\u00e9{char}--index-url {PRIVATE}{char}corp-auth==1.0\n"
+    (tmp_path / "requirements.txt").write_bytes(text.encode(encoding))
+    (tmp_path / "setup.cfg").write_text("[options]\ninstall_requires =\n    corp-core\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert "a private package index is set in requirements.txt" in result.notes[0]
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+@pytest.mark.parametrize("entry", [f"corp-auth @ {GIT}", f"-e {GIT}#egg=corp-auth"])
+def test_a_sourced_entry_after_such_a_line_break_still_counts(tmp_path, check, char, entry):
+    """And for an entry with a source of its own: it is a line for pip, so the package
+    is not looked up in the file that names it again."""
+    (tmp_path / "requirements.txt").write_text(f"# vcs{char}{entry}\n", encoding="utf-8")
+    (tmp_path / "setup.cfg").write_text("[options]\ninstall_requires =\n    corp-auth\n")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+def test_an_ignore_comment_covers_all_that_pip_reads_on_its_line(tmp_path, check, char):
+    """Two requirements on one line of the file, for pip two lines: each is reported
+    on the line that git counts, and an ignore comment there covers both."""
+    path = tmp_path / "requirements.txt"
+    path.write_text(f"ghost-one{char}ghost-two\nghost-three\n", encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [(f.subject, f.line) for f in result.findings] == [
+        ("ghost-one", 1),
+        ("ghost-two", 1),
+        ("ghost-three", 2),
+    ]
+    text = f"ghost-one{char}ghost-two  # slopfence: ignore\nghost-three\n"
+    path.write_text(text, encoding="utf-8")
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("requirements.txt", 2, 1)]
+    assert registry.queries == ["ghost-three"]
 
 
 # The same list in the two TOML files, with a comment line above it that holds {char}.
@@ -2225,8 +2305,6 @@ def test_a_named_file_outside_the_project_is_no_fixture_for_the_folders_above_it
 
 
 # --- A package that one file takes from a place of its own -----------------------------
-
-GIT = "git+https://git.corp.example/corp/corp-auth.git"
 
 
 def one_cell_notebook(line):
