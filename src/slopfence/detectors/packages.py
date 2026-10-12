@@ -55,7 +55,7 @@ from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
 from slopfence.models import Finding, plural
 from slopfence.registry import BatchRegistry, OfflineRegistry, Registry, normalize
-from slopfence.source import IGNORE_FILE_RE, load, read_source
+from slopfence.source import IGNORE_FILE_RE, is_test_path, load, read_source
 from slopfence.source import relative_path as _rel
 
 if sys.version_info >= (3, 11):
@@ -91,6 +91,10 @@ PIPFILE_TABLES = ("packages", "dev-packages")
 _PIPFILE_INDEX_KEYS = MARKER_NAMES | {"version", "extras", "markers", "index", "editable"}
 # The two files that setuptools reads as one distribution.
 _SETUPTOOLS_KINDS = (Kind.SETUP_CFG, Kind.SETUP_PY)
+# The kinds of file that define a package or an application of their own. Under a test
+# folder such a file is a fixture (see ``DependencyFile.fixture``). A requirements file
+# there is a real install list, and v0.2 already checked a ``pyproject.toml`` there.
+_FIXTURE_KINDS = (Kind.SETUP_PY, Kind.SETUP_CFG, Kind.PIPFILE)
 # The kinds of file that say where an install gets its packages. A private index in
 # one of them also covers the files that can't say (see ``DependencyFile.inherits_index``).
 _INSTALL_KINDS = (Kind.REQUIREMENTS, Kind.PYPROJECT, Kind.PIPFILE)
@@ -204,7 +208,9 @@ def build_index(
                 break
             index.local_modules.add(parent.name)
     for path in dep_files:
-        index.files.append(parse_dependency_file(path, root, imports))
+        file = parse_dependency_file(path, root, imports)
+        file.fixture = file.kind in _FIXTURE_KINDS and _in_test_folder(path, root)
+        index.files.append(file)
     _share_setuptools_sources(index.files)
     for path in lock_files:
         if not imports and path.name not in INDEX_LOCK_FILES:
@@ -216,6 +222,19 @@ def build_index(
         elif private is None:
             index.unreadable_lock_files.append(_rel(path, root))
     return index
+
+
+def _in_test_folder(path: Path, root: Path) -> bool:
+    """Whether a file lies under a test folder of the project (see ``source.is_test_path``).
+
+    Only the folders inside the project count. A file outside ``root`` that is named
+    on the command line is never in one, whatever the folders above it are called.
+    """
+    try:
+        inside = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return is_test_path(path.name, inside.as_posix())
 
 
 def _share_setuptools_sources(files: list[DependencyFile]) -> None:
@@ -760,8 +779,15 @@ class PackageChecker:
         return bool(self.private_index) or isinstance(self.registry, OfflineRegistry)
 
     def _files(self, only_paths: set[str] | None) -> Iterator[DependencyFile]:
-        """The dependency files that are checked: all of them, or the ones in ``only_paths``."""
-        return (f for f in self.index.files if only_paths is None or f.rel in only_paths)
+        """The dependency files that are checked: all of them, or the ones in ``only_paths``.
+
+        Never a fixture package under a test folder (see ``DependencyFile.fixture``).
+        """
+        return (
+            file
+            for file in self.index.files
+            if not file.fixture and (only_paths is None or file.rel in only_paths)
+        )
 
     def _may_be_public(self, dep: Dependency) -> bool:
         """Whether a declared dependency, by itself, is one PyPI can be asked about.

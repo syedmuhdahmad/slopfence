@@ -1865,6 +1865,102 @@ def test_own_names_count_in_excluded_folders_too(write, check):
     assert registry.queries == []
 
 
+# --- Fixture packages under a test folder -----------------------------------------------
+
+FIXTURE_PACKAGES = {
+    "tests/data/packages/requires_thing/setup.py": (
+        "from setuptools import setup\n"
+        "setup(name='requires_thing', version='1.0', install_requires=['thing-fixture-dep'])\n"
+    ),
+    "tests/fixtures/proj/setup.cfg": (
+        "[metadata]\nname = fixture\n\n[options]\ninstall_requires =\n    fixture-dep-b\n"
+    ),
+    "pkg/test/pipenv/Pipfile": '[packages]\nfixture-dep-c = "*"\n',
+}
+
+
+@pytest.mark.parametrize("name", sorted(FIXTURE_PACKAGES))
+def test_a_fixture_package_under_a_test_folder_is_not_looked_up(write, tmp_path, name):
+    """A ``setup.py``, ``setup.cfg`` or ``Pipfile`` under a test folder defines a
+    package that only the tests use. Its made-up dependencies are not sent and not
+    reported, also when the file is the only one that is checked."""
+    path = write(name, FIXTURE_PACKAGES[name])
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry(set())
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == [] and result.notes == []
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        # A requirements file for the tests is a real install list, and v0.2 read it.
+        ("tests/requirements.txt", "ghost-lib==1.0\n"),
+        ("tests/constraints.txt", "ghost-lib==1.0\n"),
+        ("tests/requirements/ci.in", "ghost-lib==1.0\n"),
+        # v0.2 read every pyproject.toml.
+        (
+            "tests/fixtures/pp/pyproject.toml",
+            '[project]\nname = "pp"\ndependencies = ["ghost-lib"]\n',
+        ),
+        # Folders that only sound like a test folder.
+        ("testing/setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n"),
+        ("latest/Pipfile", '[packages]\nghost-lib = "*"\n'),
+    ],
+)
+def test_a_file_under_a_test_folder_that_is_no_fixture_package_is_still_checked(
+    write, check, name, body
+):
+    """The look-alike cases: other kinds of file under a test folder, and a package in
+    a folder that is no test folder."""
+    write(name, body)
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [(f.path, f.subject) for f in result.findings] == [(name, "ghost-lib")]
+
+
+def test_a_fixture_package_still_counts_for_the_rest_of_the_project(write, check):
+    """A fixture package is still read. Its name is a package of this repository, a
+    package it takes from git is the same package elsewhere, and a private index it
+    sets covers the files that inherit one. The note leaves the fixture out."""
+    write("tests/fixtures/proj/setup.cfg", "[metadata]\nname = fixture-pkg\n")
+    write("tests/fixtures/app/Pipfile", '[packages]\ncorp-auth = {git = "https://x.example/c"}\n')
+    write("tests/fixtures/other/setup.py", FIXTURE_PACKAGES[sorted(FIXTURE_PACKAGES)[1]])
+    write("requirements.txt", "fixture-pkg\ncorp-auth\nghost-lib\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-lib"]
+    assert registry.queries == ["ghost-lib"]
+
+    write("tests/fixtures/private/Pipfile", f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n')
+    write("setup.cfg", "[options]\ninstall_requires =\n    corp-x\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert "corp-x" not in registry.queries and "thing-fixture-dep" not in registry.queries
+    assert result.notes == [
+        "SLOP001 didn't look up the dependencies in setup.cfg: a private package index is "
+        "set in tests/fixtures/private/Pipfile, so names missing from PyPI may be private "
+        "packages. If that index only mirrors PyPI, set detect-private-index = false."
+    ]
+
+
+def test_a_named_file_outside_the_project_is_no_fixture_for_the_folders_above_it(tmp_path):
+    """Only the folders inside the project make a test folder. A file that is named on
+    the command line and lies outside the project is checked, whatever the folders
+    above it are called. So is a project that lives under a folder named tests."""
+    root = tmp_path / "tests" / "project"
+    outside = tmp_path / "tests" / "other"
+    for folder in (root, outside):
+        folder.mkdir(parents=True)
+        (folder / "setup.cfg").write_text(
+            "[options]\ninstall_requires =\n    ghost-lib\n", encoding="utf-8"
+        )
+    registry = FakeRegistry(set())
+    result = run([root, outside / "setup.cfg"], root, registry, select=["SLOP001"])
+    named = (outside / "setup.cfg").resolve().as_posix()  # reported with its full path
+    assert sorted(f.path for f in result.findings) == sorted([named, "setup.cfg"])
+
+
 # --- A package that one file takes from a place of its own -----------------------------
 
 GIT = "git+https://git.corp.example/corp/corp-auth.git"
