@@ -1498,6 +1498,28 @@ def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp
     assert baselinemod.uncovered(entries, [".", elsewhere.rsplit("/", 1)[0]], root) == {}
 
 
+def test_no_file_outside_the_project_is_looked_at_for_a_baseline_row(
+    write, tmp_path, monkeypatch, capsys
+):
+    """A row is data that anyone may edit. Its path must not make slopfence look at a
+    place the run was not asked to check: on Windows such a path can name another
+    computer. A file outside the project is taken to exist, without a look."""
+    write("proj/app.py", "x = 1\n")
+    far = (tmp_path / "far" / "away.py").as_posix()
+    (tmp_path / "proj" / "base.json").write_text(
+        json.dumps({"version": 1, "findings": [[far, "SLOP010", "x", 1]]}), encoding="utf-8"
+    )
+    asked = []
+    real = os.path.exists
+    monkeypatch.setattr(os.path, "exists", lambda path: asked.append(str(path)) or real(path))
+    monkeypatch.chdir(tmp_path / "proj")
+    code, after = report(capsys, "--offline", "--baseline", "base.json")
+    assert (code, after["notes"]) == (0, [])  # not called gone: nobody looked
+    assert main([".", "--offline", "--write-baseline", "base.json"]) == 2
+    assert f"(for example {far})" in capsys.readouterr().err
+    assert not [path for path in asked if "far" in path]
+
+
 def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):
     """An unused entry counts when its rule ran and its file was checked or is gone."""
     write("a.py", "x = 1\n")

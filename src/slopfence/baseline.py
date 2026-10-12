@@ -301,12 +301,20 @@ def uncovered(entries: Mapping[Key, int], scope: Collection[str], root: Path) ->
 
     A run with that scope can't tell whether those findings are still there, and a
     baseline written from it would lose them.
+
+    A file outside the project (an absolute path) is taken to exist. Nothing is looked
+    at outside the project unless the run was asked to check it: a row is data that
+    anyone may edit, and on Windows a path can name another computer.
     """
     outside: Counter[str] = Counter()
     for (path, _, _), count in entries.items():
         if not _in_scope(path, scope):
             outside[path] += count
-    return {path: count for path, count in sorted(outside.items()) if _exists(root, path)}
+    return {
+        path: count
+        for path, count in sorted(outside.items())
+        if os.path.isabs(path) or _exists(root, path)
+    }
 
 
 def count_stale(
