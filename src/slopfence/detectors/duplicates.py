@@ -35,12 +35,12 @@ import difflib
 import itertools
 import zlib
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from slopfence.diff import ChangedLines, touches
 from slopfence.models import Finding
-from slopfence.source import SourceFile
+from slopfence.source import SourceFile, child_statements, children, walk
 
 MIN_STATEMENTS = 3
 SIMILARITY = 0.9
@@ -58,22 +58,51 @@ MIRROR_TOKENS = 2
 MAX_NEAR_TOKENS = 5000
 
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+# The ``ctx`` nodes of names, attributes and subscripts. They are not tokens.
+_CONTEXTS = (ast.Load, ast.Store, ast.Del)
 
 
-@dataclass
+# Joins a function's tokens into one string. No token can contain it: names can't,
+# and repr() writes it as an escape sequence in constants.
+TOKEN_SEP = "\x1f"
+
+
+@dataclass(frozen=True)
 class Function:
+    """Where a function is and what it looks like once names and layout are taken away."""
+
     name: str
     path: str
     line: int
     end_line: int
-    tokens: tuple[str, ...]
+    # The normalized token sequence, joined with TOKEN_SEP. One string per function
+    # is cheap to compare, to hash, to keep for a whole project and to send between
+    # processes; a tuple of tokens is none of these.
+    fingerprint: str
     # The class a method is defined in (None for functions).
     owner: str | None = None
+
+    @property
+    def tokens(self) -> list[str]:
+        """The token sequence (only near-duplicates need it)."""
+        return self.fingerprint.split(TOKEN_SEP)
+
+    @property
+    def size(self) -> int:
+        """The number of tokens."""
+        return self.fingerprint.count(TOKEN_SEP) + 1
 
 
 def _statement_count(func: FunctionNode) -> int:
     """Statements inside the function, nested ones included."""
-    return sum(isinstance(n, ast.stmt) for n in ast.walk(func)) - 1
+    count = 0
+    todo = child_statements(func)
+    while todo:
+        node = todo.pop()
+        # ``except`` handlers and ``match`` cases hold statements but aren't statements.
+        count += isinstance(node, ast.stmt)
+        todo.extend(child_statements(node))
+    return count
 
 
 def _local_names(func: FunctionNode) -> set[str]:
@@ -81,7 +110,7 @@ def _local_names(func: FunctionNode) -> set[str]:
     args = func.args
     params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
     names = {a.arg for a in params if a}
-    for node in ast.walk(func):
+    for node in walk(func):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             names.add(node.id)
     return names
@@ -100,33 +129,38 @@ def _body_without_docstring(func: FunctionNode) -> list[ast.stmt]:
     return body
 
 
-def _tokens(node: ast.AST, rename: dict[str, str], local: set[str]) -> Iterator[str]:
-    """A flat token sequence of node types and the values that matter.
+def _tokens(node: ast.AST, rename: dict[str, str], local: set[str], out: list[str]) -> None:
+    """Append a flat token sequence of node types and the values that matter to ``out``.
 
     Depth-first, so each statement's tokens stay together and an edit changes one
     stretch only. Parameters and locals become v0, v1... in order of appearance,
     so renaming them doesn't change the sequence.
     """
-    yield type(node).__name__
-    if isinstance(node, (ast.Name, ast.arg)):
-        name = node.id if isinstance(node, ast.Name) else node.arg
-        yield rename.setdefault(name, f"v{len(rename)}") if name in local else name
-    elif isinstance(node, ast.Attribute):
-        yield node.attr
-    elif isinstance(node, ast.Constant):
-        # The full value: constants that differ anywhere (long SQL, URLs) must never
-        # make two functions look identical.
-        yield repr(node.value)
-    for child in ast.iter_child_nodes(node):
-        if not isinstance(child, (ast.Load, ast.Store, ast.Del)):
-            yield from _tokens(child, rename, local)
+    # A stack instead of recursion: an expression can be thousands of levels deep.
+    todo = [node]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, _CONTEXTS):
+            continue
+        out.append(type(node).__name__)
+        if isinstance(node, (ast.Name, ast.arg)):
+            name = node.id if isinstance(node, ast.Name) else node.arg
+            out.append(rename.setdefault(name, f"v{len(rename)}") if name in local else name)
+        elif isinstance(node, ast.Attribute):
+            out.append(node.attr)
+        elif isinstance(node, ast.Constant):
+            # The full value: constants that differ anywhere (long SQL, URLs) must never
+            # make two functions look identical.
+            out.append(repr(node.value))
+        # Reversed, so the first child is taken off the stack first.
+        todo.extend(reversed(children(node)))
 
 
 def _functions(
     node: ast.AST, owner: str | None = None
 ) -> Iterator[tuple[FunctionNode, str | None]]:
     """Every function and method under ``node``, with the class it's defined in."""
-    for child in ast.iter_child_nodes(node):
+    for child in child_statements(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             yield child, owner
             yield from _functions(child, None)
@@ -136,35 +170,34 @@ def _functions(
             yield from _functions(child, owner)
 
 
-def index_functions(sources: Iterable[SourceFile]) -> list[Function]:
-    """Normalized fingerprints of every non-trivial function outside test code."""
-    found = []
-    for src in sources:
-        if src.is_test_file:
+def index_functions(src: SourceFile) -> list[Function]:
+    """Normalized fingerprints of every non-trivial function in a file (none for test code)."""
+    found: list[Function] = []
+    if src.is_test_file:
+        return found
+    for func, owner in _functions(src.tree):
+        if _statement_count(func) < MIN_STATEMENTS:
             continue
-        for func, owner in _functions(src.tree):
-            if _statement_count(func) < MIN_STATEMENTS:
-                continue
-            local, rename = _local_names(func), {}
-            tokens = tuple(_tokens(func.args, rename, local))
-            for stmt in _body_without_docstring(func):
-                tokens += tuple(_tokens(stmt, rename, local))
-            found.append(
-                Function(
-                    name=func.name,
-                    path=src.rel,
-                    line=func.lineno,
-                    end_line=func.end_lineno or func.lineno,
-                    tokens=tokens,
-                    owner=owner,
-                )
+        local, rename, tokens = _local_names(func), {}, []
+        _tokens(func.args, rename, local, tokens)
+        for stmt in _body_without_docstring(func):
+            _tokens(stmt, rename, local, tokens)
+        found.append(
+            Function(
+                name=func.name,
+                path=src.rel,
+                line=func.lineno,
+                end_line=func.end_lineno or func.lineno,
+                fingerprint=TOKEN_SEP.join(tokens),
+                owner=owner,
             )
+        )
     return found
 
 
 def _similarity(a: Function, b: Function) -> float:
     """Similarity of two token sequences (1.0 means identical; 0.0 for mirror pairs)."""
-    if a.tokens == b.tokens:
+    if a.fingerprint == b.fingerprint:
         return 1.0
     matcher = difflib.SequenceMatcher(None, a.tokens, b.tokens, autojunk=False)
     if matcher.real_quick_ratio() < SIMILARITY or matcher.quick_ratio() < SIMILARITY:
@@ -191,10 +224,10 @@ def _alternatives(a: Function, b: Function) -> bool:
     return bool(a.owner and b.owner)
 
 
-def _sketch(tokens: tuple[str, ...]) -> list[int]:
+def _sketch(tokens: list[str]) -> list[int]:
     """Bottom-k MinHash of the token 4-grams, with a hash that's stable across runs."""
     grams = {
-        zlib.crc32("\x1f".join(tokens[i : i + NGRAM]).encode())
+        zlib.crc32(TOKEN_SEP.join(tokens[i : i + NGRAM]).encode())
         for i in range(max(1, len(tokens) - NGRAM + 1))
     }
     return sorted(grams)[:SKETCH_SIZE]
@@ -220,7 +253,7 @@ def find_duplicates(
     matches: dict[int, list[tuple[int, float]]] = defaultdict(list)
     buckets: dict[int, list[int]] = defaultdict(list)
     for i, func in enumerate(functions if near_for is None or near_for else ()):
-        if func.owner is None and len(func.tokens) <= MAX_NEAR_TOKENS:
+        if func.owner is None and func.size <= MAX_NEAR_TOKENS:
             for value in _sketch(func.tokens):
                 buckets[value].append(i)
     shared: Counter[tuple[int, int]] = Counter()
@@ -238,18 +271,18 @@ def find_duplicates(
             continue  # nested: the outer function contains the inner one's tokens
         if a_func.owner or b_func.owner:
             continue  # methods: only identical copies are reported (below)
-        a, b = len(functions[i].tokens), len(functions[j].tokens)
+        a, b = a_func.size, b_func.size
         if 2 * min(a, b) / (a + b) < SIMILARITY:
             continue  # sizes too different to reach the threshold
-        score = _similarity(functions[i], functions[j])
+        score = _similarity(a_func, b_func)
         if score >= SIMILARITY:
             matches[i].append((j, score))
             matches[j].append((i, score))
     # Exact duplicates, also inside boilerplate buckets. Linking each
     # copy to the first two is enough to report it, and stays linear in the group size.
-    exact: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    exact: dict[str, list[int]] = defaultdict(list)
     for i, func in enumerate(functions):
-        exact[func.tokens].append(i)
+        exact[func.fingerprint].append(i)
     for members in exact.values():
         for i in members:
             others = (
@@ -266,18 +299,21 @@ def find_duplicates(
 
 
 def check_duplicates(
-    sources: list[SourceFile],
+    functions: list[Function],
     checked: set[str],
     changed: ChangedLines | None = None,
 ) -> Iterator[Finding]:
-    """SLOP030 for functions in ``checked`` files, compared with the whole project.
+    """SLOP030 for functions in ``checked`` files, compared with all ``functions``.
+
+    ``functions`` are those of the whole project (see ``index_functions``), the ones
+    of the checked files first. The order matters: a function with many identical
+    copies is only linked to the first two in this list.
 
     In a full scan, identical copies are reported, each except the first (by path
     and line) pointing at the first. With ``changed``, every changed function that is
     identical or near-identical to another one is reported, pointing at an unchanged
     copy where possible, so a new copy is caught even when it sorts first.
     """
-    functions = index_functions(sources)
 
     def order(k: int) -> tuple[str, int]:
         """Sort key: where the function is."""

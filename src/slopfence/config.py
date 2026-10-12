@@ -23,6 +23,7 @@ KNOWN_KEYS = {
     "check-imports",
     "detect-private-index",
     "fail-on",
+    "jobs",
     "strict",
 }
 FAIL_ON = [s.value for s in Severity]  # high, medium, low
@@ -34,6 +35,8 @@ class ConfigError(ValueError):
 
 @dataclass
 class Config:
+    """The settings of ``[tool.slopfence]``, with their defaults."""
+
     select: list[str] | None = None
     ignore: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
@@ -42,6 +45,8 @@ class Config:
     detect_private_index: bool = True
     fail_on: str = "low"
     strict: bool = False
+    # Worker processes for parsing and checking files. None: one per CPU, at most 8.
+    jobs: int | None = None
     path: Path | None = None
 
 
@@ -115,6 +120,12 @@ def load_config(root: Path) -> Config:
         config.detect_private_index = _bool(table, "detect-private-index", where)
     if "strict" in table:
         config.strict = _bool(table, "strict", where)
+    if "jobs" in table:
+        value = table["jobs"]
+        # bool is a kind of int in Python, so "jobs = true" has to be turned down by hand.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigError(f"{where}: 'jobs' must be a whole number, 1 or more")
+        config.jobs = value
     return config
 
 

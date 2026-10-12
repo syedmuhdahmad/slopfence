@@ -16,7 +16,6 @@ from a private index: a name missing from PyPI could then be a private package.
 
 from __future__ import annotations
 
-import ast
 import fnmatch
 import importlib.metadata
 import importlib.util
@@ -30,8 +29,8 @@ from pathlib import Path
 from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
 from slopfence.models import Finding
-from slopfence.registry import OfflineRegistry, Registry, normalize
-from slopfence.source import IGNORE_FILE_RE, IGNORE_RE, SourceFile, read_source
+from slopfence.registry import BatchRegistry, OfflineRegistry, Registry, normalize
+from slopfence.source import IGNORE_FILE_RE, IGNORE_RE, read_source
 from slopfence.source import relative_path as _rel
 
 if sys.version_info >= (3, 11):
@@ -271,7 +270,7 @@ class _LineFinder:
     """Find the physical line of each dependency entry within its own TOML table."""
 
     def __init__(self, text: str) -> None:
-        """``private_index`` says where the environment configures a non-PyPI index, if anywhere."""
+        """``text`` is the whole pyproject.toml."""
         self.lines = text.splitlines()
         self.comments = toml_comments(text)
         self.ranges = _table_ranges(self.lines)
@@ -400,15 +399,6 @@ def _installed_modules() -> set[str]:
         return set()
 
 
-def _top_level_imports(tree: ast.Module) -> Iterator[tuple[str, ast.stmt]]:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name.split(".")[0], node
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            yield node.module.split(".")[0], node
-
-
 def _is_installed(name: str, installed: set[str]) -> bool:
     if name in installed:
         return True
@@ -428,6 +418,7 @@ class PackageChecker:
         known_packages: Iterable[str] = (),
         private_index: str | None = None,
     ) -> None:
+        """``private_index`` says where the environment configures a non-PyPI index, if anywhere."""
         self.index = index
         self.registry = registry
         # Private/internal packages the user vouches for; globs allowed ("corp-*").
@@ -437,6 +428,8 @@ class PackageChecker:
         self._installed = _installed_modules()
         self._provided_by = index.declared | index.locked
         self._missing: dict[str, bool] = {}
+        # Import name -> the names to ask PyPI about ([] when it needs no lookup).
+        self._candidates: dict[str, list[str]] = {}
 
     @property
     def imports_may_be_private(self) -> bool:
@@ -444,8 +437,8 @@ class PackageChecker:
         could be private packages and must not be sent to PyPI."""
         return bool(self.private_index or self.index.private_index_files)
 
-    def check_dependencies(self, only_paths: set[str] | None = None) -> Iterator[Finding]:
-        """Report declared dependencies that don't exist on PyPI."""
+    def _lookup_dependencies(self, only_paths: set[str] | None) -> Iterator[Dependency]:
+        """The declared dependencies that are looked up on PyPI."""
         if self.private_index:
             return
         for dep in self.index.dependencies:
@@ -453,6 +446,41 @@ class PackageChecker:
                 continue
             if not dep.validate or dep.suppressed or self._is_known(dep.name):
                 continue
+            yield dep
+
+    def _lookup_names(self, name: str) -> list[str]:
+        """The names to ask PyPI about for ``import name``: none if it needs no lookup.
+
+        Every import name that reaches the registry comes from here, whether it is
+        sent ahead in the batch or asked about by ``check_imports``.
+        """
+        if isinstance(self.registry, OfflineRegistry) or self.imports_may_be_private:
+            return []
+        if name not in self._candidates:
+            # Sorted, so that requests go out in the same order on every run.
+            found = sorted({name, name.replace("_", "-")}) if self._should_lookup(name) else []
+            self._candidates[name] = found
+        return self._candidates[name]
+
+    def prefetch(self, only_paths: set[str] | None = None, imports: Iterable[str] = ()) -> None:
+        """Hand the registry every name the two checks will ask about, as one batch.
+
+        ``only_paths`` is what ``check_dependencies`` will get, and ``imports`` are the
+        module names ``check_imports`` will get. The batch is built by the methods the
+        checks use themselves, so it never holds a name they would not send. A
+        registry that takes no batch is simply asked one name at a time later.
+        """
+        if not isinstance(self.registry, BatchRegistry):
+            return
+        names = [dep.name for dep in self._lookup_dependencies(only_paths)]
+        for name in dict.fromkeys(imports):
+            names.extend(self._lookup_names(name))
+        if names:
+            self.registry.prefetch(names)
+
+    def check_dependencies(self, only_paths: set[str] | None = None) -> Iterator[Finding]:
+        """Report declared dependencies that don't exist on PyPI."""
+        for dep in self._lookup_dependencies(only_paths):
             if self.registry.exists(dep.name) is False:
                 yield Finding(
                     "SLOP001",
@@ -482,24 +510,23 @@ class PackageChecker:
     def _is_missing(self, name: str) -> bool:
         """Cached per name; every import occurrence is still reported separately."""
         if name not in self._missing:
-            missing = False
-            if self._should_lookup(name):
-                answers = [self.registry.exists(c) for c in {name, name.replace("_", "-")}]
-                missing = all(a is False for a in answers)
-            self._missing[name] = missing
+            answers = [self.registry.exists(c) for c in self._lookup_names(name)]
+            self._missing[name] = bool(answers) and all(a is False for a in answers)
         return self._missing[name]
 
-    def check_imports(self, src: SourceFile) -> Iterator[Finding]:
-        """Report imports that no installed, declared or PyPI package provides."""
-        if isinstance(self.registry, OfflineRegistry) or self.imports_may_be_private:
-            return
-        for name, node in _top_level_imports(src.tree):
+    def check_imports(self, rel: str, imports: Iterable[tuple[str, int, int]]) -> Iterator[Finding]:
+        """Report imports that no installed, declared or PyPI package provides.
+
+        ``imports`` are the (module, line, column) of the imports of the file ``rel``:
+        see ``source.top_level_imports``.
+        """
+        for name, line, col in imports:
             if self._is_missing(name):
                 yield Finding(
                     "SLOP001",
-                    src.rel,
-                    node.lineno,
-                    node.col_offset + 1,
+                    rel,
+                    line,
+                    col,
                     f"Import '{name}' is not installed, not declared, and no package with "
                     "that name exists on PyPI (possible hallucination)",
                 )

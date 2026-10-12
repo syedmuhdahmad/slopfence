@@ -60,10 +60,11 @@ slopfence --diff main
 | `--detect-private-index` / `--no-detect-private-index` | Skip PyPI lookups when pip or uv is set up with a private index (on by default). Turn it off if that index only mirrors PyPI. See [Private package indexes](#private-package-indexes) |
 | `--fail-on high\|medium\|low` | Lowest severity that fails the run (default `low`: any issue). All issues are still reported |
 | `--strict` / `--no-strict` | Exit `2` if any Python file can't be parsed (by default it's skipped with a warning) |
+| `--jobs N` | Check files in up to `N` processes. Default: one per CPU, at most 8. `--jobs 1` uses a single process. See [Speed](#speed) |
 | `--exit-zero` | Always exit 0 (report only) |
 | `--list-rules` | Show all rules |
 
-Exit codes: `0` no issues (or none at or above `--fail-on`), `1` issues found, `2` error (bad options or config, or unparseable files with `--strict`).
+Exit codes: `0` no issues (or none at or above `--fail-on`), `1` issues found, `2` error (bad options or config, or unparseable files with `--strict`), `130` stopped with Ctrl-C.
 
 Run slopfence with a Python at least as new as the syntax your code uses; otherwise newer syntax can't be parsed.
 
@@ -81,11 +82,12 @@ check-imports = false                        # true also looks up imports on PyP
 detect-private-index = true                  # false if your private index only mirrors PyPI
 fail-on = "high"                             # only high-severity issues fail the run
 strict = true                                # unparseable files are an error
+jobs = 4                                     # worker processes (default: one per CPU, at most 8)
 ```
 
 `exclude` works like `.gitignore`: a pattern without a `/` in the middle matches any file or folder name anywhere (`migrations`, `*_pb2.py`), and a pattern with one is relative to the project root (`tests/fixtures/`). Excluded files are never checked, but imports of excluded modules still count as your own code.
 
-Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`) replace the matching config values. Unknown keys and rule IDs are reported as errors (exit code `2`).
+Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`) replace the matching config values. Unknown keys and rule IDs are reported as errors (exit code `2`).
 
 ### Ignoring a finding
 
@@ -102,7 +104,7 @@ Put `# slopfence: ignore-file` anywhere in a file to skip it. In `requirements.t
 
 ### What slopfence sends over the network
 
-slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. It sends a request per package name (`HEAD https://pypi.org/pypi/<name>/json`) and nothing else: no code, no file names, no telemetry.
+slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. It sends a request per package name (`HEAD https://pypi.org/pypi/<name>/json`) and nothing else: no code, no file names, no telemetry. Up to 8 requests are sent at a time. That changes how fast the answers arrive, not what is sent.
 
 | Names sent to PyPI | When |
 |---|---|
@@ -139,6 +141,19 @@ To keep false positives low, the newer rules are deliberately conservative:
 - **`SLOP011` stub functions** needs a docstring that promises work (it starts with a verb like *validate*, *fetch*, *send*, *calculate*) or admits it isn't done (*placeholder*, *TODO*, *for now*). The body must then return hardcoded data while ignoring every input, or return nothing although the return type promises a value. A placeholder docstring over a body that does nothing (`pass`, `...`, `return None`) is reported even without a return type. `.pyi` stub files are never checked. Abstract methods, `@overload`, properties, `Protocol`/ABC classes, `if TYPE_CHECKING:` blocks, documented hooks ("override this", "does nothing by default") and tests are skipped.
 - **`SLOP030` duplicate functions** ignores functions with fewer than 3 statements and test code. Parameter and variable names and docstrings don't matter; called functions, attributes and constants do. A full scan reports **identical** copies (every copy except the first). With `--diff`, functions you changed are also compared with the rest of the project and reported when they're **≥90% similar** to an existing function, because that's when an assistant re-writes a helper that already exists. Never reported: methods with the same name in different classes (plugins, drivers), functions defined twice in one file (under `if`/`try`), near-duplicate methods, and parallel families that differ only by swapped names, operators or constants (`md5_utf8`/`sha_utf8`, `polyadd`/`polysub`).
 - **`SLOP040` swallowed exceptions** only flags `except Exception`, `except BaseException` and bare `except:` whose body is just `pass` or `...`. A comment in the handler (`# best effort`), cleanup code (`__del__`, `__exit__`, `close()`, `atexit` handlers, `try: os.unlink(...)`, also in a loop), optional imports (`try: import ujson`), `contextlib.suppress`, tests and examples are skipped.
+
+### Speed
+
+slopfence reads and checks files in several processes at once. The report is the same with any number of them.
+
+- By default it uses one process per CPU, at most 8. Change it with `--jobs N` or `jobs = N`. `--jobs 1` uses a single process.
+- Small projects don't need it. Worker processes only start when there are 200 or more Python files to read, one for every 100 files.
+- Each worker needs 40 to 80 MB of memory on a big project. In a container with little memory, set `jobs = 1` or `2`.
+- If worker processes can't start, or one dies, slopfence prints a warning and checks the files in one process.
+- If slopfence is stopped or killed, its worker processes end too.
+- PyPI lookups are sent 8 at a time.
+
+Example: the CPython standard library and 127 installed packages (22,864 files) take 35 to 45 seconds with 8 jobs on a laptop with 4 cores, and a little over 2 minutes with one process. v0.2 needed almost 6 minutes and 8 GB of memory for the same files. Now the main process needs about 0.3 GB.
 
 ### GitHub Action
 
@@ -285,6 +300,7 @@ tests/test_user.py
 ```
 
 - **Parser:** slopfence uses Python's built-in `ast` and `tokenize` (no dependencies). **tree-sitter** is planned so new languages can be added without rewriting the detectors.
+- **Workers:** files are parsed and checked in worker processes when there are enough of them (see [Speed](#speed)). Only a small summary of each file comes back: its findings, function fingerprints and import names. So memory stays low. Registry lookups stay in the main process.
 - **Registry lookups** are cached locally (`~/.cache/slopfence`) to stay fast and avoid rate limits. If PyPI can't be reached, nothing is flagged: an unknown answer is never treated as "missing". Import names are only sent with `--check-imports` (see [What slopfence sends over the network](#what-slopfence-sends-over-the-network)).
 - **Optional LLM mode** (planned, not built yet) would send only the unclear cases for a second opinion. Never required.
 
@@ -351,7 +367,7 @@ Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/mil
 ### Later
 
 - [ ] `SLOP050` comments that only restate the code ([#23](https://github.com/syedmuhdahmad/slopfence/issues/23))
-- [ ] Parallel processing for large repos ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- [x] Parallel processing for large repos ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - [ ] JavaScript / TypeScript (npm registry)
 - [ ] Slopsquatting risk scoring (`SLOP002`)
 - [ ] VS Code extension
