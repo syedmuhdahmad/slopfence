@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 import slopfence
+from slopfence.cli import main
+from slopfence.config import load_config
 from slopfence.engine import run
 from slopfence.models import RULES
 from tests.conftest import FakeRegistry
@@ -153,3 +155,26 @@ def test_comment_findings_are_about_the_whole_comment(write, check):
     [finding] = check("SLOP010").findings
     assert finding.subject == comment.strip()
     assert finding.message.endswith('..."') and len(finding.message) < len(comment)
+
+
+# --- the config key ---------------------------------------------------------------------
+
+
+def test_baseline_config_key_is_loaded_as_written(tmp_path):
+    """The path is kept as written: the command line knows what it is relative to."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.slopfence]\nbaseline = "ci/base.json"\n', encoding="utf-8"
+    )
+    assert load_config(tmp_path).baseline == "ci/base.json"
+    assert load_config(tmp_path / "missing").baseline is None
+
+
+@pytest.mark.parametrize("value", ["true", '" "', '""', "3", '["base.json"]'])
+def test_invalid_baseline_config(tmp_path, monkeypatch, capsys, value):
+    """A baseline key that isn't a path is a config error."""
+    (tmp_path / "pyproject.toml").write_text(
+        f"[tool.slopfence]\nbaseline = {value}\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline"]) == 2
+    assert "[tool.slopfence]: 'baseline' must be a file path" in capsys.readouterr().err
