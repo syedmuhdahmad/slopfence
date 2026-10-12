@@ -276,8 +276,8 @@ def scope_of(paths: Iterable[Path], root: Path) -> list[str]:
 
 def _exists(root: Path, path: str) -> bool:
     """Whether the file of a baseline row is still there. Never raises, whatever the row holds."""
-    # os.path.exists answers False to any error. Path.exists passes some on before
-    # Python 3.12 (a name that is too long), and a row is data that anyone may edit.
+    # os.path.exists answers False to any error. On older Python versions Path.exists
+    # passes some on (a name that is too long), and a row is data that anyone may edit.
     return os.path.exists(os.path.join(root, path))
 
 

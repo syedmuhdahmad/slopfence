@@ -1195,6 +1195,32 @@ def test_gone_findings_are_only_reported_when_the_run_could_find_them(project, c
     assert "note: 4 findings in the baseline no longer exist." in capsys.readouterr().out
 
 
+def test_missing_import_is_never_called_gone(write, check):
+    """SLOP001 for an import depends on PyPI too: no answer must not look like a fix."""
+    write("app.py", "import made_up_zz\n")
+    found = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert [f.subject for f in found.findings] == ["made_up_zz"]
+    baseline = Baseline(baselinemod.count_findings(found.findings))
+    # Offline now. The file is checked and the rule runs, but nothing is found.
+    offline = check("SLOP001", check_imports=True, baseline=baseline)
+    assert (offline.findings, offline.baselined, offline.notes) == ([], [], [])
+
+
+def test_nothing_is_called_gone_with_diff(write, tmp_path, monkeypatch, capsys):
+    """With --diff some rules only look at changed code, so no entry is ever called gone."""
+    write("app.py", "# I hope this helps!\n\nx = 1\n")
+    monkeypatch.chdir(tmp_path)
+    main([".", "--offline", "--write-baseline", "base.json"])
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    write("app.py", "x = 2\n")  # the comment is gone, and so is the finding
+    code, after = report(capsys, "--offline", "--diff", "main", "--baseline", "base.json")
+    assert (code, after["findings"], after["baselined"], after["notes"]) == (0, [], 0, [])
+    # The full run is the one that says so.
+    code, after = report(capsys, "--offline", "--baseline", "base.json")
+    assert (code, after["notes"]) == (0, [GONE.format("1 finding", "exists")])
+
+
 def test_gone_note_needs_a_run_that_covers_the_baseline(project, capsys):
     """The advice to write the baseline again is only given when that would lose nothing."""
     main([".", "--write-baseline", "base.json"])
@@ -1284,6 +1310,8 @@ def test_empty_baseline_and_round_trip(tmp_path):
     ]
     path = tmp_path / "base.json"
     baselinemod.write(path, findings)
+    # Sorted by file, rule and fingerprint, whatever order the findings came in.
+    assert rows(path) == [["a.py", "SLOP010", "x y z", 1], ["a.py", "SLOP011", "f", 2]]
     loaded = baselinemod.load(path)
     assert loaded.entries == {("a.py", "SLOP010", "x y z"): 1, ("a.py", "SLOP011", "f"): 2}
     assert baselinemod.dumps(loaded.entries) == path.read_text(encoding="utf-8")
