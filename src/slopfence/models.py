@@ -93,7 +93,12 @@ class Finding:
     message: str
     # Last line of the flagged construct, used by --diff to match changed functions.
     end_line: int | None = None
+    # What the finding is about: a package, function or test name, or the text of the
+    # flagged comment. Baselines match findings on it, so it must stay the same when
+    # the code moves: no line number, no other file's location. Every rule sets it.
+    subject: str | None = None
 
     @property
     def severity(self) -> Severity:
+        """The severity of the finding's rule."""
         return RULES[self.rule].severity

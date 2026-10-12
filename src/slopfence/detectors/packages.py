@@ -488,6 +488,7 @@ class PackageChecker:
                     dep.line,
                     1,
                     f"Dependency '{dep.name}' does not exist on PyPI (possible hallucination)",
+                    subject=normalize(dep.name),
                 )
 
     def _is_known(self, name: str) -> bool:
@@ -529,4 +530,5 @@ class PackageChecker:
                     col,
                     f"Import '{name}' is not installed, not declared, and no package with "
                     "that name exists on PyPI (possible hallucination)",
+                    subject=name,
                 )

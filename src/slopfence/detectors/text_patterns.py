@@ -59,16 +59,20 @@ CHAT_PATTERNS = [
 def _scan(
     src: SourceFile, rule: str, patterns: list[re.Pattern[str]], label: str
 ) -> Iterator[Finding]:
+    """Yield a finding for each comment or docstring line that matches one of ``patterns``."""
     for span in src.text_spans():
         text = span.text.lstrip("#").strip().strip("\"'").strip()
         for pattern in patterns:
             if pattern.search(text):
                 snippet = text if len(text) <= 80 else text[:77] + "..."
-                yield Finding(rule, src.rel, span.line, span.col, f'{label}: "{snippet}"')
+                yield Finding(
+                    rule, src.rel, span.line, span.col, f'{label}: "{snippet}"', subject=text
+                )
                 break
 
 
 def check_placeholders(src: SourceFile) -> Iterator[Finding]:
+    """SLOP010: placeholder wording in the comments and docstrings of application code."""
     # Test code often describes production behaviour on purpose, and demo/example
     # code is meant to be illustrative; only check application code.
     if src.is_test_file or src.is_example_file:
@@ -77,4 +81,5 @@ def check_placeholders(src: SourceFile) -> Iterator[Finding]:
 
 
 def check_chat_leftovers(src: SourceFile) -> Iterator[Finding]:
+    """SLOP051: text an AI chat left behind in a comment or docstring."""
     yield from _scan(src, "SLOP051", CHAT_PATTERNS, "Leftover AI chat text")

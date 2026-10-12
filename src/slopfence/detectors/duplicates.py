@@ -351,4 +351,5 @@ def check_duplicates(
             f"Function '{func.name}' is {how} '{other.name}' in {other.path}:{other.line}; "
             "reuse it instead of keeping two copies",
             end_line=func.end_line,
+            subject=func.name,
         )
