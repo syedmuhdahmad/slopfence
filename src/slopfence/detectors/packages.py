@@ -64,7 +64,6 @@ else:  # pragma: no cover
     import tomli as tomllib
 
 
-_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 # Per-requirement options that may follow a requirement on its line (--hash=...). A
 # match starts where a run of white space starts, so a long run is only walked once.
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
@@ -550,16 +549,17 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
 
     def add_spec(table: str, array: str, spec: object) -> None:
         """Record one PEP 508 requirement string from ``table.array``."""
-        if not isinstance(spec, str) or not (m := _REQ_NAME.match(spec)):
-            return
-        name = m.group(1)
-        if normalize(name) == project_name:  # self-references like "pkg[extra]"
+        parsed = parse_requirement(spec) if isinstance(spec, str) else None
+        # Not a self-reference like "pkg[extra]" either.
+        if parsed is None or normalize(parsed.name) == project_name:
             return
         line = finder.spec(table, array, spec)
-        sourced = "://" in spec or normalize(name) in uv_sources
+        sourced = parsed.direct or normalize(parsed.name) in uv_sources
         validate = not (private_index or sourced)
         deps.append(
-            Dependency(name, rel, line, validate, finder.suppressed(line), own_source=sourced)
+            Dependency(
+                parsed.name, rel, line, validate, finder.suppressed(line), own_source=sourced
+            )
         )
 
     for spec in _array(project.get("dependencies")):

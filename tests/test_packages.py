@@ -305,6 +305,8 @@ def test_every_import_occurrence_reported(write, check):
 
 
 def test_directives_inside_toml_strings_are_ignored(write, check):
+    """``# slopfence: ignore`` only counts in a real TOML comment: not in a
+    description, a multi-line string or the marker of a requirement."""
     write(
         "pyproject.toml",
         """
@@ -317,7 +319,7 @@ def test_directives_inside_toml_strings_are_ignored(write, check):
         dependencies = [
             "ghost-one",
             "ghost-two",  # slopfence: ignore
-            "ghost-three # slopfence: ignore",
+            "ghost-three ; extra == '# slopfence: ignore'",
         ]
         """,
     )

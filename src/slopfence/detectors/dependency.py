@@ -272,7 +272,8 @@ class Requirement(NamedTuple):
     """What a requirement string says about the package it names."""
 
     name: str
-    # ``name @ https://...``: the package never comes from an index.
+    # The string says where the package comes from, so it never comes from an index:
+    # ``name @ ...`` in any form, or a URL anywhere in it.
     direct: bool
     # The string is the name and nothing else: no extra, version, marker or URL.
     bare: bool
@@ -297,7 +298,10 @@ def parse_requirement(spec: str) -> Requirement | None:
     ):
         return None
     rest = m.group("rest")
-    return Requirement(name, rest.startswith("@"), not (rest or m.group("extras")))
+    # A URL in another place ("name==1.0 @ https://...") is no direct reference for
+    # pip. Whoever wrote it meant that URL all the same.
+    direct = rest.startswith("@") or "://" in spec
+    return Requirement(name, direct, not (rest or m.group("extras")))
 
 
 def is_package_name(text: str) -> bool:

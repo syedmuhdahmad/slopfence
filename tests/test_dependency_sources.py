@@ -186,6 +186,14 @@ def test_discovery(write, tmp_path):
         ("celery[redis]", ("celery", False, False)),
         ("zope.interface (>=5.0)", ("zope.interface", False, False)),
         ("corp-lib @ https://example.com/corp.whl", ("corp-lib", True, False)),
+        # A direct reference in every form: a path, a Hatch context, no space, a URL
+        # in a place where pip does not take one.
+        ("corp-lib @ file:../corp-lib", ("corp-lib", True, False)),
+        ("corp-lib @ ./vendor/corp-lib", ("corp-lib", True, False)),
+        ("corp-lib @ {root:parent:uri}/corp-lib", ("corp-lib", True, False)),
+        ("corp-lib@git+ssh://git@corp.example/corp-lib.git", ("corp-lib", True, False)),
+        ("corp-lib==1.0 @ https://example.com/corp_lib-1.0.whl", ("corp-lib", True, False)),
+        ("corp-lib>=1.0 https://example.com/corp_lib-1.0.whl", ("corp-lib", True, False)),
         ("pkg===1.0.custom", ("pkg", False, False)),
         ("templated==${VERSION}", ("templated", False, False)),
         ("Django>={{ django_version }}", ("Django", False, False)),
@@ -1722,6 +1730,31 @@ SOURCED = {
         'corp-auth = { version = "^1", source = "corp" }\n\n'
         f'[[tool.poetry.source]]\nname = "corp"\nurl = "{PRIVATE}"\npriority = "explicit"\n',
     ),
+    # A direct reference without "://": a path, and Hatch's way to name one.
+    "pyproject path": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth @ file:../corp-auth", "requests"]\n',
+    ),
+    "pyproject Hatch path": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\n\n[project.optional-dependencies]\n'
+        'dev = ["corp-auth @ {root:parent:uri}/corp-auth", "requests"]\n',
+    ),
+    "dependency group path": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\n\n[dependency-groups]\n'
+        'dev = ["corp-auth[sso] @ ./vendor/corp-auth", "requests"]\n',
+    ),
+    # A URL where pip takes none. v0.2 kept such a name on the machine.
+    "pyproject URL after a version": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\n'
+        'dependencies = ["corp-auth==1.0 @ https://corp.example/corp_auth-1.0.whl", "requests"]\n',
+    ),
+    "requirements URL after a version": (
+        "requirements.txt",
+        "corp-auth==1.0 @ https://corp.example/corp_auth-1.0.whl\nrequests\n",
+    ),
     "setup.cfg direct reference": (
         "setup.cfg",
         f"[options]\ninstall_requires =\n    corp-auth @ {GIT}\n    requests\n",
@@ -1791,6 +1824,34 @@ def test_a_source_in_a_requirements_file_that_is_not_utf8_still_counts(tmp_path,
         result = run(paths, tmp_path, registry, select=["SLOP001"])
         # Asked once: for setup.py. The names in the unread file are not asked about.
         assert result.findings == [] and registry.queries == ["requests"]
+
+
+NO_REQUIREMENT_STRINGS = [
+    "python>=3.9",
+    "vendor.tar.gz",
+    "2024.01.15",
+    "foo bar baz",
+    "f" * 32,
+    "x = 1",
+]
+PYPROJECT_ARRAYS = {
+    "project": '[project]\nname = "demo"\ndependencies = {}\n',
+    "optional": '[project]\nname = "demo"\n\n[project.optional-dependencies]\ndev = {}\n',
+    "group": '[project]\nname = "demo"\n\n[dependency-groups]\ndev = {}\n',
+}
+
+
+@pytest.mark.parametrize("array", sorted(PYPROJECT_ARRAYS))
+def test_a_pyproject_string_is_read_like_a_requirement_in_any_other_file(write, check, array):
+    """One reader for requirement strings: what is no requirement in a requirements
+    file (the interpreter, a file name, a date, prose, a checksum) is none in
+    ``pyproject.toml`` either. It is not sent, and a real requirement next to it is."""
+    specs = [*NO_REQUIREMENT_STRINGS, "ghost-lib>=1", "requests[socks] ; python_version < '3.13'"]
+    write("pyproject.toml", PYPROJECT_ARRAYS[array].format(json.dumps(specs)))
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-lib"]
+    assert registry.queries == ["ghost-lib", "requests"]
 
 
 def test_a_name_held_back_for_another_reason_is_still_looked_up_elsewhere(write, check):
