@@ -48,6 +48,16 @@ EXCLUDED_DIRS = {
 }
 
 
+def _is_checkout(folder: Path) -> bool:
+    """Whether a folder holds a ``.git`` file or folder: a clone, worktree or submodule.
+
+    Asked with ``os.path.exists``, which has no answer but yes or no. Before Python
+    3.13 ``Path.exists`` raises for a folder that can't be entered, and a walk must
+    pass by such a folder, not end there.
+    """
+    return os.path.exists(folder / ".git")
+
+
 def _is_pruned(folder: Path) -> bool:
     """Whether the walk of a project never enters ``folder``.
 
@@ -59,15 +69,19 @@ def _is_pruned(folder: Path) -> bool:
     see #58).
     """
     name = folder.name
-    return name in EXCLUDED_DIRS or name.endswith(".egg-info") or (folder / ".git").exists()
+    return name in EXCLUDED_DIRS or name.endswith(".egg-info") or _is_checkout(folder)
 
 
-def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path], list[Path]]:
+def discover_all(
+    paths: Sequence[Path], root: Path, deep: bool = True
+) -> tuple[list[Path], list[Path], list[Path]]:
     """Return (python files, dependency files, lock files) under the given paths.
 
     ``setup.py`` is both a Python file and a dependency file. ``root`` is the project
     root: whether a file is a dependency file can depend on its folder inside the
-    project (``requirements/base.txt``, see ``dependency.kind_of``).
+    project (``requirements/base.txt``, see ``dependency.kind_of``). With ``deep``
+    False only the files that lie directly in a folder are taken, and none of the
+    folders inside it is entered.
     """
     py_files: list[Path] = []
     dep_files: list[Path] = []
@@ -91,40 +105,57 @@ def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Pa
             # Pruned before descending. The path passed on the command line is the
             # walk root and is never pruned, so an explicitly named checkout is still
             # checked.
-            dirnames[:] = [d for d in dirnames if not _is_pruned(Path(dirpath, d))]
+            dirnames[:] = [d for d in dirnames if deep and not _is_pruned(Path(dirpath, d))]
             for filename in filenames:
                 add(Path(dirpath, filename))
     return sorted(set(py_files)), sorted(set(dep_files)), sorted(set(lock_files))
 
 
-def _home(path: Path, root: Path) -> Path | None:
-    """The folder a named file belongs to when the walk of the project never reaches it.
+def _home(path: Path, root: Path) -> tuple[Path, bool] | None:
+    """The folder a named path belongs to when the walk of the project never reaches
+    it, and whether that folder is a checkout.
 
-    None for a file that the walk reaches: it belongs to the project. The walk never
-    leaves ``root`` and never enters a pruned folder (see ``_is_pruned``). A file that
-    is named there is checked all the same. It belongs to its own checkout, the
-    nearest folder above it that holds a ``.git``, and without one to its own folder.
+    None for a path that the walk reaches: it belongs to the project. The walk never
+    leaves ``root`` and never enters a pruned folder (see ``_is_pruned``). A file or
+    folder that is named there is checked all the same. It belongs to its own
+    checkout: the nearest folder above it that holds a ``.git``. A file without one
+    belongs to its own folder. A folder without one is on its own, like a folder that
+    is a checkout itself, or the root, or a folder above the root: the walk of the
+    named folder reads all there is.
     """
+    is_folder = path.is_dir()
+    if is_folder and (path == root or path in root.parents or _is_checkout(path)):
+        return None
     above = list(path.parents)
     if root in above:
         above = above[: above.index(root)]
         if not any(_is_pruned(folder) for folder in above):
             return None
-    return next((folder for folder in above if (folder / ".git").exists()), path.parent)
+    checkout = next((folder for folder in above if _is_checkout(folder)), None)
+    if checkout is not None:
+        return checkout, True
+    return None if is_folder else (path.parent, False)
 
 
-def _beside_named_files(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path]]:
-    """The dependency and lock files that named files outside the project walk are
+def _beside_named_paths(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path]]:
+    """The dependency and lock files that named paths outside the project walk are
     judged with: those of their own checkout or folder (see ``_home``).
 
-    Such a file is read like one of the project. Without its neighbours, a private
+    Such a path is read like one of the project. Without its neighbours, a private
     index that its own checkout sets would not cover it, and its names would be sent.
+    A checkout is walked like a project. Of a folder that is no checkout, only the
+    files that lie directly in it count: what lies below a folder that happens to
+    hold a named file (a home folder, a shared drive) is nobody's project.
     """
-    named = (Path(path).resolve() for path in paths)
-    homes = {home for path in named if path.is_file() and (home := _home(path, root))}
-    if not homes:
-        return [], []  # the usual case: every named file is one the project walk reaches
-    _, deps, locks = discover_all(sorted(homes), root)
+    homes = {home for path in paths if (home := _home(Path(path).resolve(), root))}
+    deps: list[Path] = []
+    locks: list[Path] = []
+    for deep in (True, False):
+        # The usual case has no home at all: every named path is one the walk reaches.
+        if folders := sorted(folder for folder, is_checkout in homes if is_checkout is deep):
+            _, found_deps, found_locks = discover_all(folders, root, deep)
+            deps += found_deps
+            locks += found_locks
     return deps, locks
 
 
@@ -352,7 +383,7 @@ def run(
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        beside_deps, beside_locks = _beside_named_files(paths, root)
+        beside_deps, beside_locks = _beside_named_paths(paths, root)
         to_read = _dependency_files_to_read([*project[1], *beside_deps], dep_files, root, exclude)
         lock_files = [*project[2], *beside_locks]
         index = build_index(root, project[0], to_read, lock_files, imports=check_imports)

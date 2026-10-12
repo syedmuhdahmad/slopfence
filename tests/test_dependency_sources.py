@@ -2515,11 +2515,12 @@ def test_a_dependency_file_outside_the_project_is_still_checked(write, tmp_path)
 # own checkout (None: it has none) and the requirements file that sets its index.
 OFF_THE_WALK = {
     "a nested clone": ("proj/vendor/lib/src/setup.py", "proj/vendor/lib", "requirements.txt"),
+    "deep in a clone": ("proj/vendor/lib/a/b/setup.py", "proj/vendor/lib", "constraints.txt"),
     "a nested worktree": ("proj/wt/fix/setup.py", "proj/wt/fix", "deploy/requirements.txt"),
     "another project": ("other/pkg/setup.py", "other", "requirements.txt"),
     "outside, no checkout": ("other/setup.py", None, "requirements.txt"),
     "a build folder": ("proj/build/lib/setup.py", None, "requirements.txt"),
-    "a virtual environment": ("proj/.venv/src/tool/setup.cfg", None, "requirements/prod.txt"),
+    "a virtual environment": ("proj/.venv/src/tool/setup.cfg", None, "requirements-prod.txt"),
 }
 OFF_THE_WALK_BODY = {
     "setup.py": "from setuptools import setup\nsetup(name='x', install_requires=['corp-auth'])\n",
@@ -2533,7 +2534,8 @@ def test_a_named_file_off_the_project_walk_is_judged_with_its_own_checkout(write
     checkout, a build folder and everything outside the project. A file that is
     named there is checked all the same, together with the dependency files of its
     own checkout, or of its own folder when it has none. So a private index that is
-    set there covers it, as it does when the folder is named."""
+    set there covers it. It does the same when a folder is named: the checkout, or
+    a folder inside it."""
     named, checkout, requirements = OFF_THE_WALK[layout]
     path = write(named, OFF_THE_WALK_BODY[PurePosixPath(named).name])
     home = tmp_path / checkout if checkout else path.parent
@@ -2544,12 +2546,92 @@ def test_a_named_file_off_the_project_walk_is_judged_with_its_own_checkout(write
         write(f"{checkout}/.git/HEAD", "ref: refs/heads/main\n")
     root = tmp_path / "proj"
     write("proj/app.py", "x = 1\n")
-    for paths in ([root, path], [path], [root, home]):
+    for paths in ([root, path], [path], [root, home], [root, path.parent], [path.parent]):
         registry = FakeRegistry(set())
         result = run(paths, root, registry, select=["SLOP001"])
         assert result.findings == [] and registry.queries == []
         assert f"a private package index is set in {relative_path(index, root)}," in result.notes[0]
         assert "secret" not in result.notes[0]
+
+
+GHOST_CFG = "[options]\ninstall_requires =\n    ghost-lib\n"
+
+
+# Files that are nobody's project for a file named in ``loose/shared``.
+NOT_BESIDE = {
+    "an index above": ("loose/requirements.txt", INDEX + "corp-core\n"),
+    "an index far below": ("loose/shared/old/app/requirements.txt", INDEX + "corp-core\n"),
+    "a broken file far below": ("loose/shared/old/app/pyproject.toml", "not TOML\n"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(NOT_BESIDE))
+@pytest.mark.parametrize("named", ["setup.cfg", "notes.md"])
+def test_a_named_file_without_a_checkout_is_judged_with_its_own_folder_only(
+    write, tmp_path, named, layout
+):
+    """``slopfence . ../loose/shared/setup.cfg``, where no folder above the file holds
+    a ``.git``: only the files that lie directly in its own folder count. The folder
+    above is not read, and the folders below are nobody's project. A private index or
+    a broken file there holds nothing back: not the named file, and not the project."""
+    write("proj/setup.cfg", GHOST_CFG)
+    write("loose/shared/setup.cfg", GHOST_CFG.replace("ghost-lib", "ghost-shared"))
+    path = write("loose/shared/notes.md", "notes\n").with_name(named)
+    write(*NOT_BESIDE[layout])
+    root = tmp_path / "proj"
+    registry = FakeRegistry(set())
+    result = run([root, path], root, registry, select=["SLOP001"])
+    asked = ["ghost-lib", "ghost-shared"] if named == "setup.cfg" else ["ghost-lib"]
+    assert sorted(registry.queries) == asked and result.notes == []
+
+
+def test_a_named_folder_without_a_checkout_is_not_judged_with_the_folder_above(write, tmp_path):
+    """The same for ``slopfence . ../loose/shared``: the named folder is read as far
+    down as it goes, and nothing above it is. So the file and its folder agree."""
+    write("proj/setup.cfg", GHOST_CFG)
+    path = write("loose/shared/setup.cfg", GHOST_CFG.replace("ghost-lib", "ghost-shared"))
+    write("loose/requirements.txt", INDEX + "corp-core\n")
+    root = tmp_path / "proj"
+    for named in (path, path.parent):
+        registry = FakeRegistry(set())
+        result = run([root, named], root, registry, select=["SLOP001"])
+        assert sorted(registry.queries) == ["ghost-lib", "ghost-shared"] and result.notes == []
+
+
+def test_a_folder_that_can_not_be_entered_does_not_stop_the_run(write, tmp_path):
+    """A folder without permissions lies next to a named file outside the project, and
+    another inside the project. Whether it is a checkout can't be asked, and before
+    Python 3.13 asking raised. It is passed by, like a folder that is none."""
+    write("proj/setup.cfg", GHOST_CFG)
+    shared = write("other/sub/constraints.txt", "requests==2.31\n")
+    write("other/.git/HEAD", "ref: refs/heads/main\n")
+    locked = [tmp_path / "proj" / "locked", tmp_path / "other" / "locked"]
+    for folder in locked:
+        folder.mkdir()
+        folder.chmod(0)
+    try:
+        root = tmp_path / "proj"
+        registry = FakeRegistry({"requests"})
+        result = run([root, shared], root, registry, select=["SLOP001"])
+    finally:
+        for folder in locked:
+            folder.chmod(0o755)
+    assert [f.subject for f in result.findings] == ["ghost-lib"]
+
+
+def test_the_folders_above_the_project_root_are_never_read(write, tmp_path):
+    """The look-alike of a nested checkout: the project is a folder of a bigger
+    checkout, and the root or a folder of the project is named. The requirements file
+    above the root is not this project's, as it never was."""
+    write("outer/.git/HEAD", "ref: refs/heads/main\n")
+    write("outer/requirements.txt", INDEX + "corp-core\n")
+    write("outer/proj/setup.cfg", GHOST_CFG)
+    write("outer/proj/sub/setup.cfg", GHOST_CFG.replace("ghost-lib", "ghost-sub"))
+    root = tmp_path / "outer" / "proj"
+    for paths, names in (([root], ["ghost-lib", "ghost-sub"]), ([root / "sub"], ["ghost-sub"])):
+        registry = FakeRegistry(set())
+        result = run(paths, root, registry, select=["SLOP001"])
+        assert registry.queries == names and result.notes == []
 
 
 def test_a_named_file_the_walk_reaches_is_judged_with_the_project_alone(write, tmp_path):
