@@ -5,6 +5,7 @@ import pytest
 from slopfence import diff as diffmod
 from slopfence.cli import main
 from tests.conftest import git as _git
+from tests.conftest import git_init
 
 SLOPPY = """\
 def charge(card):
@@ -99,6 +100,26 @@ def test_diff_mode_only_reports_changed_lines(tmp_path, capsys, monkeypatch):
         ("new.py", 1, "SLOP010"),
         ("old.py", 3, "SLOP051"),
     ]
+
+
+@pytest.mark.parametrize(
+    "setting",
+    ["diff.mnemonicPrefix=true", "diff.noprefix=true", "diff.srcPrefix=x/", "diff.dstPrefix=y/"],
+)
+def test_diff_mode_does_not_depend_on_the_git_prefix_settings(tmp_path, setting):
+    """A user's git config can change the ``a/`` and ``b/`` in front of the paths of a
+    diff. The changed lines must be found all the same (#65), also in a folder named
+    ``b``, whose path starts like a prefix."""
+    git_init(tmp_path)
+    (tmp_path / "b").mkdir()
+    for name in ("app.py", "b/app.py"):
+        (tmp_path / name).write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "init")
+    for name in ("app.py", "b/app.py"):
+        (tmp_path / name).write_text("x = 1\n# I hope this helps!\n", encoding="utf-8")
+    _git(tmp_path, "config", *setting.split("="))
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2}, "b/app.py": {2}}
 
 
 def test_diff_with_bad_ref(tmp_path, monkeypatch):

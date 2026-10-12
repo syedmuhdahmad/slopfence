@@ -8,6 +8,20 @@ from pathlib import Path
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
+# How ``git diff`` is asked, so that the answer does not depend on the user's git config.
+_DIFF_OPTIONS = (
+    "--unified=0",
+    "--no-color",
+    # The lines of the files as they are: no external diff tool, and no conversion to
+    # text first (a ``textconv`` driver, as some tools set one for notebooks).
+    "--no-ext-diff",
+    "--no-textconv",
+    # The prefixes ``parse_unified_diff`` expects, whatever diff.mnemonicPrefix,
+    # diff.noprefix, diff.srcPrefix and diff.dstPrefix say.
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
+
 # path (relative to repo root) -> changed line numbers; None means the whole file is new.
 ChangedLines = dict[str, "set[int] | None"]
 
@@ -86,9 +100,7 @@ def parse_unified_diff(diff_text: str) -> ChangedLines:
 def changed_lines(root: Path, ref: str) -> ChangedLines:
     """Lines changed between merge-base(ref, HEAD) and the working tree, plus untracked files."""
     base = _git(root, "merge-base", ref, "HEAD").strip()
-    # The lines of the files as they are: no external diff tool, and no conversion to
-    # text first (a ``textconv`` driver, as some tools set one for notebooks).
-    diff = _git(root, "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
+    diff = _git(root, "diff", *_DIFF_OPTIONS, base)
     changed = parse_unified_diff(diff)
     untracked = _git(root, "ls-files", "-z", "--others", "--exclude-standard")
     for path in untracked.split("\0"):
