@@ -270,8 +270,12 @@ def match(
 
 
 def scope_of(paths: Iterable[Path], root: Path) -> list[str]:
-    """The paths a run was given, as project-relative POSIX paths. "." is the project."""
-    return sorted({relative_path(Path(path), root) for path in paths})
+    """The paths a run was given, named the way findings name their files.
+
+    That is a project-relative POSIX path, "." for the project itself, and an
+    absolute path for anything outside the project.
+    """
+    return sorted({relative_path(Path(path).resolve(), root) for path in paths})
 
 
 def _exists(root: Path, path: str) -> bool:
@@ -281,17 +285,26 @@ def _exists(root: Path, path: str) -> bool:
     return os.path.exists(os.path.join(root, path))
 
 
+def _in_scope(path: str, scope: Collection[str]) -> bool:
+    """Whether the file of a baseline row is one of, or inside one of, the paths of a run."""
+    return any(
+        path == given
+        or path.startswith(given + "/")
+        # The project itself holds every file that is named relative to it.
+        or (given == "." and not os.path.isabs(path))
+        for given in scope
+    )
+
+
 def uncovered(entries: Mapping[Key, int], scope: Collection[str], root: Path) -> dict[str, int]:
     """The baselined findings of each file that exists but lies outside ``scope``.
 
     A run with that scope can't tell whether those findings are still there, and a
     baseline written from it would lose them.
     """
-    if "." in scope:
-        return {}
     outside: Counter[str] = Counter()
     for (path, _, _), count in entries.items():
-        if not any(path == s or path.startswith(s + "/") for s in scope):
+        if not _in_scope(path, scope):
             outside[path] += count
     return {path: count for path, count in sorted(outside.items()) if _exists(root, path)}
 

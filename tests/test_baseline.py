@@ -1034,6 +1034,27 @@ def test_write_baseline_refuses_to_drop_findings_outside_the_checked_paths(
     assert main(["src/app.py", "src/utils.py", "--write-baseline", "base.json"]) == 0
 
 
+def test_baseline_can_be_written_again_for_a_path_outside_the_project(
+    write, tmp_path, monkeypatch, capsys
+):
+    """A file outside the project is named by its absolute path, in the run and in the file."""
+    write("proj/app.py", "# I hope this helps!\n")
+    other = write("other/lib.py", "# I hope this helps!\n")
+    monkeypatch.chdir(tmp_path / "proj")
+    assert main([".", "../other", "--offline", "--write-baseline", "base.json"]) == 0
+    assert [row[0] for row in rows(tmp_path / "proj" / "base.json")] == [
+        other.resolve().as_posix(),
+        "app.py",
+    ]
+    # The second write finds a baseline with a finding for ../other, which this run checks.
+    assert main([".", "../other", "--offline", "--write-baseline", "base.json"]) == 0
+    capsys.readouterr()
+    assert main([".", "../other", "--offline", "--no-color", "--baseline", "base.json"]) == 0
+    assert capsys.readouterr().out == "No new issues found in 2 files; 2 hidden by the baseline.\n"
+    # Without ../other, its finding would be lost.
+    assert main([".", "--offline", "--write-baseline", "base.json"]) == 2
+
+
 def test_failed_write_keeps_the_old_baseline(write, tmp_path, monkeypatch, capsys):
     """The baseline is replaced in one step: a write that fails leaves the old file whole."""
     write("app.py", "# I hope this helps!\n")
@@ -1423,23 +1444,25 @@ def test_match_takes_findings_off_changed_lines_first():
     assert baselinemod.match([first, second], baseline, {"a.py": None}).new == [second]
 
 
-def test_scope_of_names_the_paths_of_a_run(tmp_path):
-    """Paths become project-relative; the project itself is "."."""
+def test_scope_of_names_the_paths_of_a_run(tmp_path, monkeypatch):
+    """Paths are named the way findings name their files: "." is the project itself."""
     root = tmp_path / "project"
     (root / "src").mkdir(parents=True)
     assert baselinemod.scope_of([root], root) == ["."]
-    assert baselinemod.scope_of([root / "src", root / "src", root / "a.py"], root) == [
-        "a.py",
-        "src",
-    ]
-    assert baselinemod.scope_of([tmp_path / "other"], root) == [(tmp_path / "other").as_posix()]
+    paths = [root / "src", root / "src", root / "a.py"]
+    assert baselinemod.scope_of(paths, root) == ["a.py", "src"]
+    # A path outside the project is absolute, however it was typed.
+    monkeypatch.chdir(root)
+    outside = (tmp_path / "other").resolve().as_posix()
+    assert baselinemod.scope_of([Path("../other")], root) == [outside]
+    assert baselinemod.scope_of([Path("src/.."), Path("./src")], root) == [".", "src"]
 
 
 def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp_path):
     """Only files that exist and that the run doesn't check stand in the way."""
-    write("src/a.py", "x = 1\n")
-    write("srcs/b.py", "x = 1\n")
-    write("tests/c.py", "x = 1\n")
+    root = tmp_path / "proj"
+    for rel in ["src/a.py", "srcs/b.py", "tests/c.py"]:
+        write(f"proj/{rel}", "x = 1\n")
     entries = {
         ("src/a.py", "SLOP010", "x"): 1,
         ("srcs/b.py", "SLOP010", "x"): 2,  # "src" is not a part of "srcs"
@@ -1447,9 +1470,14 @@ def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp
         ("tests/c.py", "SLOP010", "x"): 1,
         ("tests/gone.py", "SLOP010", "x"): 5,  # no such file: nothing to lose
     }
-    assert baselinemod.uncovered(entries, ["src"], tmp_path) == {"srcs/b.py": 3, "tests/c.py": 1}
-    assert baselinemod.uncovered(entries, ["src", "srcs/b.py", "tests"], tmp_path) == {}
-    assert baselinemod.uncovered(entries, ["."], tmp_path) == {}
+    assert baselinemod.uncovered(entries, ["src"], root) == {"srcs/b.py": 3, "tests/c.py": 1}
+    assert baselinemod.uncovered(entries, ["src", "srcs/b.py", "tests"], root) == {}
+    assert baselinemod.uncovered(entries, ["."], root) == {}
+    # A file outside the project has an absolute path. The project does not hold it.
+    elsewhere = write("elsewhere/d.py", "x = 1\n").resolve().as_posix()
+    entries[(elsewhere, "SLOP010", "x")] = 2
+    assert baselinemod.uncovered(entries, ["."], root) == {elsewhere: 2}
+    assert baselinemod.uncovered(entries, [".", elsewhere.rsplit("/", 1)[0]], root) == {}
 
 
 def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):

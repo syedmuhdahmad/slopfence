@@ -111,7 +111,7 @@ def _per_file_matcher(
     """A function that says whether ``per-file-ignores`` switches a rule off for a file.
 
     It takes a rule ID and a project-relative POSIX path. The patterns are matched
-    once per file: findings come in runs of the same path.
+    once per file, however many findings the file has.
     """
     off: dict[str, frozenset[str]] = {}
 
