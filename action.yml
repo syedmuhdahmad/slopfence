@@ -39,6 +39,10 @@ runs:
         # Every Python here runs with -I. The steps run in the repository that is
         # checked, and without -I Python looks for modules in that folder first: a
         # file there named like a standard module would be imported and run.
+        # pip starts Pythons of its own without -I, so this step also leaves the
+        # repository and drops a PYTHONPATH that may point into it.
+        cd "$RUNNER_TEMP"
+        unset PYTHONPATH
         py=""
         for candidate in python3 python; do
           if command -v "$candidate" >/dev/null 2>&1 \

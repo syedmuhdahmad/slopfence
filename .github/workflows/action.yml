@@ -77,10 +77,14 @@ jobs:
           diff: none
           sarif-file: full.sarif
 
+      # A workflow may put the repository on PYTHONPATH (many do, for their tests).
+      # That must not bring its files onto the import path of the action's Pythons.
       - name: "diff: explicit ref"
         id: ref
         continue-on-error: true
         uses: ./slopfence-src
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         with:
           paths: src tests requirements.txt nb
           diff: origin/main

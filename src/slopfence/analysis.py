@@ -190,8 +190,9 @@ def _safe_import_path() -> Iterator[None]:
     imported in its place, and the worker dies before this process has given it the
     import path to use. ``PYTHONSAFEPATH`` switches that first entry off.
 
-    Python reads the variable from 3.11 on. On 3.10 it changes nothing, so there no
-    new interpreter is started at all (see ``_new_processes_are_safe``).
+    Python reads the variable from 3.11 on, and not when it was started with ``-E``.
+    Where it is not read, no new interpreter is started at all (see
+    ``_new_processes_are_safe``).
     """
     before = os.environ.get("PYTHONSAFEPATH")
     os.environ["PYTHONSAFEPATH"] = "1"
@@ -209,11 +210,19 @@ def _new_processes_are_safe(mp_context: BaseContext | None) -> bool:
 
     A new Python process looks for modules in the current folder first, and that
     folder is the project. A project file named like a module that Python loads while
-    it starts (``threading.py``) would be imported, and so run. ``_safe_import_path``
-    switches that off, from Python 3.11 on. Python 3.10 has no such switch. There only
-    "fork" is safe: a forked worker is a copy of this process, not a new interpreter.
+    it starts (``threading.py``) would be imported, and so run. Three things prevent it:
+
+    * This Python was started with ``-I`` or ``-P``: Python starts its children with
+      the same option.
+    * ``_safe_import_path``, which works from Python 3.11 on, unless this Python was
+      started with ``-E`` and so ignores the variable.
+    * The "fork" start method: a forked worker is a copy of this process, not a new
+      interpreter.
     """
-    if sys.version_info >= (3, 11):
+    flags = sys.flags
+    if flags.isolated or getattr(flags, "safe_path", False):
+        return True
+    if sys.version_info >= (3, 11) and not flags.ignore_environment:
         return True
     # Imported here: a run that starts no workers doesn't pay for it.
     import multiprocessing
@@ -231,8 +240,9 @@ def _analyze_in_pool(
     """
     if not _new_processes_are_safe(mp_context):
         print(
-            "slopfence: warning: worker processes need Python 3.11 or newer on this "
-            "system; checking files in one process instead",
+            "slopfence: warning: this Python can't keep worker processes from importing "
+            "project files (Python 3.10, or -E without -I); checking files in one process "
+            "instead",
             file=sys.stderr,
         )
         return None

@@ -47,6 +47,14 @@ Examples of issues we want to hear about:
 - A detector bypass that lets a known-malicious package pass as safe
 - Vulnerabilities in our GitHub Action or release pipeline
 
+## Checking code you don't trust
+
+slopfence reads the files it checks. It never runs them. Python itself can still import a project file by accident: it looks for modules in the folder a command is started in, and in every folder on `PYTHONPATH`.
+
+- The `slopfence` command, the pre-commit hook and the GitHub Action don't have the checked folder on that path. Use one of them.
+- `python -m slopfence` starts with the folder on the path. slopfence removes it before it imports its own modules, but Python has already imported a few of its own by then. Use `python -I -m slopfence` if you need the module form.
+- Don't set `PYTHONPATH` to the project when you run slopfence on it. The Action ignores `PYTHONPATH`.
+
 ## What slopfence sends over the network
 
 `SLOP001` checks package names against `https://pypi.org`. By default only names **declared in dependency files** (requirements files, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `pip install` lines in notebooks) are sent. Import names from source code and notebooks, which can reveal private package names, are sent only when you opt in with `--check-imports` or `check-imports = true`. Dependencies are not sent when they may come from a private index: one set in the dependency file itself, or in pip's or uv's environment variables and configuration files (`pip.conf`, `uv.toml`). For `setup.py`, `setup.cfg`, `Pipfile`, notebooks and requirements files with another name than `requirements*.txt`, a private index in any requirements file, `pyproject.toml`, `Pipfile` or `Pipfile.lock` of the project counts too. A package that the project defines itself is never sent. Neither is a package that a project file takes from a URL, a path or git, in whichever file it is named. With a private index in the environment, nothing is sent at all. Index URLs are never printed. See [Private package indexes](README.md#private-package-indexes) for the full list. `known-packages` are never sent. Neither are the names in a file where `SLOP001` is switched off with `per-file-ignores`, or under a `# slopfence: ignore` or `# slopfence: ignore-file` comment. `--offline` sends nothing. See [What slopfence sends over the network](README.md#what-slopfence-sends-over-the-network).

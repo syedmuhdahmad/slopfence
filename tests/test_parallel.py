@@ -292,13 +292,27 @@ def test_workers_never_run_a_file_of_the_checked_project(tmp_path):
     if sys.version_info >= (3, 11):
         assert warnings == ""
     else:
-        assert "worker processes need Python 3.11 or newer" in warnings
+        assert "can't keep worker processes from importing project files" in warnings
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="without -E, Python 3.10 is covered above")
+def test_workers_are_not_started_when_python_ignores_its_environment(tmp_path):
+    """``python -E`` hands -E on to every worker, which then ignores PYTHONSAFEPATH too.
+    So with -E no worker is started, unless they are forked."""
+    project = shadowed_project(tmp_path, ["threading", "types", "selectors"])
+    command = console_script(tmp_path)
+    code, report, warnings = run_in(project, [command[0], "-E", *command[1:]], "2")
+    assert not (project / "imported").exists()
+    assert code == 1
+    assert [f["rule"] for f in json.loads(report)["findings"]] == ["SLOP051"] * 6
+    assert "can't keep worker processes from importing project files" in warnings
 
 
 def test_python_m_never_runs_a_file_of_the_checked_project(tmp_path):
     """``python -m slopfence`` starts with the current folder first on the import
     path. Files there that are named like modules slopfence imports must not run."""
-    project = shadowed_project(tmp_path, ["argparse", "fnmatch", "random", "tempfile", "tomllib"])
+    names = ["__future__", "argparse", "fnmatch", "random", "tempfile", "tomllib", "json"]
+    project = shadowed_project(tmp_path, names)
     code, report, warnings = run_in(project, [sys.executable, "-m", "slopfence"], "1")
     assert not (project / "imported").exists()
     assert (code, warnings) == (1, "")
@@ -331,6 +345,17 @@ def test_module_run_keeps_the_folder_slopfence_itself_is_in(monkeypatch):
     assert sys.path == before
 
 
+def test_import_path_is_left_alone_when_the_module_is_only_imported(tmp_path, monkeypatch):
+    """A worker process imports ``slopfence.__main__`` again, under another name. That
+    must not touch its import path: only a real ``python -m slopfence`` does."""
+    entry = importlib.import_module("slopfence.__main__")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    before = list(sys.path)
+    importlib.reload(entry)
+    assert sys.path == before
+
+
 def test_module_run_with_an_empty_import_path(monkeypatch):
     """An import path without entries has nothing to drop."""
     entry = importlib.import_module("slopfence.__main__")
@@ -339,21 +364,51 @@ def test_module_run_with_an_empty_import_path(monkeypatch):
     assert sys.path == []
 
 
-@pytest.mark.parametrize("method", multiprocessing.get_all_start_methods())
-def test_python_310_only_forks_its_workers(project, monkeypatch, capsys, method):
-    """Python 3.10 can't keep a new interpreter from importing project files. So only
-    forked workers are used there; with another start method the pool gives up, with
-    a warning, before it starts a process."""
-    old_python = types.SimpleNamespace(version_info=(3, 10, 12), stderr=sys.stderr)
-    monkeypatch.setattr(analysis, "sys", old_python)
-    context = multiprocessing.get_context(method)
-    assert analysis._new_processes_are_safe(context) is (method == "fork")
+def python_like(version, **flags):
+    """A stand-in for ``sys`` as a Python of that version sees it, started with ``flags``.
+    Python 3.10 has no ``safe_path`` flag."""
+    known = {"isolated": 0, "ignore_environment": 0}
+    if version >= (3, 11):
+        known["safe_path"] = False
+    return types.SimpleNamespace(
+        version_info=version, stderr=sys.stderr, flags=types.SimpleNamespace(**{**known, **flags})
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "flags", "any_method"),
+    [
+        ((3, 10, 12), {}, False),  # no PYTHONSAFEPATH before 3.11
+        ((3, 10, 12), {"isolated": 1, "ignore_environment": 1}, True),  # -I goes to the workers
+        ((3, 12, 3), {}, True),  # PYTHONSAFEPATH
+        ((3, 12, 3), {"ignore_environment": 1}, False),  # -E: the variable is ignored
+        ((3, 12, 3), {"ignore_environment": 1, "safe_path": True}, True),  # -E -P
+        ((3, 14, 0), {"isolated": 1, "ignore_environment": 1, "safe_path": True}, True),  # -I
+    ],
+)
+def test_which_pythons_may_start_new_interpreters(monkeypatch, version, flags, any_method):
+    """A worker that is a new interpreter needs something that keeps the current
+    folder off its import path: -I or -P on this Python, or PYTHONSAFEPATH where it
+    is read. Without one of these only forked workers are safe."""
+    monkeypatch.setattr(analysis, "sys", python_like(version, **flags))
+    for method in multiprocessing.get_all_start_methods():
+        context = multiprocessing.get_context(method)
+        assert analysis._new_processes_are_safe(context) is (any_method or method == "fork")
     default_is_fork = multiprocessing.get_start_method() == "fork"
-    assert analysis._new_processes_are_safe(None) is default_is_fork
-    if method != "fork":
-        tasks, options = tasks_and_options(project)
-        assert analysis._analyze_in_pool(tasks, options, 2, context) is None
-        assert "worker processes need Python 3.11 or newer" in capsys.readouterr().err
+    assert analysis._new_processes_are_safe(None) is (any_method or default_is_fork)
+
+
+@pytest.mark.parametrize(
+    "method", [m for m in multiprocessing.get_all_start_methods() if m != "fork"]
+)
+def test_pool_gives_up_before_it_starts_an_unsafe_process(project, monkeypatch, capsys, method):
+    """Where a new interpreter would not be safe, the pool answers None with a warning
+    and starts nothing: the files are then checked in one process."""
+    monkeypatch.setattr(analysis, "sys", python_like((3, 10, 12)))
+    tasks, options = tasks_and_options(project)
+    context = multiprocessing.get_context(method)
+    assert analysis._analyze_in_pool(tasks, options, 2, context) is None
+    assert "can't keep worker processes from importing project files" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("before", [None, "", "yes"])

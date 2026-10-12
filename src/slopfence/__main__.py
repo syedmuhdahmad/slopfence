@@ -1,6 +1,8 @@
-"""``python -m slopfence``: make the import path safe, then run the command line."""
+"""``python -m slopfence``: make the import path safer, then run the command line.
 
-from __future__ import annotations
+This file has no ``from __future__ import annotations``, unlike the rest of the
+package: that line is an import too, and it would run before the import path is fixed.
+"""
 
 import os
 import sys
@@ -12,7 +14,13 @@ def _leave_out_the_current_folder() -> None:
     ``python -m`` puts that folder first. A file of the checked project that is named
     like a module slopfence imports later (``random.py``, ``argparse.py``) would then
     be imported, and so run, in its place. Only ``os`` and ``sys`` are used here: both
-    are loaded before this file runs, so nothing is imported while the entry is there.
+    are loaded before this file runs, so slopfence imports nothing while the entry is
+    there.
+
+    This can't cover what Python does before it gets here: to find this file it has
+    already imported a few modules of its own (``importlib``, and ``types`` and others
+    on older versions) and the ``slopfence`` package, with the entry in place. Only
+    ``python -I -m slopfence`` and the ``slopfence`` command avoid that.
 
     The entry stays when slopfence itself lives in that folder (a source checkout that
     is not installed), because slopfence could not be imported without it.
