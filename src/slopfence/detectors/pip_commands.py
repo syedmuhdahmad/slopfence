@@ -11,7 +11,13 @@ import re
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
-from slopfence.detectors.dependency import egg_name, parse_requirement
+from slopfence.detectors.dependency import (
+    INDEX_OPTION_STARTS,
+    LINKS_OPTION_STARTS,
+    egg_name,
+    is_pip_option,
+    parse_requirement,
+)
 from slopfence.indexes import is_public_index, named_index_url
 
 
@@ -224,12 +230,18 @@ def _unread(arguments: list[Word]) -> PipInstall:
     None of its packages: the value of the unknown option could be taken for one.
     An index or links option among its words still says that packages may come
     from another place than PyPI, whatever its value is.
+
+    A long option that pip lets a user cut short (``--extra-index``) is not in this
+    module's tables, so it arrives here. It counts as the option it is short for. A
+    command line has more options than a requirements file, so pip refuses a few of
+    these short forms as ambiguous (``--ex``): counting them too only keeps more
+    names on the machine.
     """
     found = PipInstall(unnamed=True)
     for word in arguments:
         option = word.text.partition("=")[0]
-        index = option in INDEX_OPTIONS or option[:2] == "-i"
-        links = option in LINK_OPTIONS or option[:2] == "-f"
+        index = option in INDEX_OPTIONS or is_pip_option(word.text, "-i", INDEX_OPTION_STARTS)
+        links = option in LINK_OPTIONS or is_pip_option(word.text, "-f", LINKS_OPTION_STARTS)
         found.private_index = found.private_index or index
         found.links = found.links or links
         if index or links:

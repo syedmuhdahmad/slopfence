@@ -6,6 +6,7 @@
   ``DependencyFile`` is everything one file declares.
 * ``parse_requirement`` reads the package name out of a requirement string, and
   refuses everything that is not a requirement (URLs, paths, file names, prose).
+* ``is_pip_option`` knows pip's index and links options, also when they are cut short.
 
 Nothing here reads a file or asks the registry.
 """
@@ -13,6 +14,7 @@ Nothing here reads a file or asks the registry.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
@@ -312,6 +314,27 @@ def egg_name(url: str) -> str | None:
     """The package name in the ``#egg=`` part of a URL, or None if it has none."""
     m = _EGG.search(url)
     return m.group(1) if m else None
+
+
+# pip's options that name a package index. pip also takes a long option cut short,
+# down to the given start: "--extra-index" is one, and "--e" is not, because in a
+# requirements file it could be "--editable" too.
+INDEX_OPTION_STARTS = {"--index-url": "--i", "--extra-index-url": "--ex"}
+# --find-links and --no-index add a package source too, whatever their value is.
+LINKS_OPTION_STARTS = {"--find-links": "--f", "--no-index": "--no-i"}
+
+
+def is_pip_option(word: str, short: str, long: Mapping[str, str]) -> bool:
+    """Whether a word of a pip option line or command is one of the given options.
+
+    ``short`` is the one-letter form, which may have its value attached
+    (``-ihttps://...``). ``long`` maps each long form to the shortest start of it
+    that pip still takes for it (``INDEX_OPTION_STARTS``, ``LINKS_OPTION_STARTS``).
+    """
+    if not word.startswith("--"):
+        return word.startswith(short)
+    name = word.partition("=")[0]
+    return any(full.startswith(name) and name.startswith(start) for full, start in long.items())
 
 
 def suppresses_slop001(comment: str) -> bool:

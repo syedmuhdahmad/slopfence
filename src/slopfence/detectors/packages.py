@@ -28,11 +28,13 @@ import importlib.util
 import json
 import re
 import sys
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
+    INDEX_OPTION_STARTS,
+    LINKS_OPTION_STARTS,
     MARKER_NAMES,
     REQ_COMMENT,
     Dependency,
@@ -40,6 +42,7 @@ from slopfence.detectors.dependency import (
     Kind,
     egg_name,
     is_package_name,
+    is_pip_option,
     kind_of,
     lists_other_packages,
     parse_requirement,
@@ -62,12 +65,6 @@ else:  # pragma: no cover
 
 
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
-# The options of a requirements file that name a package index. pip also takes a long
-# option cut short, down to the given start: "--extra-index" is one, and "--e" is not,
-# because it could be "--editable" too.
-_INDEX_OPTIONS = {"--index-url": "--i", "--extra-index-url": "--ex"}
-# --find-links and --no-index add a package source too, whatever their value is.
-_LINKS_OPTIONS = {"--find-links": "--f", "--no-index": "--no-i"}
 # Per-requirement options that may follow a requirement on its line (--hash=...). A
 # match starts where a run of white space starts, so a long run is only walked once.
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
@@ -346,19 +343,6 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     return found
 
 
-def _is_option(word: str, short: str, long: Mapping[str, str]) -> bool:
-    """Whether a word of an option line is one of the given options.
-
-    ``short`` is the one-letter form, which may have its value attached
-    (``-ihttps://...``). ``long`` maps each long form to the shortest start of it
-    that pip still takes for it.
-    """
-    if not word.startswith("--"):
-        return word.startswith(short)
-    name = word.partition("=")[0]
-    return any(full.startswith(name) and name.startswith(start) for full, start in long.items())
-
-
 def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
     """Which package sources other than PyPI a requirements file names itself.
 
@@ -373,9 +357,9 @@ def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
         if not words or not words[0].startswith("-"):
             continue
         for word, following in zip(words, [*words[1:], ""], strict=True):
-            if _is_option(word, "-f", _LINKS_OPTIONS):
+            if is_pip_option(word, "-f", LINKS_OPTION_STARTS):
                 links = True
-            elif _is_option(word, "-i", _INDEX_OPTIONS):
+            elif is_pip_option(word, "-i", INDEX_OPTION_STARTS):
                 # The URL is attached ("--index-url=URL", "-iURL") or it is the next word.
                 attached = word.partition("=")[2] if word.startswith("--") else word[2:]
                 index = index or not is_public_index(attached or following)

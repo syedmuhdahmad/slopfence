@@ -333,6 +333,12 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!pip install --brand-new-flag -i {PRIVATE} corp-a\n",
         f"!uv pip install --brand-new-flag --index {PRIVATE} corp-a\n",
         "!pip install --brand-new-flag -f ./wheels corp-a\n",
+        # A long option cut short, as pip allows.
+        f"!pip install --extra-index {PRIVATE} corp-a\n",
+        f"!pip install --extra-index={PRIVATE} corp-a\n",
+        f"!pip install --pre --ind {PRIVATE} corp-a\n",
+        "!pip install --find ./wheels corp-a\n",
+        "!pip install --no-ind corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):
@@ -342,6 +348,17 @@ def test_a_private_source_covers_the_whole_notebook(write, check, cell):
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry, check_imports=True)
     assert result.findings == [] and registry.queries == []
+
+
+@pytest.mark.parametrize(
+    "option", ["--no-input", "--no-inp", "--exists-action=w", "--force", "--isolated"]
+)
+def test_an_option_that_only_starts_like_a_source_option_is_none(write, check, option):
+    """``--no-inp`` is short for ``--no-input``, not for ``--no-index``: the notebook
+    names no other source, so its other pip lines are still looked up."""
+    write("nb/demo.ipynb", jupyter([f"!pip install {option} pandas\n", "!pip install ghost-b\n"]))
+    result = check("SLOP001", registry=FakeRegistry({"pandas"}))
+    assert subjects(result) == ["ghost-b"]
 
 
 def test_links_in_a_notebook_only_cover_that_notebook(write, check, not_installed):
