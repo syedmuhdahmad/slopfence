@@ -13,8 +13,10 @@ it can. What refuses a push to ``main`` for good is the repository's ruleset.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from devenv import (
     PROTECTED_BRANCHES,
@@ -36,10 +38,25 @@ _GIT_CREATES_FOLDERS = frozenset({"clone", "init", "worktree"})
 _SETS_VARIABLES = frozenset(
     {"read", "for", "unset", "declare", "local", "typeset", "readonly", "mapfile", "readarray"}
 )
+# The options ``cd`` takes, alone or joined (``-P``, ``-LP``).
+_CD_OPTION = re.compile(r"-[LPe@]+")
 
 
-def resolve_path(where: Path | None, target: str, variables: Variables) -> Path | None:
+class Folders(NamedTuple):
+    """The folder the shell is in, and the one ``cd -`` goes back to. None: it can't be known."""
+
+    current: Path | None
+    previous: Path | None = None
+
+
+def resolve_path(
+    where: Path | None, target: str, variables: Variables, *, follow_links: bool = False
+) -> Path | None:
     """The path ``target`` names when seen from ``where``, or None if it can't be known.
+
+    ``link/..`` has two readings. ``cd`` works on the words of the path, so for it this
+    is the folder that holds ``link``. A program such as git asks the operating system,
+    which follows the link first: ``follow_links`` gives that reading.
 
     The path is not checked: it may not exist.
     """
@@ -51,24 +68,45 @@ def resolve_path(where: Path | None, target: str, variables: Variables) -> Path 
         if where is None:
             return None
         path = where / path
-    return Path(os.path.normpath(path))
+    return Path(os.path.realpath(path) if follow_links else os.path.normpath(path))
 
 
-def after_cd(
-    where: Path | None, target: str, variables: Variables, named: set[Path]
-) -> Path | None:
-    """The folder the shell is in after ``cd target``, or None if it can't be known.
+def cd_operands(args: list[str]) -> tuple[list[str], bool]:
+    """Read ``cd [-L|-P] [--] [folder]``: the words after the options, and whether ``-P`` holds.
+
+    With ``-P``, ``cd`` follows links the way a program does. The last of ``-L`` and ``-P`` wins.
+    """
+    index = 0
+    while index < len(args) and _CD_OPTION.fullmatch(args[index]):
+        index += 1
+    options = "".join(args[:index])
+    if args[index : index + 1] == ["--"]:
+        index += 1
+    return args[index:], options.rfind("P") > options.rfind("L")
+
+
+def after_cd(folders: Folders, args: list[str], variables: Variables, named: set[Path]) -> Folders:
+    """Where the shell is after ``cd`` with these arguments.
+
+    ``cd -`` goes back to the folder the shell was in before the last ``cd`` that worked.
 
     A ``cd`` to a folder that does not exist fails, and the shell stays where it was.
     But the folder may be missing only because an earlier command on this line is
     going to create it (``mkdir demo && cd demo``). ``named`` holds the paths that
     such commands name; a missing folder among them, or above one of them, is unknown.
     """
-    path = resolve_path(where, target, variables)
-    if path is None or path.is_dir():
-        return path
-    may_be_created = any(path == other or path in other.parents for other in named)
-    return None if may_be_created else where
+    operands, follow_links = cd_operands(args)
+    if not operands:
+        path: Path | None = Path.home()
+    elif operands[0] == "-":
+        path = folders.previous
+    else:
+        path = resolve_path(folders.current, operands[0], variables, follow_links=follow_links)
+    if path is not None and not path.is_dir():
+        if not any(path == other or path in other.parents for other in named):
+            return folders
+        path = None
+    return Folders(path, folders.current)
 
 
 def named_paths(args: list[str], where: Path | None, variables: Variables) -> set[Path]:
@@ -87,7 +125,7 @@ def parse_git(
         if option in _GIT_VALUE_OPTIONS and index + 1 < len(args):
             if option == "-C":
                 # git stops when the folder is missing, so nothing runs: treat it as unknown.
-                path = resolve_path(where, args[index + 1], variables)
+                path = resolve_path(where, args[index + 1], variables, follow_links=True)
                 where = path if path is not None and path.is_dir() else None
             index += 1
         index += 1
@@ -131,7 +169,7 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
     variables set on the same command line. When that folder can't be known, the
     command is let through: a guess could block a commit on the right branch.
     """
-    where: Path | None = cwd
+    folders = Folders(cwd)
     variables: dict[str, str | None] = {}
     named: set[Path] = set()  # paths named by commands that can create them
     for assigned, words in map(split_assignments, split_commands(command)):
@@ -149,13 +187,13 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
                 variables[word.partition("=")[0]] = None
             continue
         if words[0] == "cd":
-            where = after_cd(where, words[1], variables, named) if len(words) > 1 else Path.home()
+            folders = after_cd(folders, words[1:], variables, named)
             continue
         if os.path.basename(words[0]) in _CREATES_FOLDERS:
-            named |= named_paths(words[1:], where, variables)
+            named |= named_paths(words[1:], folders.current, variables)
         if words[0] != "git":
             continue
-        folder, subcommand, rest = parse_git(words[1:], where, variables)
+        folder, subcommand, rest = parse_git(words[1:], folders.current, variables)
         if subcommand in _GIT_CREATES_FOLDERS:
             named |= named_paths(rest, folder, variables)
         if folder is None or subcommand not in ("commit", "push"):

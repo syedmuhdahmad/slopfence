@@ -82,6 +82,22 @@ def project(tmp_path: Path) -> Path:
     return make_repo(tmp_path / "project")
 
 
+@pytest.fixture
+def worktree(project: Path, tmp_path: Path) -> Path:
+    """A second checkout of the project, on the feature branch ``feat/y``."""
+    path = tmp_path / "wt"
+    git(project, "worktree", "add", "-q", "-b", "feat/y", str(path))
+    return path
+
+
+def link_folder(link: Path, target: Path) -> None:
+    """Make ``link`` a symbolic link to the folder ``target``; skip the test where that fails."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links can't be created here")
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -141,19 +157,15 @@ def test_guard_ignores_other_commands(project: Path, command: str) -> None:
     assert bash_decision(command, project) == "allow"
 
 
-def test_guard_follows_the_folder_the_command_runs_in(project: Path, tmp_path: Path) -> None:
+def test_guard_follows_the_folder_the_command_runs_in(project: Path, worktree: Path) -> None:
     """``git -C`` and ``cd`` decide which checkout's branch counts, not the session folder."""
-    worktree = tmp_path / "wt"
-    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
     assert bash_decision(f"git -C {worktree} commit -m x", project) == "allow"
     assert bash_decision(f"cd {worktree} && git commit -m x", project) == "allow"
     assert bash_decision(f"git -C {project} commit -m x", project, cwd=worktree) == "deny"
 
 
-def test_guard_follows_variables_set_on_the_command_line(project: Path, tmp_path: Path) -> None:
+def test_guard_follows_variables_set_on_the_command_line(project: Path, worktree: Path) -> None:
     """A folder reached through ``W=...; cd $W`` counts, in both directions."""
-    worktree = tmp_path / "wt"
-    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
     assert bash_decision(f"W={worktree}; cd $W && git commit -m x", project) == "allow"
     assert bash_decision(f'export W={worktree} && git -C "${{W}}" commit -m x', project) == "allow"
     assert bash_decision(f"W={project}; cd $W && git commit -m x", project, cwd=worktree) == "deny"
@@ -162,15 +174,13 @@ def test_guard_follows_variables_set_on_the_command_line(project: Path, tmp_path
 
 @pytest.mark.parametrize("reference", ["'$W'", "\\$W", "'${W}'"])
 def test_guard_does_not_expand_a_variable_the_shell_takes_as_text(
-    project: Path, tmp_path: Path, reference: str
+    project: Path, worktree: Path, reference: str
 ) -> None:
     """``cd '$W'`` goes to a folder named ``$W``, not to the value of ``W``.
 
     That folder does not exist, so the shell stays in the main checkout and the
     commit is on main, although ``W`` names a feature-branch worktree.
     """
-    worktree = tmp_path / "wt"
-    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
     assert bash_decision(f"W={worktree}; cd {reference}; git commit -m x", project) == "deny"
     assert bash_decision(f'W={worktree}; cd "$W"; git commit -m x', project) == "allow"
 
@@ -180,15 +190,13 @@ def test_guard_does_not_expand_a_variable_the_shell_takes_as_text(
     ["W=$(pwd)", "W+=/sub", "read W", "for W in a b", "unset W", "declare W"],
 )
 def test_guard_forgets_a_variable_that_gets_an_unknown_value(
-    project: Path, tmp_path: Path, second_assignment: str
+    project: Path, worktree: Path, second_assignment: str
 ) -> None:
     """A variable set again to something the guard can't follow no longer has its old value.
 
     Started in a feature-branch worktree, ``W`` first names the main checkout. If the
     guard kept that value it would refuse a commit that happens somewhere else.
     """
-    worktree = tmp_path / "wt"
-    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
     command = f'W={project}; {second_assignment}; cd "$W" && git commit -m x'
     assert bash_decision(command, project, cwd=worktree) == "allow"
 
@@ -232,6 +240,61 @@ def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) ->
 def test_guard_stays_put_after_a_cd_that_fails(project: Path, command: str) -> None:
     """A ``cd`` to a folder nothing creates fails, so the commit happens where the shell was."""
     assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("moves", "decision"),
+    [
+        ("cd {worktree}; cd -", "deny"),
+        ("cd {worktree} && cd - && cd -", "allow"),
+        ("cd {worktree}; cd /no/such/folder/anywhere; cd -", "deny"),
+        ("cd {worktree}; cd .; cd -", "allow"),
+        ("cd {worktree}; cd $NO_SUCH_VARIABLE_HERE; cd -", "allow"),
+        ("cd -", "allow"),
+    ],
+)
+def test_guard_goes_back_with_cd_dash(
+    project: Path, worktree: Path, moves: str, decision: str
+) -> None:
+    """``cd -`` returns to the folder the shell was in before the last ``cd`` that worked.
+
+    The session starts in the main checkout. Where the shell was before that is not
+    known, so a ``cd -`` with no ``cd`` before it leaves the folder unknown.
+    """
+    command = moves.format(worktree=worktree) + "; git commit -m x"
+    assert bash_decision(command, project) == decision
+
+
+@pytest.mark.parametrize("options", ["--", "-L", "-P", "-L --", "-LP"])
+def test_guard_reads_past_the_options_of_cd(project: Path, worktree: Path, options: str) -> None:
+    """An option before the folder is not taken for the folder."""
+    assert bash_decision(f"cd {options} {worktree} && git commit -m x", project) == "allow"
+    command = f"cd {options} {project} && git commit -m x"
+    assert bash_decision(command, project, cwd=worktree) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        ("git -C link/.. commit -m x", "deny"),
+        ("cd link && git -C .. commit -m x", "deny"),
+        ("cd -P link/.. && git commit -m x", "deny"),
+        ("cd -PL link/.. && git commit -m x", "allow"),
+        ("cd link/.. && git commit -m x", "allow"),
+        ("cd link && cd .. && git commit -m x", "allow"),
+    ],
+)
+def test_guard_follows_a_link_the_way_the_command_does(
+    project: Path, worktree: Path, command: str, decision: str
+) -> None:
+    """``link/..`` is the folder above the link's target for git, and above the link for ``cd``.
+
+    ``link`` is in the feature-branch worktree and points into the main checkout, so
+    the two readings land on different branches.
+    """
+    (project / "docs").mkdir()
+    link_folder(worktree / "link", project / "docs")
+    assert bash_decision(command, project, cwd=worktree) == decision
 
 
 @pytest.mark.parametrize(
