@@ -152,6 +152,10 @@ class DependencyFile:
     imports: list[tuple[str, int, int]] = field(default_factory=list)
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
+    # ``pyproject.toml`` and ``Pipfile`` only: the TOML reader turned the file down
+    # (broken, or written in a newer TOML than it knows). The file may set a private
+    # index that can't be seen here.
+    unreadable: bool = False
 
     def make_private(self) -> None:
         """Record that the file's packages may come from another place than PyPI: none

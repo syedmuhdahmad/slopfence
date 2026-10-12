@@ -117,6 +117,8 @@ class ProjectIndex:
     locked: set[str] = field(default_factory=set)
     # Lock files that record a non-PyPI index.
     private_lock_files: list[str] = field(default_factory=list)
+    # Lock files that record their indexes and could not be read.
+    unreadable_lock_files: list[str] = field(default_factory=list)
 
     @property
     def declared(self) -> set[str]:
@@ -155,15 +157,23 @@ class ProjectIndex:
         return [file.rel for file in self.files if file.private_index] + self.private_lock_files
 
     @property
+    def unreadable_index_files(self) -> list[str]:
+        """The files that may set a private index nobody can see: a ``pyproject.toml``,
+        ``Pipfile`` or ``Pipfile.lock`` that its reader turned down."""
+        return [file.rel for file in self.files if file.unreadable] + self.unreadable_lock_files
+
+    @property
     def install_index_files(self) -> list[str]:
-        """The private index files that say where an install gets its packages.
+        """The files that say where an install gets its packages, and name a private
+        index there or may name one.
 
         These are requirements files, ``pyproject.toml``, ``Pipfile`` and
         ``Pipfile.lock``. A ``setup.py`` with ``dependency_links`` is not one: it only
-        speaks for itself.
+        speaks for itself. The files that could not be read come last (see
+        ``unreadable_index_files``).
         """
         named = [f.rel for f in self.files if f.private_index and f.kind in _INSTALL_KINDS]
-        return named + self.private_lock_files
+        return named + self.private_lock_files + self.unreadable_index_files
 
 
 def build_index(
@@ -197,6 +207,8 @@ def build_index(
         index.locked |= {normalize(n) for n in names}
         if private:
             index.private_lock_files.append(_rel(path, root))
+        elif private is None:
+            index.unreadable_lock_files.append(_rel(path, root))
     return index
 
 
@@ -214,11 +226,14 @@ def _share_setuptools_sources(files: list[DependencyFile]) -> None:
             file.make_private()
 
 
-def parse_lock_file(path: Path) -> tuple[set[str], bool]:
+def parse_lock_file(path: Path) -> tuple[set[str], bool | None]:
     """Distribution names in a lock file, and whether it uses a private index.
 
     Lock files list every installed package, including indirect dependencies a
     project may import directly (``import idna`` with only ``requests`` declared).
+
+    The second answer is None when nobody can say: the file records its indexes
+    (``INDEX_LOCK_FILES``), and its reader turned it down.
     """
     text = read_source(path)
     if text is None:
@@ -232,7 +247,7 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool]:
         data = tomllib.loads(text)
     # RecursionError: arrays nested thousands deep, in a file nobody wrote by hand.
     except (ValueError, AttributeError, TypeError, RecursionError):
-        return set(), False
+        return set(), None if path.name in INDEX_LOCK_FILES else False
     # uv.lock, poetry.lock and pdm.lock all have [[package]] tables with a name.
     packages = _array(data.get("package"))
     names = {p["name"] for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)}
@@ -540,6 +555,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     found = DependencyFile(rel, Kind.PYPROJECT)
     data = _load_toml(text)
     if data is None:
+        found.unreadable = True
         return found
     finder = _LineFinder(text)
     deps = found.dependencies
@@ -629,6 +645,7 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
     found = DependencyFile(rel, Kind.PIPFILE)
     data = _load_toml(text)
     if data is None:
+        found.unreadable = True
         return found
     finder = _LineFinder(text)
     private = found.private_index = pipfile_is_private(data)
@@ -698,7 +715,8 @@ class PackageChecker:
 
         ``inherited_from`` are the project files whose private index also covers the
         dependency files that name no index themselves (see
-        ``DependencyFile.inherits_index``). Empty when that is switched off.
+        ``DependencyFile.inherits_index``). A file that could not be read is among
+        them: it may set one. Empty when that is switched off.
         """
         self.index = index
         self.registry = registry
@@ -814,10 +832,8 @@ class PackageChecker:
             )
         if skipped := self.inherited_files(only_paths):
             notes.append(
-                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: a "
-                f"private package index is set in {_listed(self.inherited_from)}, so "
-                "names missing from PyPI may be private packages. If that index only "
-                "mirrors PyPI, set detect-private-index = false."
+                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: "
+                f"{self._why_inherited()}"
             )
         if too_large := sorted(file.rel for file in self._files(only_paths) if file.too_large):
             notes.append(
@@ -825,6 +841,26 @@ class PackageChecker:
                 f"{MAX_BYTES // 2**20} MB is skipped."
             )
         return notes
+
+    def _why_inherited(self) -> str:
+        """The second half of the note about dependency files that were held back.
+
+        It names the files that set a private index. When there is none, the files
+        were held back for one that could not be read: it may set an index.
+        """
+        unreadable = set(self.index.unreadable_index_files)
+        if named := [rel for rel in self.inherited_from if rel not in unreadable]:
+            return (
+                f"a private package index is set in {_listed(named)}, so names missing "
+                "from PyPI may be private packages. If that index only mirrors PyPI, set "
+                "detect-private-index = false."
+            )
+        unread = [rel for rel in self.inherited_from if rel in unreadable]
+        return (
+            f"{_listed(unread)} could not be read and may set a private package index, so "
+            "names missing from PyPI may be private packages. Repair or exclude that "
+            "file, or set detect-private-index = false."
+        )
 
     def _lookup_names(self, name: str) -> list[str]:
         """The names to ask PyPI about for ``import name``: none if it needs no lookup.

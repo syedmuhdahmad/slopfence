@@ -119,6 +119,8 @@ def test_lock_files_vouch_for_indirect_imports(write, check, not_installed, lock
 
 
 def test_broken_lock_file_is_ignored(write, tmp_path):
-    """An unreadable lock file contributes nothing instead of crashing the run."""
+    """An unreadable lock file contributes no name instead of crashing the run. Of a
+    ``Pipfile.lock``, which records its indexes, nobody can then say whether it uses
+    a private one."""
     assert parse_lock_file(write("uv.lock", "[[package\n")) == (set(), False)
-    assert parse_lock_file(write("Pipfile.lock", "{not json")) == (set(), False)
+    assert parse_lock_file(write("Pipfile.lock", "{not json")) == (set(), None)

@@ -1429,6 +1429,77 @@ def test_every_file_that_can_name_an_index_is_inherited_from(write, check, name,
     assert f"a private package index is set in {name}" in result.notes[0]
 
 
+UV_INDEX = f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\n'
+# Files that name a private index and can't be read, because of one more line.
+UNREADABLE = {
+    "pyproject.toml": UV_INDEX + "this line is not TOML\n",
+    "tools/pyproject.toml": "x = " + "[" * 5000 + "]" * 5000 + "\n",
+    "Pipfile": f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n[packages\n',
+    "Pipfile.lock": '{"_meta": {"sources": [{"url": "' + PRIVATE + '"}]}, "default": {',
+    "deploy/Pipfile.lock": json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}, "default": 3}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+def test_a_file_that_may_set_an_index_and_can_not_be_read_is_inherited_from(write, tmp_path, name):
+    """A ``pyproject.toml``, ``Pipfile`` or ``Pipfile.lock`` that its reader turns down
+    may set a private index that nobody can see. So the files that would inherit it
+    are held back, also when one is checked alone, and the note names the file."""
+    write(name, UNREADABLE[name])
+    path = write("setup.cfg", "[options]\ninstall_requires =\n    corp-x\n")
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry(set())
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == []
+        assert result.notes == [
+            f"SLOP001 didn't look up the dependencies in setup.cfg: {name} could not be read "
+            "and may set a private package index, so names missing from PyPI may be private "
+            "packages. Repair or exclude that file, or set detect-private-index = false."
+        ]
+
+
+@pytest.mark.parametrize("name", ["uv.lock", "poetry.lock", "constraints.txt", "setup.cfg"])
+def test_a_broken_file_that_can_set_no_index_holds_nothing_back(write, check, name):
+    """The look-alike cases. A lock file other than ``Pipfile.lock`` records no index,
+    a requirements file has no syntax to turn down, and a ``setup.cfg`` only speaks
+    for itself."""
+    write(f"deploy/{name}", "[[package\nthis line is not TOML\n")
+    write("setup.py", 'from setuptools import setup\nsetup(install_requires=["ghost-lib"])\n')
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-lib"] and result.notes == []
+
+
+def test_an_unreadable_file_is_inherited_from_like_one_that_names_an_index(write, check):
+    """What holds for a private index holds for a file that may set one: the files v0.2
+    read speak for themselves, an excluded file doesn't count, and
+    ``detect-private-index = false`` switches it off. Imports are looked up as before."""
+    write("vendor/pyproject.toml", UNREADABLE["pyproject.toml"])
+    write("requirements.txt", "ghost-one\n")
+    write("constraints.txt", "ghost-two==1.0\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-one"]
+    assert registry.queries == ["ghost-one"] and "constraints.txt: vendor/py" in result.notes[0]
+    for switch in ({"exclude": ["vendor"]}, {"inherit_index": False}):
+        result = check("SLOP001", registry=FakeRegistry(set()), **switch)
+        assert [f.subject for f in result.findings] == ["ghost-two", "ghost-one"]
+        assert result.notes == []
+    write("app.py", "import ghost_mod_zz\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz", "ghost-one"]
+
+
+def test_the_note_names_the_file_that_sets_an_index_before_one_that_may(write, check):
+    """With a private index that can be seen, the note needs no file that can't be read."""
+    write("pyproject.toml", UNREADABLE["pyproject.toml"])
+    write("deploy/requirements.txt", INDEX + "corp-auth\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    corp-x\n")
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert result.findings == []
+    assert "a private package index is set in deploy/requirements.txt, so" in result.notes[0]
+
+
 def test_the_files_v02_read_do_not_inherit(write, check):
     """``requirements*.txt`` and ``pyproject.toml`` speak for themselves, as in v0.2: an
     index in another file does not switch them off."""
