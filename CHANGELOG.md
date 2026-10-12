@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SLOP030`: checking a folder or a few files now reports the same duplicates in them as checking the whole project. Before, one copy could be missed when the first copy was outside the checked paths, or when folder names sort differently as folders and as text (`a/` and `a-b/`) ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - A file that Python only warns about (an invalid escape sequence such as `"\d"`) counted as unparseable when warnings were turned into errors (`python -W error`). Such a file is now always parsed, and Python's warning about it is no longer printed ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 
+### Security
+
+- **`python -m slopfence` and the GitHub Action no longer import files of the project they check.** Python puts the folder a command is started in first on its import path. A file there that is named like a standard module (`random.py`, `argparse.py`) was imported in its place, and so run. The Action now starts every Python (`venv`, `pip` and slopfence) in isolated mode (`-I`), and `python -m slopfence` takes that folder off the import path before it imports anything else. Every release up to v0.2.0 is affected. The `slopfence` command and the pre-commit hook were not. If you run slopfence on code you don't trust, update, or call the `slopfence` command.
+- Worker processes are new in this release. On Python 3.10 they are only used where they are forked (Linux). A new Python process there can't be kept from importing a project file that is named like a module Python loads at start-up (`threading.py`). So on macOS and Windows a run on Python 3.10 checks the files in one process and prints a warning. `--jobs 1` silences it. Python 3.11 and newer are not affected ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12)).
+
 ## [0.2.0] - 2026-10-03
 
 Three new rules, private package support, and safer defaults for private code.

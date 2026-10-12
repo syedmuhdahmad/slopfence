@@ -261,6 +261,7 @@ slopfence reads and checks files in several processes at once. The report is the
 - Small projects don't need it. Worker processes only start when there are 200 or more Python files to read, one for every 100 files.
 - Each worker needs 40 to 80 MB of memory on a big project. In a container with little memory, set `jobs = 1` or `2`.
 - If worker processes can't start, or one dies, slopfence prints a warning and checks the files in one process.
+- On Python 3.10, worker processes are only used on Linux. On macOS and Windows slopfence needs Python 3.11 or newer for them: an older Python can't keep a new process from importing files of the project it checks. It prints a warning and uses one process.
 - If slopfence is stopped or killed, its worker processes end too.
 - PyPI lookups are sent 8 at a time.
 
