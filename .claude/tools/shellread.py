@@ -27,6 +27,9 @@ _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _WRAPPERS = frozenset({"sudo", "env", "exec", "command", "nohup", "time", "nice"})
 # Characters that end a simple command on a line.
 _COMMAND_BREAKS = ";&|("
+# Stands for a ``$`` that the shell takes as text (in single quotes, or after a backslash),
+# so that it is not read as the start of a variable. No command line holds this character.
+_LITERAL_DOLLAR = "\0"
 
 # name -> value for variables set on the command line; None for a value that can't be known.
 Variables = Mapping[str, "str | None"]
@@ -45,14 +48,23 @@ class HereDocument:
     feeds_a_shell: bool
 
 
+def without_wrappers(words: list[str]) -> list[str]:
+    """``words`` without leading words that only start another program (``sudo``, ``env X=1``)."""
+    index = 0
+    while index < len(words) and os.path.basename(words[index]) in _WRAPPERS:
+        index += 1
+        while index < len(words) and (
+            words[index].startswith("-") or _ASSIGNMENT.fullmatch(words[index])
+        ):
+            index += 1
+    return words[index:]
+
+
 def _is_shell(command_text: str) -> bool:
     """Whether the simple command that ``command_text`` starts is a shell reading its input."""
-    for word in command_text.split():
-        name = os.path.basename(word)
-        if _ASSIGNMENT.fullmatch(word) or word.startswith("-") or name in _WRAPPERS:
-            continue
-        return name in _SHELLS
-    return False
+    _, words = split_assignments(command_text.split())
+    words = without_wrappers(words)
+    return bool(words) and os.path.basename(words[0]) in _SHELLS
 
 
 def _here_document(line: str, after_operator: int, command_text: str) -> HereDocument | None:
@@ -75,19 +87,25 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
     ``quotes`` is the quoting the line starts in, innermost last ("" outside quotes,
     one entry more for each ``$(`` that is open). It is updated in place, because a
     quoted string can run over several lines. ``<<`` and ``#`` inside quotes are
-    text, not an operator and not the start of a comment.
+    text, not an operator and not the start of a comment. In the text that comes
+    back, a ``$`` the shell takes as text is marked, so ``expand`` leaves it alone.
     """
     found: list[HereDocument] = []
     command_starts = [0]  # where the simple command being read began, one per open ``$(``
+    text = list(line)
     index = 0
     while index < len(line):
         char, quote = line[index], quotes[-1]
         if char == "\\" and quote != "'":
+            if line.startswith("$", index + 1):
+                text[index + 1] = _LITERAL_DOLLAR
             index += 2
             continue
         if quote == "'":
             if char == "'":
                 quotes[-1] = ""
+            elif char == "$":
+                text[index] = _LITERAL_DOLLAR
         elif line.startswith("$((", index) and (end := line.find("))", index)) != -1:
             index = end + 1  # arithmetic: ``<<`` in it is a shift
         elif line.startswith("$(", index):
@@ -104,7 +122,7 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
                 if len(command_starts) > 1:
                     command_starts.pop()
             elif char == "#" and (index == 0 or line[index - 1].isspace()):
-                return line[:index], found  # a comment: the rest of the line is not code
+                return "".join(text[:index]), found  # a comment: the rest is not code
             elif line.startswith("<<<", index):
                 index += 2  # a here-string, not a here-document
             elif line.startswith("<<", index):
@@ -114,7 +132,32 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
             elif char in _COMMAND_BREAKS:
                 command_starts[-1] = index + 1
         index += 1
-    return line, found
+    return "".join(text), found
+
+
+def _closing_paren(line: str, start: int) -> int:
+    """Where the ``$(`` that opens just before ``start`` closes, or the end of the line.
+
+    Quotes are followed, so a ``)`` inside them does not close anything.
+    """
+    depth, quote, index = 1, "", start
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and quote != "'":
+            index += 1
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return len(line)
 
 
 def _substitutions(line: str) -> list[str]:
@@ -125,12 +168,9 @@ def _substitutions(line: str) -> list[str]:
         if line[index] == "\\":
             index += 2  # an escaped ``$`` or backtick is text
         elif line.startswith("$(", index) and not line.startswith("$((", index):
-            depth, end = 1, index + 2
-            while end < len(line) and depth:
-                depth += (line[end] == "(") - (line[end] == ")")
-                end += 1
-            found.append(line[index + 2 : end - 1] if depth == 0 else line[index + 2 :])
-            index = end
+            end = _closing_paren(line, index + 2)
+            found.append(line[index + 2 : end])
+            index = end + 1
         elif line[index] == "`":
             end = line.find("`", index + 1)
             end = len(line) if end == -1 else end
@@ -231,4 +271,6 @@ def expand(text: str, variables: Variables) -> str | None:
 
     expanded = _VARIABLE.sub(value, text)
     # Anything still unexpanded (a command substitution, a special parameter) can't be known.
-    return None if unknown or "$" in expanded or "`" in expanded else expanded
+    if unknown or "$" in expanded or "`" in expanded:
+        return None
+    return expanded.replace(_LITERAL_DOLLAR, "$")

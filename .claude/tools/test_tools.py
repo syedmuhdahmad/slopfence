@@ -96,6 +96,8 @@ def project(tmp_path: Path) -> Path:
         "git push origin HEAD:main",
         "git push --force origin +refs/heads/main",
         "git push origin HEAD",
+        "sudo git commit -m x",
+        "env GIT_EDITOR=true git commit",
         "git push -o ci.skip origin",
         "git push -o ci.skip origin main",
     ],
@@ -158,6 +160,21 @@ def test_guard_follows_variables_set_on_the_command_line(project: Path, tmp_path
     assert bash_decision(f"W={project}\ngit -C $W push", project, cwd=worktree) == "deny"
 
 
+@pytest.mark.parametrize("reference", ["'$W'", "\\$W", "'${W}'"])
+def test_guard_does_not_expand_a_variable_the_shell_takes_as_text(
+    project: Path, tmp_path: Path, reference: str
+) -> None:
+    """``cd '$W'`` goes to a folder named ``$W``, not to the value of ``W``.
+
+    That folder does not exist, so the shell stays in the main checkout and the
+    commit is on main, although ``W`` names a feature-branch worktree.
+    """
+    worktree = tmp_path / "wt"
+    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
+    assert bash_decision(f"W={worktree}; cd {reference}; git commit -m x", project) == "deny"
+    assert bash_decision(f'W={worktree}; cd "$W"; git commit -m x', project) == "allow"
+
+
 @pytest.mark.parametrize(
     "second_assignment",
     ["W=$(pwd)", "W+=/sub", "read W", "for W in a b", "unset W", "declare W"],
@@ -188,6 +205,8 @@ def test_guard_forgets_a_variable_that_gets_an_unknown_value(
         "mkdir demo\ncd demo\ngit init -q\ngit commit -m x",
         "git clone https://example.com/r.git ../fresh && cd ../fresh && git commit -m x",
         "mkdir -p out/a/b && cd out && git commit -m x",
+        "sudo mkdir -p /no/such/folder/made && cd /no/such/folder/made && git commit -m x",
+        "git worktree add ../wt-new -b feat/new && cd ../wt-new && git commit -m x",
     ],
 )
 def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) -> None:
@@ -206,6 +225,8 @@ def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) ->
         "cd /no/such/folder/anywhere\ngit commit -m x",
         "cd /no/such/folder/anywhere || git commit -m x",
         "mkdir other && cd /no/such/folder/anywhere; git commit -m x",
+        "echo /no/such/folder/anywhere; cd /no/such/folder/anywhere; git commit -m x",
+        "ls /no/such/folder/anywhere || true; cd /no/such/folder/anywhere; git commit -m x",
     ],
 )
 def test_guard_stays_put_after_a_cd_that_fails(project: Path, command: str) -> None:
@@ -257,6 +278,8 @@ def test_guard_still_sees_commands_around_a_here_document(project: Path, command
         "cat <<EOF\n$(git commit -m x)\nEOF",
         "cat <<EOF\nresult: `git commit -m x`\nEOF",
         "cat <<EOF\n$(echo $(git commit -m x))\nEOF",
+        "cat <<EOF\n$(printf ')' ; git commit -m x)\nEOF",
+        'cat <<EOF\n$(printf "a)b" && git commit -m x)\nEOF',
         "bash <<'EOF'\ngit commit -m x\nEOF",
         "/bin/sh -s <<EOF\ncd . && git push\nEOF",
         "echo ok; sudo bash <<'EOF'\ngit commit -m x\nEOF",

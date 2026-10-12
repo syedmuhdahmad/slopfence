@@ -4,6 +4,10 @@
 CONTRIBUTING.md says nobody pushes to ``main`` directly. An instruction can be
 forgotten; this hook can't. It only looks at this project's repository, and it
 lets a command through whenever it can't tell what the command does.
+
+It guards against accidents and is not a security boundary: it reads the command
+as text (see ``shellread``) and never runs a shell, so a command built to get past
+it can. What refuses a push to ``main`` for good is the repository's ruleset.
 """
 
 from __future__ import annotations
@@ -19,12 +23,15 @@ from devenv import (
     read_event,
     same_repository,
 )
-from shellread import Variables, expand, split_assignments, split_commands
+from shellread import Variables, expand, split_assignments, split_commands, without_wrappers
 
 # git options that take a value, so the word after them is not the subcommand.
 _GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
 # ``git push`` options that take a value, so the word after them is not a remote or refspec.
 _PUSH_VALUE_OPTIONS = frozenset({"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
+# Programs, and git subcommands, that can create a folder named in their arguments.
+_CREATES_FOLDERS = frozenset({"mkdir", "cp", "mv", "ln", "rsync", "tar", "unzip", "install"})
+_GIT_CREATES_FOLDERS = frozenset({"clone", "init", "worktree"})
 # Shell words that give a variable a value this hook does not follow.
 _SETS_VARIABLES = frozenset(
     {"read", "for", "unset", "declare", "local", "typeset", "readonly", "mapfile", "readarray"}
@@ -54,14 +61,20 @@ def after_cd(
 
     A ``cd`` to a folder that does not exist fails, and the shell stays where it was.
     But the folder may be missing only because an earlier command on this line is
-    going to create it (``mkdir demo && cd demo``). ``named`` holds the paths those
-    commands mention; a missing folder among them, or above one of them, is unknown.
+    going to create it (``mkdir demo && cd demo``). ``named`` holds the paths that
+    such commands name; a missing folder among them, or above one of them, is unknown.
     """
     path = resolve_path(where, target, variables)
     if path is None or path.is_dir():
         return path
     may_be_created = any(path == other or path in other.parents for other in named)
     return None if may_be_created else where
+
+
+def named_paths(args: list[str], where: Path | None, variables: Variables) -> set[Path]:
+    """The paths among a command's arguments, seen from ``where``; options are left out."""
+    paths = (resolve_path(where, arg, variables) for arg in args if not arg.startswith("-"))
+    return {path for path in paths if path is not None}
 
 
 def parse_git(
@@ -120,8 +133,9 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
     """
     where: Path | None = cwd
     variables: dict[str, str | None] = {}
-    named: set[Path] = set()  # paths that commands so far mention, and so may create
+    named: set[Path] = set()  # paths named by commands that can create them
     for assigned, words in map(split_assignments, split_commands(command)):
+        words = without_wrappers(words)
         if words and words[0] == "export":
             assigned, words = split_assignments(words[1:])
         if not words:
@@ -137,12 +151,13 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
         if words[0] == "cd":
             where = after_cd(where, words[1], variables, named) if len(words) > 1 else Path.home()
             continue
-        for word in words[1:]:
-            if not word.startswith("-") and (path := resolve_path(where, word, variables)):
-                named.add(path)
+        if os.path.basename(words[0]) in _CREATES_FOLDERS:
+            named |= named_paths(words[1:], where, variables)
         if words[0] != "git":
             continue
         folder, subcommand, rest = parse_git(words[1:], where, variables)
+        if subcommand in _GIT_CREATES_FOLDERS:
+            named |= named_paths(rest, folder, variables)
         if folder is None or subcommand not in ("commit", "push"):
             continue
         if not same_repository(folder, event):
