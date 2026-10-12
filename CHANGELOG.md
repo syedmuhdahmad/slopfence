@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A checkout nested inside the project (a git worktree, clone or submodule, such as Claude Code's `.claude/worktrees/`) no longer counts as project code. Before, `SLOP030` reported every function as a duplicate of its copy, and `SLOP001` treated its modules as the project's own. A nested checkout that you name on the command line is still checked ([#58](https://github.com/syedmuhdahmad/slopfence/issues/58))
 - Findings at the same position (`import a, b` where neither exists) could be listed in a different order from run to run. They are now ordered by message ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - `SLOP030`: checking a folder or a few files now reports the same duplicates in them as checking the whole project. Before, one copy could be missed when the first copy was outside the checked paths, or when folder names sort differently as folders and as text (`a/` and `a-b/`) ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - A file that Python only warns about (an invalid escape sequence such as `"\d"`) counted as unparseable when warnings were turned into errors (`python -W error`). Such a file is now always parsed, and Python's warning about it is no longer printed ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
