@@ -257,6 +257,9 @@ def read_notebook(text: str) -> Notebook | None:
 
 _SHELL_CELL = re.compile(r"\s*%%(?:bash|sh|shell)\b")
 _AUTOMAGIC = re.compile(r"pip\s+install\b")
+# A ``cd`` line without the ``%``. IPython runs it as the magic all the same, unless
+# what follows starts like an assignment or a tuple (``cd = 3``, ``cd, x = 1, 2``).
+_AUTOMAGIC_CD = re.compile(r"^[ \t]*cd[ \t]+[^=,\s]", re.M)
 # Cell magics whose body is still Python.
 _PYTHON_CELL_MAGICS = {"time", "timeit", "capture", "prun", "debug", "python", "python3"}
 _CELL_MAGIC = re.compile(r"\s*%%(\w*)")
@@ -286,6 +289,8 @@ class CellView:
     ignored: set[int] = field(default_factory=set)
     # The modules the cell writes: ``%%writefile pkg/mod.py`` gives ``pkg`` and ``mod``.
     written: set[str] = field(default_factory=set)
+    # A line of the cell is ``cd <folder>`` without the ``%``: the same magic.
+    changes_folder: bool = False
 
 
 def _is_magic_line(stripped: str) -> bool:
@@ -365,6 +370,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
             view.written = {target.stem, *target.parts[:-1]}
         return view
 
+    view.changes_folder = bool(_AUTOMAGIC_CD.search(text))
     python, commands = _without_magics(lines, skip_first=bool(magic))
     # A cell that is Python as it stands has no commands: a "!pip" line in valid
     # Python can only be inside a string.
@@ -404,7 +410,7 @@ _INDEX_SETTING = re.compile(
 
 # Shell commands that install a package without a name that is read here, or fetch or
 # unpack files that may be code: by their first word, or by their first two.
-_FETCH_COMMANDS = frozenset({"wget", "curl", "unzip", "gdown"})
+_FETCH_COMMANDS = frozenset({"wget", "curl", "unzip", "tar", "7z", "gdown"})
 _FETCH_SUBCOMMANDS = frozenset(
     {
         ("git", "clone"),
@@ -417,6 +423,10 @@ _FETCH_SUBCOMMANDS = frozenset(
 )
 # ``cp -r`` and ``cp -R``, also in a cluster of options (``-rf``).
 _COPIES_A_FOLDER = re.compile(r"-[A-Za-z]*[rR][A-Za-z]*|--recursive")
+# Commands that put a file in another place. One that names a module brings it in.
+_COPY_COMMANDS = frozenset({"cp", "mv", "ln"})
+# What ``<python> setup.py`` is told when it installs the folder's own package.
+_SETUP_PY_INSTALLS = frozenset({"install", "develop"})
 # Python text that changes where modules are found.
 _MODULE_PATH = re.compile(r"sys\.path|PYTHONPATH|os\.chdir")
 
@@ -424,17 +434,21 @@ _MODULE_PATH = re.compile(r"sys\.path|PYTHONPATH|os\.chdir")
 def _brings_code(words: list[Word], magic: bool) -> bool:
     """Whether a shell command may bring in modules that have no name here.
 
-    It installs with a tool this module doesn't read (``conda install``, ``uv add``),
-    fetches or unpacks files (``git clone``, ``wget``, ``unzip``, ``cp -r``), or is
-    ``%cd``: the modules of the new folder can be imported from then on. ``magic``
-    says that the line is a magic (``%``). A ``cd`` in a shell line changes nothing
-    for the notebook.
+    It installs with a tool this module doesn't read (``conda install``, ``uv add``,
+    ``python setup.py install``), fetches or unpacks files (``git clone``, ``wget``,
+    ``unzip``, ``tar``), copies a folder or a module (``cp -r``, ``cp utils.py .``),
+    or is ``%cd``: the modules of the new folder can be imported from then on.
+    ``magic`` says that the line is a magic (``%``). A ``cd`` in a shell line changes
+    nothing for the notebook.
     """
     names = [word.text for word in words]
     if names[:1] == ["cd"]:
         return magic
-    if names[:1] == ["cp"]:
-        return any(_COPIES_A_FOLDER.fullmatch(name) for name in names[1:])
+    if names[0] in _COPY_COMMANDS:
+        folder = names[0] == "cp" and any(_COPIES_A_FOLDER.fullmatch(n) for n in names[1:])
+        return folder or any(name.endswith(".py") for name in names[1:])
+    if names[1:2] == ["setup.py"]:
+        return bool(_SETUP_PY_INSTALLS.intersection(names[2:]))
     return names[0] in _FETCH_COMMANDS or tuple(names[:2]) in _FETCH_SUBCOMMANDS
 
 
@@ -499,7 +513,8 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     Then no import is returned either. Nor is one when a command installs something
     without a name here (a path, a URL, a requirements file), when a command brings
     in code in another way (``git clone``, ``%conda install``, see ``_brings_code``),
-    or when a cell changes where modules are found (``sys.path``, ``os.chdir``): an
+    or when a cell changes where modules are found (``sys.path``, ``os.chdir``, a
+    ``cd`` line): an
     import that nothing provides may come from there. So imports are only returned
     for a notebook that installs everything it uses by name. A module that a cell
     writes (``%%writefile utils.py``) is the notebook's own.
@@ -521,6 +536,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
         if want_imports or "pip" in cell.text:
             view = view_cell(cell.text, want_imports)
             written |= view.written
+            unnamed = unnamed or view.changes_folder
             for install, ignored in _installs(cell, view):
                 understood += install.source_options
                 found.private_index = found.private_index or install.private_index

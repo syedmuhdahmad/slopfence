@@ -204,11 +204,11 @@ Known limits: a list for another tool whose names mostly exist on PyPI too (`git
 - A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. Neither does a `pip install` in another form than the ones in the table above (`pip -q install x`, `sudo pip install x`, `/usr/bin/pip install x`). An index or links option in such a command still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
 - With `--check-imports`, the imports of a notebook are only looked up when the notebook installs everything it uses by name. A module that a cell writes (`%%writefile utils.py`) is the notebook's own. The imports are not looked up at all when any import may come from a place slopfence can't see:
   - One of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, a command with an option slopfence doesn't know, or a `pip install` in a form it doesn't read (`sudo pip install x`).
-  - It installs with another tool: `conda install` or `mamba install` (also `%conda install`), `uv add`, `poetry add` or `pipenv install`. slopfence reads no package name from such a line.
-  - It brings in code at run time with a shell command: `git clone`, `wget`, `curl`, `unzip`, `gdown` or `cp -r`.
-  - It changes where Python looks for modules: a `%cd` line, `os.chdir`, or the text `sys.path` or `PYTHONPATH` in a code cell.
+  - It installs with another tool: `conda install` or `mamba install` (also `%conda install`), `uv add`, `poetry add`, `pipenv install`, or `python setup.py install` / `develop`. slopfence reads no package name from such a line.
+  - It brings in code at run time with a shell command: `git clone`, `wget`, `curl`, `gdown`, `unzip`, `tar`, `7z`, `cp -r`, or `cp`, `mv` or `ln` with a `.py` file.
+  - It changes where Python looks for modules: a `%cd` line (also without the `%`), `os.chdir`, or the text `sys.path` or `PYTHONPATH` in a code cell.
 
-  Known limit: code that reaches the notebook without a trace in it (a Kaggle utility script, a file uploaded by hand) is not seen. Its import is reported when PyPI has no package of that name. Add the name to `known-packages`.
+  Known limits: code that reaches the notebook without a trace in it (a Kaggle utility script, a file uploaded by hand) is not seen. Neither is one of these commands in another form: behind `sudo`, with an option before the subcommand (`git -C dir clone`), run from Python (`os.system`, `subprocess`), or a tool that is not in the list (`micromamba`, `python -m spacy download`). The import is then reported when PyPI has no package of that name. Add the name to `known-packages`.
 - The imports of a code cell with a carriage return inside a line (not at its end) are not looked up: Python counts the lines of such a cell in another way than the file does.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`. An excluded notebook is not read at all.

@@ -756,6 +756,20 @@ BRINGS_CODE = [
     "!uv add helpers_zz",
     "!poetry add helpers_zz",
     "!pipenv install helpers_zz",
+    # A ``cd`` line without the ``%`` is the same magic.
+    "cd /content/drive/MyDrive/project",
+    "cd helpers_repo",
+    "x = 1\n    cd ..\ny = 2",
+    "cd /content/drive/My Drive/project",
+    # One module, copied, moved or linked.
+    "!cp /kaggle/input/my-scripts/helpers_zz.py .",
+    "!mv /tmp/helpers_zz.py /content/",
+    "!ln -s /data/code/helpers_zz.py helpers_zz.py",
+    # Other ways to unpack an archive, and the folder's own package.
+    "!tar -xzf /content/drive/MyDrive/code.tar.gz",
+    "!7z x code.7z",
+    "!python setup.py develop",
+    "%%bash\npython3 setup.py -q install",
 ]
 
 
@@ -792,6 +806,14 @@ def test_a_notebook_that_clones_its_code_still_has_its_packages_looked_up(
         "!git status",
         "!git commit -m clone",
         "!cp notes.txt backup.txt",
+        "!mv results.csv old/",
+        "!ln -s data latest",
+        "!python setup.py --version",
+        "!python setup.py sdist",
+        "!python train.py install",
+        "cd = 3",
+        "cd, rest = 1, 2",
+        "cd=3\nabcd /tmp",
         "!cd data && ls",
         "%%bash\ncd data\nls",
         "%conda list",
