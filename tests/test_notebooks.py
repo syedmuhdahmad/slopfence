@@ -242,7 +242,7 @@ CELLS = [
     "pip install automagic-pkg\n",
     "this is not python (\n!pip install still-found\n",
     "%%capture\n!python -m pip install ghost-five\n%pip install ghost-six\n",
-    "!conda install conda-pkg\n!apt-get install -y apt-pkg\n%pip download dl-pkg\n",
+    "!npm install npm-pkg\n!apt-get install -y apt-pkg\n%pip download dl-pkg\n",
     "%load_ext autoreload\nhelp_text = '''\npip install in-a-string-too\n'''\n",
 ]
 NAMES = [
@@ -656,6 +656,86 @@ def test_imports_a_notebook_provides_itself_are_not_looked_up(write, check, not_
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry, check_imports=True)
     assert result.findings == [] and registry.queries == []
+
+
+# Cells after which an import may be code that the notebook fetched, or a package
+# that it installed with another tool than pip.
+BRINGS_CODE = [
+    "!git clone https://github.com/someone/helpers_zz.git",
+    "%%bash\ngit clone https://github.com/someone/helpers_zz.git",
+    "!wget -q https://x.example/helpers_zz.py",
+    "!curl -sO https://x.example/helpers_zz.py",
+    "!unzip -q code.zip",
+    "!gdown --id 1AbC -O helpers_zz.py",
+    "!cp -r ../input/my-scripts/* .",
+    "!cp -Rf /kaggle/input/scripts .",
+    "%cd helpers_repo",
+    "import os\nos.chdir('/content/drive/MyDrive/project')",
+    "import sys\nsys.path.append('/content/drive/MyDrive/project')",
+    "%env PYTHONPATH=/content/repo",
+    "import os\nos.environ['PYTHONPATH'] = '/content/repo'",
+    "%conda install -c conda-forge helpers_zz",
+    "!conda install -y helpers_zz",
+    "!mamba install helpers_zz",
+    "!uv add helpers_zz",
+    "!poetry add helpers_zz",
+    "!pipenv install helpers_zz",
+]
+
+
+@pytest.mark.parametrize("cell", BRINGS_CODE)
+def test_a_notebook_that_brings_in_code_has_no_import_looked_up(write, check, not_installed, cell):
+    """A notebook that fetches or unpacks files, changes where Python looks for
+    modules, or installs with conda, uv, Poetry or Pipenv: any import may come from
+    there. So none is a finding, and none is sent."""
+    write("demo.ipynb", jupyter([cell + "\n", "import helpers_zz\nfrom other_zz.sub import x\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+
+
+def test_a_notebook_that_clones_its_code_still_has_its_packages_looked_up(
+    write, check, not_installed
+):
+    """Only the imports are left alone. A ``pip install`` line of the same notebook
+    names its packages, and they are looked up as in any other notebook."""
+    cells = [
+        "!git clone https://github.com/someuser/segment_models.git\n%cd segment_models\n"
+        "!pip install -q torch ghost-dep\n",
+        "import torch\nfrom segment_models.networks import UNet\nimport train_utils\n",
+    ]
+    write("train.ipynb", jupyter(cells))
+    registry = FakeRegistry({"torch"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-dep"] and sorted(registry.queries) == ["ghost-dep", "torch"]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "!git status",
+        "!git commit -m clone",
+        "!cp notes.txt backup.txt",
+        "!cd data && ls",
+        "%%bash\ncd data\nls",
+        "%conda list",
+        "!uv --version",
+        "!poetry show",
+        "!pipenv --version",
+        "!echo wget",
+        "import os\nprint(os.path.join('a', 'b'))",
+        "tool = 'curl'\nplatform = sys.platform",
+    ],
+)
+def test_a_command_that_brings_in_no_code_leaves_the_imports_checked(
+    write, check, not_installed, cell
+):
+    """The look-alike cases: other subcommands of the same tools, a copy of one file,
+    a ``cd`` in a shell line (it changes nothing for the notebook), and text that
+    only holds a command's name. The invented import is still reported."""
+    write("demo.ipynb", jupyter([cell + "\n", "import helpers_zz\n"]))
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert subjects(result) == ["helpers_zz"]
 
 
 def test_a_notebook_whose_installs_all_have_names_has_its_imports_looked_up(

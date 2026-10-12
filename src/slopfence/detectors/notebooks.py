@@ -31,6 +31,7 @@ from slopfence.detectors.dependency import (
 )
 from slopfence.detectors.pip_commands import (
     PipInstall,
+    Word,
     pip_install_arguments,
     pip_requirements,
     shell_commands,
@@ -391,13 +392,50 @@ _INDEX_SETTING = re.compile(
 )
 
 
+# Shell commands that install a package without a name that is read here, or fetch or
+# unpack files that may be code: by their first word, or by their first two.
+_FETCH_COMMANDS = frozenset({"wget", "curl", "unzip", "gdown"})
+_FETCH_SUBCOMMANDS = frozenset(
+    {
+        ("git", "clone"),
+        ("conda", "install"),
+        ("mamba", "install"),
+        ("uv", "add"),
+        ("poetry", "add"),
+        ("pipenv", "install"),
+    }
+)
+# ``cp -r`` and ``cp -R``, also in a cluster of options (``-rf``).
+_COPIES_A_FOLDER = re.compile(r"-[A-Za-z]*[rR][A-Za-z]*|--recursive")
+# Python text that changes where modules are found.
+_MODULE_PATH = re.compile(r"sys\.path|PYTHONPATH|os\.chdir")
+
+
+def _brings_code(words: list[Word], magic: bool) -> bool:
+    """Whether a shell command may bring in modules that have no name here.
+
+    It installs with a tool this module doesn't read (``conda install``, ``uv add``),
+    fetches or unpacks files (``git clone``, ``wget``, ``unzip``, ``cp -r``), or is
+    ``%cd``: the modules of the new folder can be imported from then on. ``magic``
+    says that the line is a magic (``%``). A ``cd`` in a shell line changes nothing
+    for the notebook.
+    """
+    names = [word.text for word in words]
+    if names[:1] == ["cd"]:
+        return magic
+    if names[:1] == ["cp"]:
+        return any(_COPIES_A_FOLDER.fullmatch(name) for name in names[1:])
+    return names[0] in _FETCH_COMMANDS or tuple(names[:2]) in _FETCH_SUBCOMMANDS
+
+
 def _offset(lines: list[str], lineno: int, col: int) -> int:
     """Offset in a cell's text of a 1-based line and 0-based character column."""
     return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
 
 
 def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
-    """Every ``pip install`` command of a cell.
+    """Every ``pip install`` command of a cell, and every command that brings in code
+    in another way (see ``_brings_code``): that one as an install that names nothing.
 
     Yields what the command says, and whether an ignore comment covers it. The
     comment may be at the end of the command, which is the end of its last line
@@ -415,9 +453,12 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
         ignored = suppresses_slop001(requirements_comment(last_line)) or (
             above.startswith("#") and suppresses_slop001(above)
         )
+        magic = cell.text[offset - 1 : offset] == "%"
         for words in commands:
             if arguments := pip_install_arguments(words):
                 yield pip_requirements(arguments), ignored
+            elif words and _brings_code(words, magic):
+                yield PipInstall(unnamed=True), ignored
 
 
 def _mentions_an_index(text: str, understood: list[tuple[int, int]]) -> bool:
@@ -441,9 +482,12 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     names another source than PyPI, or when a cell sets an index in a way that
     can't be followed (``pip config``, an environment variable, a ``pip.conf``).
     Then no import is returned either. Nor is one when a command installs something
-    without a name here (a path, a URL, a requirements file): an import that
-    nothing provides may come from there. A module that a cell writes
-    (``%%writefile utils.py``) is the notebook's own.
+    without a name here (a path, a URL, a requirements file), when a command brings
+    in code in another way (``git clone``, ``%conda install``, see ``_brings_code``),
+    or when a cell changes where modules are found (``sys.path``, ``os.chdir``): an
+    import that nothing provides may come from there. So imports are only returned
+    for a notebook that installs everything it uses by name. A module that a cell
+    writes (``%%writefile utils.py``) is the notebook's own.
 
     ``# slopfence: ignore-file`` anywhere in a code cell covers the notebook. A cell
     may be a shell script, or not Python at all, so the words count wherever they
@@ -489,6 +533,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                     found.imports.append((name, *notebook.position(cell, at)))
         if _mentions_an_index(cell.text, understood):
             found.private_index = True
+        unnamed = unnamed or bool(want_imports and _MODULE_PATH.search(cell.text))
     private = found.private_index or links
     for dep in found.dependencies:
         dep.validate = dep.validate and not private

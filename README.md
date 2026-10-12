@@ -201,7 +201,13 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 - Only `SLOP001` reads notebooks, and only their code cells.
 - Every notebook of the project is read in every run, also when the run checks other files (one file, as the pre-commit hook does). So a package that a notebook installs from git or a URL is not looked up in the file you check. Only the notebooks you check are looked up themselves.
 - A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
-- With `--check-imports`, a module that a cell writes (`%%writefile utils.py`) is the notebook's own. And the imports of a notebook are not looked up at all when one of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, or a command with an option slopfence doesn't know. Any import may come from there.
+- With `--check-imports`, the imports of a notebook are only looked up when the notebook installs everything it uses by name. A module that a cell writes (`%%writefile utils.py`) is the notebook's own. The imports are not looked up at all when any import may come from a place slopfence can't see:
+  - One of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, or a command with an option slopfence doesn't know.
+  - It installs with another tool: `conda install` or `mamba install` (also `%conda install`), `uv add`, `poetry add` or `pipenv install`. slopfence reads no package name from such a line.
+  - It brings in code at run time with a shell command: `git clone`, `wget`, `curl`, `unzip`, `gdown` or `cp -r`.
+  - It changes where Python looks for modules: a `%cd` line, `os.chdir`, or the text `sys.path` or `PYTHONPATH` in a code cell.
+
+  Known limit: code that reaches the notebook without a trace in it (a Kaggle utility script, a file uploaded by hand) is not seen. Its import is reported when PyPI has no package of that name. Add the name to `known-packages`.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`. An excluded notebook is not read at all.
 
