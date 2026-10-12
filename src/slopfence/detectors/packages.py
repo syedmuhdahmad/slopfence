@@ -101,6 +101,9 @@ _FIXTURE_KINDS = (Kind.SETUP_PY, Kind.SETUP_CFG, Kind.PIPFILE)
 # The kinds of file that say where an install gets its packages. A private index in
 # one of them also covers the files that can't say (see ``DependencyFile.inherits_index``).
 _INSTALL_KINDS = (Kind.REQUIREMENTS, Kind.PYPROJECT, Kind.PIPFILE)
+# The kinds of TOML file that can set a package index. One that can't be read may set
+# a private index that nobody sees (see ``DependencyFile.unreadable``).
+_INDEX_TOML_KINDS = (Kind.PYPROJECT, Kind.PIPFILE)
 # The byte order marks pip knows a requirements file by. The marks of UTF-32 come
 # first: the little-endian one starts with the mark of UTF-16.
 _BYTE_ORDER_MARKS = (
@@ -172,7 +175,7 @@ class ProjectIndex:
     @property
     def unreadable_index_files(self) -> list[str]:
         """The files that may set a private index nobody can see: a ``pyproject.toml``,
-        ``Pipfile`` or ``Pipfile.lock`` that its reader turned down."""
+        ``Pipfile`` or ``Pipfile.lock`` that could not be read."""
         return [file.rel for file in self.files if file.unreadable] + self.unreadable_lock_files
 
     @property
@@ -273,11 +276,13 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool | None]:
     project may import directly (``import idna`` with only ``requests`` declared).
 
     The second answer is None when nobody can say: the file records its indexes
-    (``INDEX_LOCK_FILES``), and its reader turned it down.
+    (``INDEX_LOCK_FILES``), and it could not be read. Its reader turned it down, or
+    it is not UTF-8, or it can't be opened.
     """
+    unknown = None if path.name in INDEX_LOCK_FILES else False
     text = read_source(path)
     if text is None:
-        return set(), False
+        return set(), unknown
     try:
         if path.name == "Pipfile.lock":
             data = json.loads(text)
@@ -287,7 +292,7 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool | None]:
         data = tomllib.loads(text)
     # RecursionError: arrays nested thousands deep, in a file nobody wrote by hand.
     except (ValueError, AttributeError, TypeError, RecursionError):
-        return set(), None if path.name in INDEX_LOCK_FILES else False
+        return set(), unknown
     # uv.lock, poetry.lock and pdm.lock all have [[package]] tables with a name.
     packages = _array(data.get("package"))
     names = {p["name"] for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)}
@@ -380,7 +385,8 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     if text is None:
         if kind is Kind.REQUIREMENTS:
             return _unread_requirements(path, rel)
-        return DependencyFile(rel, kind)
+        # Not UTF-8, or it can't be opened: the TOML reader takes no such file either.
+        return DependencyFile(rel, kind, unreadable=kind in _INDEX_TOML_KINDS)
     if kind is Kind.NOTEBOOK:
         return scan_notebook(text, rel, imports)
     if kind is Kind.SETUP_CFG:

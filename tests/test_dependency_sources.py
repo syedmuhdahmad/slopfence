@@ -1692,22 +1692,34 @@ def test_every_file_that_can_name_an_index_is_inherited_from(write, check, name,
 
 
 UV_INDEX = f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\n'
-# Files that name a private index and can't be read, because of one more line.
+PIPFILE_INDEX = f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n'
+LOCKED_INDEX = json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}, "default": {}})
+# Files that name a private index and can't be read: because of one more line, or
+# because they are not UTF-8 (one Latin-1 letter in a comment or a name, or UTF-16,
+# which is what ``>`` writes in Windows PowerShell).
 UNREADABLE = {
     "pyproject.toml": UV_INDEX + "this line is not TOML\n",
     "tools/pyproject.toml": "x = " + "[" * 5000 + "]" * 5000 + "\n",
-    "Pipfile": f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n[packages\n',
+    "Pipfile": PIPFILE_INDEX + "[packages\n",
     "Pipfile.lock": '{"_meta": {"sources": [{"url": "' + PRIVATE + '"}]}, "default": {',
     "deploy/Pipfile.lock": json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}, "default": 3}),
+    "latin/pyproject.toml": (UV_INDEX + "# Jos\u00e9\n").encode("latin-1"),
+    "utf16/pyproject.toml": UV_INDEX.encode("utf-16"),
+    "latin/Pipfile": ("# Jos\u00e9\n" + PIPFILE_INDEX).encode("latin-1"),
+    "utf16/Pipfile": PIPFILE_INDEX.encode("utf-16"),
+    "latin/Pipfile.lock": LOCKED_INDEX.replace("{}", '{"Jos\u00e9": {}}').encode("latin-1"),
+    "utf16/Pipfile.lock": LOCKED_INDEX.encode("utf-16"),
 }
 
 
 @pytest.mark.parametrize("name", sorted(UNREADABLE))
 def test_a_file_that_may_set_an_index_and_can_not_be_read_is_inherited_from(write, tmp_path, name):
-    """A ``pyproject.toml``, ``Pipfile`` or ``Pipfile.lock`` that its reader turns down
-    may set a private index that nobody can see. So the files that would inherit it
-    are held back, also when one is checked alone, and the note names the file."""
-    write(name, UNREADABLE[name])
+    """A ``pyproject.toml``, ``Pipfile`` or ``Pipfile.lock`` that can't be read (its
+    reader turns it down, or it is not UTF-8) may set a private index that nobody can
+    see. So the files that would inherit it are held back, also when one is checked
+    alone, and the note names the file."""
+    content = UNREADABLE[name]
+    write(name, "").write_bytes(content if isinstance(content, bytes) else content.encode())
     path = write("setup.cfg", "[options]\ninstall_requires =\n    corp-x\n")
     for paths in ([tmp_path], [path]):
         registry = FakeRegistry(set())
@@ -1721,11 +1733,12 @@ def test_a_file_that_may_set_an_index_and_can_not_be_read_is_inherited_from(writ
 
 
 @pytest.mark.parametrize("name", ["uv.lock", "poetry.lock", "constraints.txt", "setup.cfg"])
-def test_a_broken_file_that_can_set_no_index_holds_nothing_back(write, check, name):
-    """The look-alike cases. A lock file other than ``Pipfile.lock`` records no index,
-    a requirements file has no syntax to turn down, and a ``setup.cfg`` only speaks
-    for itself."""
-    write(f"deploy/{name}", "[[package\nthis line is not TOML\n")
+@pytest.mark.parametrize("content", [b"[[package\nthis line is not TOML\n", b"# Jos\xe9\n"])
+def test_a_broken_file_that_can_set_no_index_holds_nothing_back(write, check, name, content):
+    """The look-alike cases, broken or not UTF-8. A lock file other than
+    ``Pipfile.lock`` records no index, a requirements file has no syntax to turn
+    down, and a ``setup.cfg`` only speaks for itself."""
+    write(f"deploy/{name}", "").write_bytes(content)
     write("setup.py", 'from setuptools import setup\nsetup(install_requires=["ghost-lib"])\n')
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry)

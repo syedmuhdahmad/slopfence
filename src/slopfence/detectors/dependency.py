@@ -160,9 +160,10 @@ class DependencyFile:
     # of the project. The package it defines is a fixture, so its dependencies are not
     # looked up. Its own name and its private index count like those of any other file.
     fixture: bool = False
-    # ``pyproject.toml`` and ``Pipfile`` only: the TOML reader turned the file down
-    # (broken, or written in a newer TOML than it knows). The file may set a private
-    # index that can't be seen here.
+    # ``pyproject.toml`` and ``Pipfile`` only: the file could not be read. The TOML
+    # reader turned it down (broken, or written in a newer TOML than it knows), it is
+    # not UTF-8, or it can't be opened. It may set a private index that can't be seen
+    # here.
     unreadable: bool = False
 
     def make_private(self) -> None:
