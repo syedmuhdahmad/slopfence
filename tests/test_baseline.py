@@ -6,6 +6,7 @@ import json
 import os
 import random
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from slopfence.baseline import Baseline, BaselineError, Scope, key_of, normalize
 from slopfence.cli import main
 from slopfence.config import ignored_rules, load_config
 from slopfence.engine import run
-from slopfence.models import RULES, Finding
+from slopfence.models import RULES, Finding, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 from tests.conftest import FakeRegistry
 
@@ -80,6 +81,9 @@ SUBJECTS = {
     "SLOP040": "load",
     "SLOP051": "I hope this helps!",
 }
+# How many findings the ``project`` fixture has. Tests count with this and with what the
+# fixture's baseline holds, never with a number: a new rule adds a finding to the fixture.
+TOTAL = len(SUBJECTS)
 
 
 @pytest.fixture
@@ -117,6 +121,25 @@ def report(capsys, *args):
 def rows(path):
     """The rows of a baseline file."""
     return json.loads(path.read_text(encoding="utf-8"))["findings"]
+
+
+def per_file(path):
+    """How many findings a baseline file holds for each file."""
+    counts = Counter()
+    for file, _, _, count in rows(path):
+        counts[file] += count
+    return counts
+
+
+def refusal(lost):
+    """The error of ``--write-baseline base.json`` when the run does not check the rows ``lost``."""
+    path, rule, *_ = min(lost)
+    return (
+        "slopfence: error: can't write baseline base.json: it holds "
+        f"{plural(sum(row[3] for row in lost), 'finding')} that this run does not check "
+        f"(for example {rule} in {path}). Check everything the baseline holds, or delete "
+        "the file first\n"
+    )
 
 
 def prepend(path, text):
@@ -220,7 +243,8 @@ def test_write_baseline_then_only_new_findings_fail(project, capsys):
 
     assert main([".", "--no-color", "--write-baseline", "base.json"]) == 0
     assert capsys.readouterr().out == (
-        f"No new issues found in 5 files; {total} hidden by the baseline.\n"
+        f"No new issues found in {before['files_checked']} files; {total} hidden by the "
+        "baseline.\n"
         f"note: Wrote {total} findings to the baseline base.json.\n"
     )
 
@@ -253,9 +277,9 @@ def test_baselined_findings_stay_hidden_when_lines_are_added_above(project, caps
     )
     # Without the baseline every finding is there, four lines (two in requirements) down.
     code, moved = report(capsys)
-    assert (code, len(moved["findings"])) == (1, len(RULES))
+    assert (code, len(moved["findings"])) == (1, TOTAL)
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["findings"], after["baselined"]) == (0, [], len(RULES))
+    assert (code, after["findings"], after["baselined"]) == (0, [], TOTAL)
     assert after["notes"] == []  # and nothing looks fixed
 
 
@@ -272,7 +296,7 @@ def test_unrelated_edits_keep_findings_hidden(project, capsys):
     # The SLOP030 message names dates.py:1. It moves; the finding is still about fmt_date.
     prepend(project / "src" / "dates.py", "import datetime\n")
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["findings"], after["baselined"]) == (0, [], len(RULES))
+    assert (code, after["findings"], after["baselined"]) == (0, [], TOTAL)
 
 
 def test_changed_subject_brings_a_finding_back(project, capsys):
@@ -291,17 +315,13 @@ def test_changed_subject_brings_a_finding_back(project, capsys):
 def test_renamed_file_brings_its_findings_back(project, capsys):
     """A row names its file, so the findings of a renamed file are new ones."""
     main([".", "--write-baseline", "base.json"])
+    moved = [row[1] for row in rows(project / "base.json") if row[0] == "src/app.py"]
     (project / "src" / "app.py").rename(project / "src" / "application.py")
     code, after = report(capsys, "--baseline", "base.json")
     assert code == 1
     assert {f["path"] for f in after["findings"]} == {"src/application.py"}
-    assert sorted(f["rule"] for f in after["findings"]) == [
-        "SLOP010",
-        "SLOP011",
-        "SLOP040",
-        "SLOP051",
-    ]
-    assert after["notes"] == [GONE.format("4 findings", "exist")]
+    assert sorted(f["rule"] for f in after["findings"]) == moved
+    assert len(moved) > 1 and after["notes"] == [GONE.format(f"{len(moved)} findings", "exist")]
 
 
 def test_identical_findings_are_counted(write, tmp_path, monkeypatch, capsys):
@@ -401,7 +421,7 @@ def test_sarif_leaves_baselined_findings_out(project, capsys):
     assert [r["ruleId"] for r in sarif["results"]] == ["SLOP051"]
     assert "baselineState" not in sarif["results"][0] and "suppressions" not in sarif["results"][0]
     notes = [n["message"]["text"] for n in sarif["invocations"][0]["toolExecutionNotifications"]]
-    assert notes == ["9 findings hidden by the baseline"]
+    assert notes == [f"{TOTAL} findings hidden by the baseline"]
     # Without a baseline the notification is not there.
     main([".", "--format", "sarif"])
     plain = json.loads(capsys.readouterr().out)["runs"][0]
@@ -415,7 +435,7 @@ def test_per_file_ignored_findings_do_not_use_baseline_entries(project, capsys):
         '[tool.slopfence.per-file-ignores]\n"src/app.py" = ["SLOP040"]\n'
     )
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["baselined"]) == (0, 8)
+    assert (code, after["baselined"]) == (0, TOTAL - 1)
     assert after["notes"] == [GONE.format("1 finding", "exists")]
 
 
@@ -428,7 +448,7 @@ def test_ignore_comment_on_a_baselined_finding_wins(project, capsys):
         "    except Exception:  # slopfence: ignore",
     )
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["baselined"]) == (0, 8)
+    assert (code, after["baselined"]) == (0, TOTAL - 1)
     assert after["notes"] == [GONE.format("1 finding", "exists")]
 
 
@@ -462,7 +482,7 @@ def test_baseline_option_replaces_the_config_key(project, capsys):
     main([".", "--write-baseline", "all.json"])
     main([".", "--select", "SLOP051", "--write-baseline", "one.json"])
     (project / "pyproject.toml").write_text('[tool.slopfence]\nbaseline = "all.json"\n')
-    assert report(capsys)[1]["baselined"] == 9
+    assert report(capsys)[1]["baselined"] == TOTAL
     assert report(capsys, "--baseline", "one.json")[1]["baselined"] == 1
 
 
@@ -474,7 +494,7 @@ def test_write_baseline_does_not_use_the_configured_baseline(project, capsys):
     first = (project / "base.json").read_bytes()
     assert main([".", "--write-baseline", "base.json"]) == 0
     assert (project / "base.json").read_bytes() == first
-    assert len(rows(project / "base.json")) == 9
+    assert len(rows(project / "base.json")) == TOTAL
     # --no-baseline changes nothing here: a run that writes uses no baseline anyway.
     assert main([".", "--no-baseline", "--write-baseline", "base.json"]) == 0
     assert (project / "base.json").read_bytes() == first
@@ -1146,46 +1166,49 @@ def test_write_baseline_refuses_to_drop_findings_outside_the_checked_paths(
     """Writing from a sub-folder must not replace the baseline of the whole project."""
     main([".", "--write-baseline", "base.json"])
     before = (project / "base.json").read_bytes()
+    in_src = [row for row in rows(project / "base.json") if row[0].startswith("src/")]
+    elsewhere = [row for row in rows(project / "base.json") if row not in in_src]
     capsys.readouterr()
     with monkeypatch.context() as patch:
         patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
         assert main(["src", "--write-baseline", "base.json"]) == 2
-    assert capsys.readouterr().err == (
-        "slopfence: error: can't write baseline base.json: it holds 4 findings that this run "
-        "does not check (for example SLOP001 in requirements.txt). Check everything the "
-        "baseline holds, or delete the file first\n"
-    )
+    # The rows for tests/ and requirements.txt, with the first of them as the example.
+    assert len(elsewhere) > 1 and capsys.readouterr().err == refusal(elsewhere)
     assert (project / "base.json").read_bytes() == before
     # Another file name is fine. So is the same name once those files are gone.
     assert main(["src", "--write-baseline", "src-only.json"]) == 0
     (project / "requirements.txt").unlink()
     (project / "tests" / "test_app.py").unlink()
     assert main(["src", "--write-baseline", "base.json"]) == 0
-    assert {row[0] for row in rows(project / "base.json")} == {"src/app.py", "src/utils.py"}
+    assert rows(project / "base.json") == in_src
     # And naming every path the baseline has findings for is the same as naming the project.
-    assert main(["src/app.py", "src/utils.py", "--write-baseline", "base.json"]) == 0
+    assert main([*sorted({row[0] for row in in_src}), "--write-baseline", "base.json"]) == 0
 
 
 @pytest.mark.parametrize(
-    ("options", "lost"),
+    ("options", "left_out"),
     [
-        (["--select", "SLOP040"], "8 findings that this run does not check (for example SLOP001"),
-        (["--ignore", "SLOP010,SLOP011"], "2 findings that this run does not check (for example "),
-        (["--exclude", "tests"], "3 findings that this run does not check (for example SLOP020"),
-        (["--exclude", "*.txt"], "1 finding that this run does not check (for example SLOP001"),
+        (["--select", "SLOP040"], lambda path, rule: rule != "SLOP040"),
+        (["--ignore", "SLOP010,SLOP011"], lambda path, rule: rule in ("SLOP010", "SLOP011")),
+        (["--exclude", "tests"], lambda path, rule: path.startswith("tests/")),
+        (["--exclude", "*.txt"], lambda path, rule: path.endswith(".txt")),
     ],
 )
 def test_write_baseline_refuses_to_drop_findings_of_skipped_rules_and_files(
-    project, capsys, monkeypatch, options, lost
+    project, capsys, monkeypatch, options, left_out
 ):
-    """A run that leaves rules or files out must not replace the baseline of the full run."""
+    """A run that leaves rules or files out must not replace the baseline of the full run.
+
+    ``left_out`` says which rows of the full baseline the run with ``options`` can't see.
+    """
     main([".", "--write-baseline", "base.json"])
     before = (project / "base.json").read_bytes()
+    lost = [row for row in rows(project / "base.json") if left_out(row[0], row[1])]
     capsys.readouterr()
     with monkeypatch.context() as patch:
         patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
         assert main([".", *options, "--write-baseline", "base.json"]) == 2
-    assert f"can't write baseline base.json: it holds {lost}" in capsys.readouterr().err
+    assert lost and capsys.readouterr().err == refusal(lost)
     assert (project / "base.json").read_bytes() == before
     # A file of its own is fine. And so is writing that one again with the same options.
     assert main([".", *options, "--write-baseline", "part.json"]) == 0
@@ -1279,20 +1302,18 @@ def test_write_baseline_says_when_package_findings_may_be_missing(project, capsy
         """The notes of a run that writes a baseline with the given options."""
         return report(capsys, "--write-baseline", "base.json", *args)[1]["notes"]
 
-    assert notes() == ["Wrote 9 findings to the baseline base.json."]  # every lookup answered
-    assert notes("--offline") == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+    wrote_all = f"Wrote {TOTAL} findings to the baseline base.json."
+    without_slop001 = f"Wrote {TOTAL - 1} findings to the baseline base.json."
+    assert notes() == [wrote_all]  # every lookup answered
+    assert notes("--offline") == [without_slop001, MAY_BE_MISSING]
     # Nothing to say when the rule is off, or when there is no name to look up.
-    assert notes("--offline", "--ignore", "SLOP001") == [
-        "Wrote 8 findings to the baseline base.json."
-    ]
-    assert notes("--offline", "--exclude", "requirements.txt") == [
-        "Wrote 8 findings to the baseline base.json."
-    ]
+    assert notes("--offline", "--ignore", "SLOP001") == [without_slop001]
+    assert notes("--offline", "--exclude", "requirements.txt") == [without_slop001]
     # A private index in the environment: the note that was there explains, this one warns.
     monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.corp.example/simple")
     with_index = notes()
     assert with_index[0].startswith("SLOP001 made no PyPI lookups: a private package index")
-    assert with_index[1:] == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+    assert with_index[1:] == [without_slop001, MAY_BE_MISSING]
     assert "corp.example" not in " ".join(with_index)  # an index URL is never printed
     monkeypatch.delenv("PIP_INDEX_URL")
     # A run that uses a baseline never prints it.
@@ -1333,7 +1354,10 @@ def test_write_baseline_says_when_pypi_did_not_answer(project, capsys, monkeypat
     )
     code, after = report(capsys, "--write-baseline", "base.json")
     assert code == 0
-    assert after["notes"] == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+    assert after["notes"] == [
+        f"Wrote {TOTAL - 1} findings to the baseline base.json.",
+        MAY_BE_MISSING,
+    ]
 
 
 def test_result_names_the_package_rules_that_ran_without_answers(write, check):
@@ -1378,26 +1402,29 @@ def test_offline_import_checks_count_as_unanswered(write, check):
 def test_gone_findings_are_only_reported_when_the_run_could_find_them(project, capsys):
     """Fixed findings are pointed out. Skipped files, skipped rules and SLOP001 are not."""
     main([".", "--write-baseline", "base.json"])
+    found = per_file(project / "base.json")
     # Offline: SLOP001 finds nothing, but its row must not look fixed.
     code, after = report(capsys, "--offline", "--baseline", "base.json")
-    assert (code, after["notes"], after["baselined"]) == (0, [], 8)
+    assert (code, after["notes"], after["baselined"]) == (0, [], TOTAL - 1)
     # A file that is excluded is not checked: its rows say nothing.
     code, after = report(capsys, "--exclude", "tests", "--baseline", "base.json")
-    assert (code, after["notes"], after["baselined"]) == (0, [], 6)
+    assert (code, after["notes"]) == (0, [])
+    assert after["baselined"] == TOTAL - found["tests/test_app.py"]
     # Nor do the rows of a file that can't be parsed any more.
     app = (project / "src" / "app.py").read_text(encoding="utf-8")
     (project / "src" / "app.py").write_text("def broken(:\n", encoding="utf-8")
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["notes"], after["baselined"]) == (0, [], 5)
+    assert (code, after["notes"], after["baselined"]) == (0, [], TOTAL - found["src/app.py"])
     (project / "src" / "app.py").write_text(app, encoding="utf-8")
-    # A fixed test file (3 findings) and a deleted file (1).
+    # A fixed test file (several findings) and a deleted file (one).
     (project / "tests" / "test_app.py").write_text("def test_ok():\n    assert compute() == 2\n")
     (project / "src" / "utils.py").unlink()
+    gone = f"{found['tests/test_app.py'] + found['src/utils.py']} findings"
     code, after = report(capsys, "--baseline", "base.json")
-    assert (code, after["notes"]) == (0, [GONE.format("4 findings", "exist")])
+    assert (code, after["notes"]) == (0, [GONE.format(gone, "exist")])
     # The text report prints it as a note, and the exit code stays 0.
     assert main([".", "--no-color", "--baseline", "base.json"]) == 0
-    assert "note: 4 findings in the baseline no longer exist." in capsys.readouterr().out
+    assert f"note: {gone} in the baseline no longer exist." in capsys.readouterr().out
 
 
 def test_missing_import_is_never_called_gone(write, check):
