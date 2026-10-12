@@ -161,6 +161,12 @@ def test_pip_install_lines(line, names):
         ("pip install --new-flag --index-url=https://pypi.org/simple x", ([], [], True, False)),
         ("pip install --new-flag --find-links=./wheels x", ([], [], False, True)),
         ("pip install -x -f ./wheels x", ([], [], False, True)),
+        # In a cluster of short options too: "-qi" is "-q -i".
+        ("pip install --new-flag -qi https://corp.example/simple corp", ([], [], True, False)),
+        ("pip install --new-flag -qUf ./wheels x", ([], [], False, True)),
+        # Not an index: a value that only holds the letter, and a cluster that is not known.
+        ("pip install --new-flag -rindex.txt -t lib/fi x", ([], [], False, False)),
+        ("pip install --new-flag -xi corp", ([], [], False, False)),
         ("pip install 'unterminated", "not pip"),
         ("pip download foo", "not pip"),
         ("pip --quiet install foo", "not pip"),
@@ -333,6 +339,9 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!pip install --brand-new-flag -i {PRIVATE} corp-a\n",
         f"!uv pip install --brand-new-flag --index {PRIVATE} corp-a\n",
         "!pip install --brand-new-flag -f ./wheels corp-a\n",
+        # ... also in a cluster of short options.
+        f"!pip install --brand-new-flag -qi {PRIVATE} corp-a\n",
+        "!pip install --brand-new-flag -qf ./wheels corp-a\n",
         # A long option cut short, as pip allows.
         f"!pip install --extra-index {PRIVATE} corp-a\n",
         f"!pip install --extra-index={PRIVATE} corp-a\n",

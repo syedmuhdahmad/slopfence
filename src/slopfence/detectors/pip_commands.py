@@ -235,11 +235,14 @@ def _unread(arguments: list[Word]) -> PipInstall:
     module's tables, so it arrives here. It counts as the option it is short for. A
     command line has more options than a requirements file, so pip refuses a few of
     these short forms as ambiguous (``--ex``): counting them too only keeps more
-    names on the machine.
+    names on the machine. A cluster of short options counts for the option in it
+    that takes a value: ``-qi`` is ``-q -i``.
     """
     found = PipInstall(unnamed=True)
     for word in arguments:
         option = word.text.partition("=")[0]
+        if option.startswith("-") and not option.startswith("--"):
+            option = (_short_options(option) or ("", None))[0]
         index = option in INDEX_OPTIONS or is_pip_option(word.text, "-i", INDEX_OPTION_STARTS)
         links = option in LINK_OPTIONS or is_pip_option(word.text, "-f", LINKS_OPTION_STARTS)
         found.private_index = found.private_index or index
