@@ -295,13 +295,8 @@ def _is_magic_line(stripped: str) -> bool:
 
 
 def _parse_cell(text: str) -> SourceFile | None:
-    """A cell parsed as Python, or None if it is not Python. Never an error."""
-    try:
-        return parse(text, Path("<cell>"), "<cell>")
-    # Too deeply nested for the parser, or text that the parser takes and the
-    # tokenizer doesn't: skipped like any other cell that is not Python.
-    except (RecursionError, MemoryError, SyntaxError):
-        return None
+    """A cell parsed as Python, or None if it is not Python (see ``source.parse``)."""
+    return parse(text, Path("<cell>"), "<cell>")
 
 
 def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list[tuple[int, int]]]:

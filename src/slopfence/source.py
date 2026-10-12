@@ -192,6 +192,11 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
     ``path`` and ``rel`` say where the source comes from. It need not be a whole
     file: the code cell of a notebook is parsed with this too. ``comments`` is as
     in ``load``.
+
+    This is the one place that decides what it means that Python's parser gave up
+    on a text, and it never raises for one. No caller keeps a list of errors of
+    its own: text that is nested more deeply than the parser takes is not valid
+    Python here, like text with a syntax error.
     """
     try:
         # Python warns about some valid code (an invalid escape sequence, for one).
@@ -201,7 +206,9 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             tree = ast.parse(text, filename=str(path))
-    except (SyntaxError, ValueError):
+    # RecursionError and MemoryError: an expression nested thousands deep, in a file
+    # nobody wrote by hand. Which of the two it is depends on the Python version.
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
 
     src = SourceFile(path=path, rel=rel, text=text, tree=tree)
@@ -220,7 +227,12 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
                 src.ignores[line] = (
                     {r.strip().upper() for r in rules.split(",") if r.strip()} if rules else None
                 )
-    except (tokenize.TokenError, IndentationError):
+    # The tokenizer turns down some text that the parser takes. The file keeps its
+    # tree, and the comments up to that place. SyntaxError includes IndentationError.
+    # ValueError: a carriage return before a character that is not ASCII ends with a
+    # UnicodeDecodeError since Python 3.12. No file has one (reading it turns the
+    # carriage return into a line feed), but the cell of a notebook can.
+    except (tokenize.TokenError, SyntaxError, ValueError):
         pass
     return src
 

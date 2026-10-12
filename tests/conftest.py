@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,15 @@ from slopfence import indexes
 from slopfence.detectors import packages
 from slopfence.engine import Result, run
 from slopfence.registry import OfflineRegistry
+
+# For a test case with an expression that is 100,000 operands long. Before Python 3.11
+# ``ast.parse`` has no depth limit: it takes such a sum with about 8 MB of stack, and
+# with less (``python.exe`` on Windows has 2 MB) the interpreter dies, and the whole
+# test run with it. From 3.11 on the parser gives up with an error, which is the case
+# the test is about.
+needs_parser_depth_limit = pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="ast.parse has no depth limit before Python 3.11"
+)
 
 
 class FakeRegistry:

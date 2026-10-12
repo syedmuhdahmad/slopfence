@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 import slopfence
-from slopfence.source import char_column, child_statements, children, load, walk
+from slopfence.source import char_column, child_statements, children, load, parse, walk
+from tests.conftest import needs_parser_depth_limit
 
 # Every place a statement can sit: bodies, ``else`` and ``finally`` blocks, ``except``
 # handlers and ``match`` cases. Lambdas and comprehensions hold expressions only.
@@ -119,6 +120,34 @@ def test_nodes_are_walked_once_and_shared(write, tmp_path):
     assert src.nodes is src.nodes
     assert all(a is b for a, b in zip(src.nodes, ast.walk(src.tree), strict=True))
     assert [span.text.strip() for span in src.docstring_lines] == ['"""A class."""']
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        pytest.param(" + ".join(["1"] * 100_000), marks=needs_parser_depth_limit),
+        "~" * 20_000 + "1",
+        "lambda: " * 5000 + "1",
+        "(" * 5000 + "1" + ")" * 5000,
+    ],
+    ids=["a sum of 100,000 numbers", "20,000 unary operators", "5,000 lambdas", "5,000 brackets"],
+)
+def test_text_that_is_too_deep_for_the_parser_is_not_valid_python(write, tmp_path, expression):
+    """Python's parser gives up on an expression that is nested thousands deep, with
+    a RecursionError, a MemoryError or a SyntaxError, depending on the version.
+    ``parse`` and ``load`` return None for each, like for any text that is not Python."""
+    text = f"x = {expression}\n"
+    assert parse(text, Path("deep.py"), "deep.py") is None
+    assert load(write("deep.py", text), tmp_path) is None
+
+
+def test_a_text_the_tokenizer_turns_down_keeps_its_tree():
+    """A carriage return before a character that is not ASCII: Python's parser takes
+    the text, and since Python 3.12 its tokenizer fails on it. ``parse`` raises
+    nothing. The text keeps its tree, and the comments that were read before."""
+    src = parse("x = 1  # first\n\r\u00e9tape = 2\n", Path("<cell>"), "<cell>")
+    assert src is not None and len(src.tree.body) == 2
+    assert [comment.text for comment in src.comments] == ["# first"]
 
 
 def test_a_file_without_comments_is_not_tokenized(write, tmp_path, monkeypatch):

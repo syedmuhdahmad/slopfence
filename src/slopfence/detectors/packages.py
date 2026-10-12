@@ -370,14 +370,9 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     kind = kind_of(path, root) or Kind.REQUIREMENTS
     rel = _rel(path, root)
     if kind is Kind.SETUP_PY:
-        # A Python file: parsed like any other, never executed.
-        try:
-            src = load(path, root)
-        except (RecursionError, MemoryError):
-            # Nested more deeply than Python's parser takes. Every setup.py of the
-            # project is read here, also one that is excluded or not checked, so such
-            # a file must not end the run. It declares nothing that can be read.
-            src = None
+        # A Python file: parsed like any other, never executed. One that the parser
+        # gives up on declares nothing that can be read.
+        src = load(path, root)
         return parse_setup_py(src) if src is not None else DependencyFile(rel, kind)
     if kind is Kind.NOTEBOOK and _is_too_large(path):
         return DependencyFile(rel, kind, too_large=True)

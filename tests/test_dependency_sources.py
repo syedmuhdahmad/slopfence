@@ -22,7 +22,7 @@ from slopfence.detectors.setuptools_files import _cfg_lines
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 from slopfence.source import relative_path
-from tests.conftest import DownRegistry, FakeRegistry
+from tests.conftest import DownRegistry, FakeRegistry, needs_parser_depth_limit
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
 INDEX = f"--extra-index-url {PRIVATE}\n"
@@ -1249,17 +1249,27 @@ def test_a_name_used_many_times_is_not_followed_without_end(write, tmp_path):
 
 @pytest.mark.parametrize(
     "expression",
-    ['"a" + ' * 100_000 + '"b"', "~" * 20_000 + "1", "lambda: " * 5000 + "1"],
+    [
+        pytest.param('"a" + ' * 100_000 + '"b"', marks=needs_parser_depth_limit),
+        "~" * 20_000 + "1",
+        "lambda: " * 5000 + "1",
+    ],
     ids=["a sum of 100,000 strings", "20,000 unary operators", "5,000 nested lambdas"],
 )
 def test_a_setup_py_too_deep_for_the_parser_does_not_stop_the_run(write, tmp_path, expression):
     """Every setup.py of the project is read for the name it gives the project, also
-    one that is not checked. One that Python's parser gives up on declares nothing."""
+    one that is not checked. One that Python's parser gives up on declares nothing.
+    With every rule on, the rest of the project is read for duplicates too: the file
+    never ends the run. Where it is checked itself, it is one parse error."""
     deep = write("vendor/generated/setup.py", f"from setuptools import setup\nx = {expression}\n")
     checked = write("requirements.txt", "ghost-lib\n")
     assert parse_dependency_file(deep, tmp_path).dependencies == []
-    result = run([checked], tmp_path, FakeRegistry(set()), select=["SLOP001"])
-    assert found(result) == [("requirements.txt", 1, 1)] and result.parse_errors == []
+    for rules in (["SLOP001"], None):
+        result = run([checked], tmp_path, FakeRegistry(set()), select=rules)
+        assert found(result) == [("requirements.txt", 1, 1)] and result.parse_errors == []
+        result = run([tmp_path], tmp_path, FakeRegistry(set()), select=rules)
+        assert found(result) == [("requirements.txt", 1, 1)]
+        assert result.parse_errors == ["vendor/generated/setup.py"]
 
 
 def test_setup_py_is_still_checked_as_python(write, check):

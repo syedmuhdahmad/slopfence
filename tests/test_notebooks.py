@@ -13,7 +13,7 @@ from slopfence.detectors.notebooks import read_notebook, scan_notebook
 from slopfence.detectors.pip_commands import pip_install_arguments, pip_requirements, shell_commands
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry, PyPIRegistry
-from tests.conftest import FakeRegistry, git, git_init
+from tests.conftest import FakeRegistry, git, git_init, needs_parser_depth_limit
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
 
@@ -872,11 +872,16 @@ def test_files_that_are_not_python_notebooks(text, write, check):
         "x = " + "(" * 5000 + "1" + ")" * 5000 + "\n!pip install deep-one\nimport deep_mod\n",
         # More than the parser takes: it gives up with a MemoryError or a RecursionError.
         "x = " + "~" * 20000 + "1\n!pip install deep-two\n",
-        "x = " + " + ".join(["1"] * 100000) + "\n%pip install deep-three\n",
+        pytest.param(
+            "x = " + " + ".join(["1"] * 100000) + "\n%pip install deep-three\n",
+            marks=needs_parser_depth_limit,
+        ),
         "!pip install " + "a" * 5000 + "\n",
         "%pip install 'unterminated\n",
         "\x00!pip install nul\n",
         "import a\n\tb = 1\n  c = 2\n!pip install mixed-indent\n",
+        # Python's parser takes this text, and its tokenizer fails on it since 3.12.
+        "%pip install cr-cell\n\r\u00e9tape = 1  # first step\n",
     ],
     ids=[
         "5,000 nested brackets",
@@ -886,6 +891,7 @@ def test_files_that_are_not_python_notebooks(text, write, check):
         "an open quote",
         "a NUL",
         "mixed indentation",
+        "a carriage return before a letter that is not ASCII",
     ],
 )
 def test_cells_that_are_hard_to_read_never_stop_the_run(write, check, cell):
