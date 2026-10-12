@@ -116,7 +116,7 @@ Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `
 x = legacy()  # slopfence: ignore
 ```
 
-Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line. In a notebook, add it to the end of the `pip install` line, or to a comment line right above it. When the command goes on over several lines, the end of its last line counts. Use the line above on Windows, where the shell passes the comment on to pip. `# slopfence: ignore-file` in any code cell skips the notebook: a Python cell, a `%%bash` cell or any other.
+Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line. For an entry that is a table of its own (`[packages.name]` in a `Pipfile`, `[tool.poetry.dependencies.name]`), that is the line of its header. In a notebook, add it to the end of the `pip install` line, or to a comment line right above it. When the command goes on over several lines, the end of its last line counts. Use the line above on Windows, where the shell passes the comment on to pip. `# slopfence: ignore-file` in any code cell skips the notebook: a Python cell, a `%%bash` cell or any other.
 
 To skip a rule in whole files or folders, use [`per-file-ignores`](#configuration). To accept everything a project has today and only see new findings, use a [baseline](#baseline-start-with-the-code-you-have).
 

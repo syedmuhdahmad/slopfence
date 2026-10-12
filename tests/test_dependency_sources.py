@@ -1353,6 +1353,77 @@ def test_pipfile_private_source_and_details(write, check, tmp_path):
     assert parse_dependency_file(write("Pipfile", "packages = 3\n"), tmp_path).dependencies == []
 
 
+PIPFILE_TABLE = '[packages]  # slopfence: ignore\nrequests = "*"\n\n'
+POETRY_TABLE = (
+    '[tool.poetry]\nname = "demo"\n\n'
+    '[tool.poetry.dependencies]  # slopfence: ignore\npython = "^3.10"\nrequests = "*"\n\n'
+)
+# An entry written as a table of its own: (file, what stands above it, its header).
+OWN_TABLES = [
+    ("Pipfile", PIPFILE_TABLE, "[packages.ghost-lib]"),
+    ("Pipfile", PIPFILE_TABLE, "[dev-packages.ghost-lib]"),
+    ("Pipfile", PIPFILE_TABLE, '[packages."ghost-lib"]'),
+    ("Pipfile", PIPFILE_TABLE, "[ packages . 'ghost-lib' ]"),
+    (
+        "Pipfile",
+        '[[source]]\nname = "pypi"\nurl = "https://pypi.org/simple"\n\n',
+        "[packages.ghost-lib]",
+    ),
+    ("pyproject.toml", POETRY_TABLE, "[tool.poetry.dependencies.ghost-lib]"),
+    ("pyproject.toml", POETRY_TABLE, "[tool.poetry.group.dev.dependencies.ghost-lib]"),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "above", "header"),
+    OWN_TABLES,
+    ids=[
+        "packages",
+        "dev-packages",
+        "double quotes",
+        "spaces and single quotes",
+        "no packages table",
+        "poetry",
+        "poetry group",
+    ],
+)
+def test_an_entry_that_is_a_table_of_its_own_is_on_its_header_line(
+    write, check, name, above, header
+):
+    """``[packages.ghost-lib]`` is reported on that line, not on the line of
+    ``[packages]``, so ``--diff`` keeps it when the entry is new. An ignore comment
+    on the header covers the entry, and one on ``[packages]`` does not."""
+    line = above.count("\n") + 1
+    write(name, f'{above}{header}\nversion = "*"\n')
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [(name, line, 1)]
+    changed = {name: {line, line + 1}}
+    assert found(check("SLOP001", registry=registry, changed=changed)) == [(name, line, 1)]
+
+    write(name, f'{above}{header}  # slopfence: ignore\nversion = "*"\n')
+    registry = FakeRegistry({"requests"})
+    assert check("SLOP001", registry=registry).findings == []
+    assert "ghost-lib" not in registry.queries
+
+
+def test_a_pipfile_entry_with_a_dotted_key_is_on_its_own_line(write, check):
+    """``ghost-lib.version = "*"`` is the entry ``ghost-lib``, on that line. A quoted
+    key with a dot in it is another entry (the look-alike), on its own line."""
+    body = '[packages]\nrequests = "*"\n"ghost.sub" = "*"\nghost = "*"\nghost-lib.version = "*"'
+    write("Pipfile", body + "\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert [(f.subject, f.line) for f in result.findings] == [
+        ("ghost-sub", 3),
+        ("ghost", 4),
+        ("ghost-lib", 5),
+    ]
+    write("Pipfile", body + "  # slopfence: ignore\n")
+    registry = FakeRegistry({"requests"})
+    assert [f.line for f in check("SLOP001", registry=registry).findings] == [3, 4]
+    assert "ghost-lib" not in registry.queries
+
+
 def test_a_dependency_file_that_cannot_be_read_declares_nothing(tmp_path, check):
     """A file that is not text is skipped, like a Python file that can't be read."""
     for name in ("requirements.txt", "setup.cfg", "Pipfile"):

@@ -80,6 +80,8 @@ _WORD_START = re.compile(r"[A-Za-z0-9]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
 _TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]\s](?:[^\]]*[^\]\s])?)\s*\]\]?\s*(#.*)?$")
+# What a table header may hold besides the names of its tables.
+_HEADER_NOISE = re.compile(r"""[\s"']""")
 
 # A Pipfile declares dependencies itself, so it is a dependency file, not a lock file.
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock"}
@@ -480,12 +482,16 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
 
 
 def _table_ranges(lines: list[str]) -> dict[str, tuple[int, int]]:
-    """Map each TOML table header to its (first, last) 0-based line range."""
+    """Map each TOML table header to its (first, last) 0-based line range.
+
+    A header is known by its name without spaces and quotes:
+    ``[packages."ghost-lib"]`` is ``packages.ghost-lib``.
+    """
     headers = [(i, m.group(1)) for i, line in enumerate(lines) if (m := _TABLE_HEADER.match(line))]
     ranges = {}
     for n, (start, name) in enumerate(headers):
         end = headers[n + 1][0] - 1 if n + 1 < len(headers) else len(lines) - 1
-        ranges.setdefault(name.replace(" ", ""), (start, end))
+        ranges.setdefault(_HEADER_NOISE.sub("", name), (start, end))
     return ranges
 
 
@@ -546,9 +552,16 @@ class _LineFinder:
         return self._search(table, quoted, array)
 
     def key(self, table: str, name: str) -> int:
-        return self._search(
-            table, re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
-        )
+        """The line (1-based) of the entry ``name`` of a table.
+
+        That is the line that starts with the key (``name = ...``, or
+        ``name.version = ...``). An entry that is a table of its own is on the line
+        of its header: ``[packages.name]``.
+        """
+        if own := self.ranges.get(f"{table}.{name}"):
+            return own[0] + 1
+        key = re.escape(name)
+        return self._search(table, re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]"""))
 
     def suppressed(self, line: int) -> bool:
         """Whether an ignore comment on a line (1-based) covers SLOP001."""
