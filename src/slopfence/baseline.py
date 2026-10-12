@@ -205,17 +205,27 @@ def write_problem(path: Path, scope: Scope, root: Path) -> str | None:
     """Why ``--write-baseline`` must not write to ``path``, or None if it may.
 
     Asked before the scan, so that a mistake costs neither a full run nor a file.
-    The folder must exist. A file that is there must be empty or a baseline: a
-    forgotten file name (``--write-baseline src/app.py``) must not replace source
-    code. It must be a baseline of this project (see ``names_no_file``). And replacing
-    it must not drop findings that a run with ``scope`` does not check (see
-    ``uncovered``).
+    The folder must exist, and it must be writable: the file is replaced through a
+    temporary file next to it (see ``write``). A file that is there must be writable
+    too, and it must be empty or a baseline: a forgotten file name
+    (``--write-baseline src/app.py``) must not replace source code. It must be a
+    baseline of this project (see ``names_no_file``). And replacing it must not drop
+    findings that a run with ``scope`` does not check (see ``uncovered``).
     """
-    # os.path, not Path: these two never raise, whatever was typed as the file name.
+    # os.path, not Path: none of these raises, whatever was typed as the file name.
     if not os.path.isdir(os.path.dirname(os.path.abspath(path))):
         return f"the folder {path.parent} does not exist"
     if os.path.isdir(path):
         return "it is a folder"
+    if os.path.exists(path) and not os.path.isfile(path):
+        # A named pipe or a device. Reading a pipe would wait for ever.
+        return "it is not a regular file"
+    # realpath: a symbolic link is written through, into the folder of its target.
+    if not os.access(os.path.dirname(os.path.realpath(path)), os.W_OK):
+        return "no permission to write in its folder"
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        # Replacing the file would get around its protection, and lose it.
+        return "no permission to write to it"
     try:
         text = _read_text(path)
         if not text.strip():

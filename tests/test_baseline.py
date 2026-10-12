@@ -1050,6 +1050,60 @@ def test_bad_write_targets_are_refused_before_the_scan(tmp_path, monkeypatch, ca
     assert sorted(p.name for p in tmp_path.iterdir()) == ["adir"]
 
 
+def test_write_target_that_is_not_a_regular_file_is_refused(write, tmp_path, monkeypatch, capsys):
+    """A device or a named pipe is never read: on a pipe, that read would wait for ever."""
+    if os.path.isfile(os.devnull) or not os.path.exists(os.devnull):
+        pytest.skip("this system does not show its null device as a file that is not regular")
+    write("app.py", "x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "run", None)  # refused before the scan: run() is never called
+    assert main([".", "--offline", "--write-baseline", os.devnull]) == 2
+    assert capsys.readouterr().err == (
+        f"slopfence: error: can't write baseline {Path(os.devnull)}: it is not a regular file\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("locked", "reason"),
+    [
+        ("ci", "no permission to write in its folder"),
+        ("ci/base.json", "no permission to write to it"),
+    ],
+)
+def test_write_target_without_write_permission_is_refused_before_the_scan(
+    write, tmp_path, monkeypatch, capsys, locked, reason
+):
+    """A folder or a baseline that may not be written to is found before the scan.
+
+    The baseline is replaced through a temporary file next to it. So the folder has to
+    be writable, and a read-only file would be replaced all the same if nobody asked.
+    """
+    write("app.py", "# I hope this helps!\n")
+    (tmp_path / "ci").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--write-baseline", "ci/base.json"]) == 0
+    before = (tmp_path / "ci" / "base.json").read_bytes()
+    write("app.py", "# I hope this helps!\n# Certainly! Here is the code\n")
+    mode = os.stat(locked).st_mode
+    os.chmod(locked, mode & ~0o222)
+    try:
+        if os.access(locked, os.W_OK):
+            pytest.skip("this user may write to it all the same (root, or a folder on Windows)")
+        capsys.readouterr()
+        with monkeypatch.context() as patch:
+            patch.setattr(cli, "run", None)  # refused before the scan: run() is never called
+            assert main([".", "--offline", "--write-baseline", "ci/base.json"]) == 2
+        assert capsys.readouterr().err == (
+            f"slopfence: error: can't write baseline {Path('ci/base.json')}: {reason}\n"
+        )
+        assert (tmp_path / "ci" / "base.json").read_bytes() == before
+        assert os.stat(locked).st_mode == mode & ~0o222
+    finally:
+        os.chmod(locked, mode)  # the temporary folder has to be removable
+    assert main([".", "--offline", "--write-baseline", "ci/base.json"]) == 0
+    assert len(rows(tmp_path / "ci" / "base.json")) == 2
+
+
 def test_write_target_that_cannot_be_read_is_refused(write, tmp_path, monkeypatch, capsys):
     """Nobody can say what an unreadable file holds, so it is not replaced."""
     write("app.py", "x = 1\n")
