@@ -195,6 +195,13 @@ def test_discovery(write, tmp_path):
         ("requests[security, socks]>=2", ("requests", False, False)),
         ("requests [ security , socks_v5 ]", ("requests", False, False)),
         ("requests[]", ("requests", False, False)),
+        # pip fills in an environment variable before it reads the line.
+        ("ghost-lib[${EXTRAS}]==1.0", ("ghost-lib", False, False)),
+        ("apache-airflow[celery, ${AIRFLOW_EXTRAS}]", ("apache-airflow", False, False)),
+        (
+            "corp-lib[${EXTRAS}] @ git+https://git.corp.example/corp-lib.git",
+            ("corp-lib", True, False),
+        ),
         ("zope.interface (>=5.0)", ("zope.interface", False, False)),
         ("corp-lib @ https://example.com/corp.whl", ("corp-lib", True, False)),
         # A direct reference in every form: a path, a Hatch context, no space, a URL
@@ -239,6 +246,10 @@ def test_requirement_strings(spec, expected):
         "requests[security socks]",
         "requests[security,]",
         "requests[{{ extras }}]",
+        # pip expands ${VAR} in capitals and nothing else.
+        "requests[${extras}]",
+        "requests[$EXTRAS]",
+        "requests[${EXTRAS} ${MORE}]",
         # File names.
         "mypkg-1.0-py3-none-any.whl",
         "vendor.tar.gz",
@@ -308,6 +319,17 @@ def test_requirement_lines_must_be_requirements(tmp_path, write):
         ("from-git", 7, False),
         ("direct", 8, False),
     ]
+
+
+def test_extras_from_an_environment_variable_keep_a_line_a_requirement(write, check):
+    """``name[${EXTRAS}]`` is a requirement for pip. So the invented name on such a line
+    is reported, and a package that such a line takes from git is not looked up in
+    the file that names it again."""
+    write("requirements.txt", f"requests\nghost-lib[${{EXTRAS}}]==1.0\ncorp-auth[${{X}}] @ {GIT}\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    corp-auth\n")
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [("requirements.txt", 2, 1)]
+    assert registry.queries == ["requests", "ghost-lib"]
 
 
 SPACES = " " * 5000

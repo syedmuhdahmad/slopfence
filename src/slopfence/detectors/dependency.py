@@ -71,18 +71,21 @@ _WORDS = re.compile(r"[a-z]+")
 
 _OPERATOR = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_EXTRA = rf"(?:{_NAME}|\$\{{[A-Z0-9_]+\}})"
 # A PEP 508 requirement: a name, optional extras, then nothing, a version specifier
 # (which may stand in brackets), a marker or a direct reference. Anything else is not
 # a requirement ("https://x/y.whl", "this is prose", "add_test(NAME x)", "2>&1"). The
 # extras are names with commas between them, as pip reads them: "[security, socks]"
-# is a list of extras, and bindep's "[platform:dpkg]" is not. A version may start
-# with "$" or "{": pip expands ${VAR}, and templates fill in {{ version }}. No
-# two parts next to each other can match the same white space: if they could, a line
-# with a long run of spaces would take hours to turn down.
+# is a list of extras, and bindep's "[platform:dpkg]" is not. An extra may be an
+# environment variable, in the one form that pip expands before it reads the line:
+# "[${EXTRAS}]". A version may start with "$" or "{": pip expands ${VAR}, and
+# templates fill in {{ version }}. No two parts next to each other can match the same
+# white space: if they could, a line with a long run of spaces would take hours to
+# turn down.
 _REQUIREMENT = re.compile(
     rf"""^\s*
     (?P<name>{_NAME})
-    (?:\s*(?P<extras>\[\s*(?:{_NAME}\s*(?:,\s*{_NAME}\s*)*)?\]))?
+    (?:\s*(?P<extras>\[\s*(?:{_EXTRA}\s*(?:,\s*{_EXTRA}\s*)*)?\]))?
     \s*(?P<rest>$|[;@].*$|(?:\(\s*)?{_OPERATOR}\s*[A-Za-z0-9*${{].*$)""",
     re.X | re.S,
 )
