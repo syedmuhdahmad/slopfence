@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from slopfence import __version__
+from slopfence.files import replace_text
 
 EXISTS_TTL = 7 * 24 * 3600
 MISSING_TTL = 24 * 3600
@@ -90,18 +91,12 @@ class PyPIRegistry:
         """Write the cache file, if anything changed. Called once, at the end of a run."""
         if not self._dirty:
             return
-        # A temporary file is written and renamed over the cache, so that another
-        # slopfence process never reads a half-written file.
-        tmp = self.cache_file.with_name(f"{self.cache_file.name}.{os.getpid()}.tmp")
-        try:
+        # A cache that can't be written only costs the next run its lookups.
+        with contextlib.suppress(OSError):
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(self._cache), encoding="utf-8")
-            os.replace(tmp, self.cache_file)
+            # In one step, so that another slopfence process never reads half a file.
+            replace_text(self.cache_file, json.dumps(self._cache))
             self._dirty = False
-        except OSError:
-            # A cache that can't be written only costs the next run its lookups.
-            with contextlib.suppress(OSError):
-                tmp.unlink()
 
     def exists(self, name: str) -> bool | None:
         """Whether PyPI has the package: from the cache if that is fresh, else one request.
