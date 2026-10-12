@@ -201,9 +201,9 @@ Known limits: a list for another tool whose names mostly exist on PyPI too (`git
 
 - Only `SLOP001` reads notebooks, and only their code cells.
 - Every notebook of the project is read in every run, also when the run checks other files (one file, as the pre-commit hook does). So a package that a notebook installs from git or a URL is not looked up in the file you check. Only the notebooks you check are looked up themselves.
-- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
+- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. Neither does a `pip install` in another form than the ones in the table above (`pip -q install x`, `sudo pip install x`, `/usr/bin/pip install x`). An index or links option in such a command still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
 - With `--check-imports`, the imports of a notebook are only looked up when the notebook installs everything it uses by name. A module that a cell writes (`%%writefile utils.py`) is the notebook's own. The imports are not looked up at all when any import may come from a place slopfence can't see:
-  - One of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, or a command with an option slopfence doesn't know.
+  - One of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, a command with an option slopfence doesn't know, or a `pip install` in a form it doesn't read (`sudo pip install x`).
   - It installs with another tool: `conda install` or `mamba install` (also `%conda install`), `uv add`, `poetry add` or `pipenv install`. slopfence reads no package name from such a line.
   - It brings in code at run time with a shell command: `git clone`, `wget`, `curl`, `unzip`, `gdown` or `cp -r`.
   - It changes where Python looks for modules: a `%cd` line, `os.chdir`, or the text `sys.path` or `PYTHONPATH` in a code cell.

@@ -35,6 +35,7 @@ from slopfence.detectors.pip_commands import (
     pip_install_arguments,
     pip_requirements,
     shell_commands,
+    unread_pip_install,
 )
 from slopfence.source import (
     IGNORE_FILE_RE,
@@ -445,6 +446,8 @@ def _offset(lines: list[str], lineno: int, col: int) -> int:
 def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
     """Every ``pip install`` command of a cell, and every command that brings in code
     in another way (see ``_brings_code``): that one as an install that names nothing.
+    So does a ``pip install`` in a form that is not read (``sudo pip install``), with
+    the index and links options that it holds.
 
     Yields what the command says, and whether an ignore comment covers it. The
     comment may be at the end of the command, which is the end of its last line
@@ -464,8 +467,11 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
         )
         magic = cell.text[offset - 1 : offset] == "%"
         for words in commands:
-            if arguments := pip_install_arguments(words):
+            arguments = pip_install_arguments(words)
+            if arguments is not None:
                 yield pip_requirements(arguments), ignored
+            elif unread := unread_pip_install(words):
+                yield unread, ignored
             elif words and _brings_code(words, magic):
                 yield PipInstall(unnamed=True), ignored
 

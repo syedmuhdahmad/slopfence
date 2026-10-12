@@ -365,6 +365,19 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!pip install --pre --ind {PRIVATE} corp-a\n",
         "!pip install --find ./wheels corp-a\n",
         "!pip install --no-ind corp-a\n",
+        # pip in a form that is not read: no package of the command is named, and
+        # what it says about an index or links still counts.
+        f"!pip -q install -i {PRIVATE} corp-a\n",
+        f"%pip -q install --index {PRIVATE} corp-a\n",
+        f"!pip --no-cache-dir install --default-index {PRIVATE} corp-a\n",
+        "!pip -q install -f ./wheels corp-a\n",
+        "!pip --quiet install --no-index corp-a\n",
+        f"!sudo pip install -i {PRIVATE} corp-a\n",
+        f"!sudo -H pip3 install -qi {PRIVATE} corp-a\n",
+        f"!python -m pip -q install --index {PRIVATE} corp-a\n",
+        f"!env X=1 pip install -i {PRIVATE} corp-a\n",
+        f"!X=1 /usr/bin/pip install -i {PRIVATE} corp-a\n",
+        f"!time C:\\\\Python\\\\Scripts\\\\pip install -i {PRIVATE} corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):
@@ -374,6 +387,48 @@ def test_a_private_source_covers_the_whole_notebook(write, check, cell):
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry, check_imports=True)
     assert result.findings == [] and registry.queries == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "!sudo pip install ./pkg",
+        "!pip -q install ./pkg",
+        "!python -m pip -q install -e .",
+        "!sudo pip install -r requirements.txt",
+        "!sudo -H pip install corp-auth",
+    ],
+)
+def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installed, command):
+    """``sudo pip install x`` and ``pip -q install x`` install something, and no name
+    is read from them. So the notebook's imports are not looked up, as after a pip
+    line that installs a path. Its other pip lines still are."""
+    cells = [command + "\n", "%pip install ghost-lib\nimport corp_auth, somepkg_zz\n"]
+    write("nb.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-lib"] and registry.queries == ["ghost-lib"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "!sudo pip freeze",
+        "!pip --version",
+        "!sudo -i true",
+        f"!sudo -i {PRIVATE} apt-get install -y libpq-dev",
+        "!pipenv --version",
+        "!echo install pip",
+        "!pip download ghost-lib",
+    ],
+)
+def test_a_command_that_is_no_pip_install_changes_nothing(write, check, not_installed, command):
+    """The look-alike cases: pip without ``install``, ``install`` without pip, and an
+    option of another program. The notebook's package and import are looked up."""
+    write("nb.ipynb", jupyter([command + "\n", "%pip install ghost-lib\nimport ghost_mod_zz\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-lib", "ghost_mod_zz"]
 
 
 @pytest.mark.parametrize(

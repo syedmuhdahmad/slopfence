@@ -232,7 +232,8 @@ def _package(word: Word) -> tuple[str, Word, bool] | None:
 
 
 def _unread(arguments: list[Word]) -> PipInstall:
-    """What is known of a command that has an option this module doesn't know.
+    """What is known of a command that has an option this module doesn't know, or
+    that runs pip in a form this module doesn't read.
 
     None of its packages: the value of the unknown option could be taken for one.
     An index or links option among its words still says that packages may come
@@ -257,6 +258,23 @@ def _unread(arguments: list[Word]) -> PipInstall:
         if index or links:
             found.source_options.append((word.start, word.end))
     return found
+
+
+def unread_pip_install(words: list[Word]) -> PipInstall | None:
+    """What is known of a command that runs ``pip install`` in a form that
+    ``pip_install_arguments`` does not take, or None when the command is none.
+
+    That is a command with a pip word (``pip``, ``/usr/bin/pip3``) and the word
+    ``install`` somewhere after it: ``pip -q install x``, ``sudo pip install x``,
+    ``env X=1 python -m pip --quiet install x``. Where its packages start can't be
+    told with certainty, so it names none (see ``_unread``). Its index and links
+    options count, from the pip word on: an option of ``sudo`` is none of pip's.
+    """
+    names = [word.text.replace("\\", "/").rpartition("/")[2] for word in words]
+    at = next((n for n, name in enumerate(names) if _PIP.match(name)), None)
+    if at is None or "install" not in names[at + 1 :]:
+        return None
+    return _unread(words[at + 1 :])
 
 
 def pip_requirements(arguments: list[Word]) -> PipInstall:
