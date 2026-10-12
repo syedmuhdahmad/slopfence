@@ -222,7 +222,7 @@ If your packages may come from an index other than PyPI, a name that PyPI doesn'
 
 | Where | What counts as private |
 |---|---|
-| Requirements files | `-i` / `--index-url` / `--extra-index-url` with a non-PyPI URL, `-f` / `--find-links`, `--no-index`: that file's packages |
+| Requirements files | `-i` / `--index-url` / `--extra-index-url` with a non-PyPI URL, `-f` / `--find-links`, `--no-index`, on a line of options or after a requirement: that file's packages |
 | `pyproject.toml` | `[[tool.poetry.source]]` (except `explicit` ones), `[[tool.uv.index]]` (except `explicit` ones), `[tool.uv] index-url` / `extra-index-url` (also under `[tool.uv.pip]`), `[[tool.pdm.source]]`: that file's packages. A per-dependency Poetry `source` or `[tool.uv.sources]` entry: that package |
 | `Pipfile`, `Pipfile.lock` | A `[[source]]` that isn't PyPI: that `Pipfile`'s packages. An entry with `git`, `path`, `file`, `url`, or an `index` that is not a PyPI source: that package |
 | `setup.cfg`, `setup.py` | `dependency_links`, and in `setup.cfg` also `[easy_install]` with `find_links` or with an `index_url` that is not PyPI: that file's packages, and those of the `setup.py` or `setup.cfg` in the same folder (setuptools reads the two as one) |

@@ -423,11 +423,13 @@ def test_a_links_option_counts_anywhere_on_an_option_line(write, check, line):
         "--pre --index-url https://pypi.org/simple",
         "--extra-index-url=https://pypi.org/simple --prefer-binary",
         "-ihttps://pypi.org/simple",
-        # Not options of the file: a hash that continues a requirement, an option
-        # after a requirement (pip does not take an index from there), a comment.
+        # Not an index of the file: a hash that continues a requirement, PyPI's
+        # address after a requirement, a comment, words of a sentence.
         "--hash=sha256:abc --hash=sha256:fff",
-        f"requests --index-url {PRIVATE}",
+        "requests --index-url https://pypi.org/simple",
+        "requests --hash=sha256:abc --global-option=--index-url",
         f"# --extra-index-url {PRIVATE}",
+        f"this file is installed with --index-url {PRIVATE}",
         "--editable ./local --install-option=--fast",
     ],
 )
@@ -437,6 +439,44 @@ def test_lines_that_name_no_private_index(write, check, line):
     registry = FakeRegistry({"requests"})
     result = check("SLOP001", registry=registry)
     assert found(result) == [("requirements.txt", 2, 1)] and result.notes == []
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        f"--extra-index-url {PRIVATE}",
+        f"--index-url={PRIVATE}",
+        f"-i {PRIVATE}",
+        "--extra-index-url https://pkgs.corp.example/simple",
+        f"; python_version < '3.12' --index-url {PRIVATE}",
+    ],
+)
+def test_an_index_option_after_a_requirement_makes_the_file_private(write, tmp_path, option):
+    """``corp-auth==1.0 --extra-index-url URL``: pip takes no index from the end of a
+    requirement line, but whoever wrote the line meant one. v0.2 kept such a name on
+    the machine when the URL held a password. Now the file is private, for itself
+    and for the files that inherit from it, also when one of them is checked alone."""
+    write("requirements.txt", f"requests==2.32.0\ncorp-auth==1.0 {option}\n")
+    setup = write(
+        "setup.py", "from setuptools import setup\nsetup(install_requires=['corp-core'])\n"
+    )
+    for paths in ([tmp_path], [setup]):
+        registry = FakeRegistry({"requests"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == []
+        assert "a private package index is set in requirements.txt" in result.notes[0]
+        assert "secret" not in result.notes[0]
+
+
+@pytest.mark.parametrize("option", ["--find-links https://u:p@files.corp.example/w", "--no-index"])
+def test_a_links_option_after_a_requirement_covers_its_file(write, check, option):
+    """The same for ``--find-links`` and ``--no-index``, which cover their own file
+    and no other."""
+    write("requirements.txt", f"requests==2.32.0\ncorp-auth==1.0 {option}\n")
+    write("constraints.txt", "ghost-pin==1.0\n")
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [("constraints.txt", 1, 1)]
+    assert registry.queries == ["ghost-pin"]
 
 
 APT_LIST = "build-essential\nlibpq-dev\nlibxml2-dev\nrequests\n"

@@ -353,14 +353,18 @@ def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
     The first answer is a non-PyPI ``--index-url`` or ``--extra-index-url``. The
     second is ``--find-links`` or ``--no-index``: no index, but a name that PyPI
     doesn't have may come from there. pip reads options from a line that starts
-    with one, and such a line may hold several.
+    with one, and such a line may hold several. A requirement that goes on with one
+    (``corp-auth==1.0 --extra-index-url ...``) counts too: pip takes no index from
+    there, but whoever wrote the line meant one.
     """
     index = links = False
     for raw in lines:
         words = REQ_COMMENT.sub("", raw).split()
-        if not words or not words[0].startswith("-"):
+        first = next((n for n, word in enumerate(words) if word.startswith("-")), None)
+        if first is None or (first and parse_requirement(" ".join(words[:first])) is None):
             continue
-        for word, following in zip(words, [*words[1:], ""], strict=True):
+        options = words[first:]
+        for word, following in zip(options, [*options[1:], ""], strict=True):
             if is_pip_option(word, "-f", LINKS_OPTION_STARTS):
                 links = True
             elif is_pip_option(word, "-i", INDEX_OPTION_STARTS):
