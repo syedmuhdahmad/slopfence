@@ -103,17 +103,17 @@ def _not_excluded(files: list[Path], root: Path, exclude: Sequence[str]) -> list
 
 
 def _dependency_files_to_read(
-    project: list[Path], checked: list[Path], root: Path, exclude: Sequence[str], imports: bool
+    project: list[Path], checked: list[Path], root: Path, exclude: Sequence[str]
 ) -> list[Path]:
-    """The dependency files that SLOP001 reads: the checked ones, and more of the project.
+    """The dependency files that SLOP001 reads: the checked ones, and the rest of the project.
 
-    Every file of the project but a notebook is read, wherever it is: a private
-    index, or the name of one of the project's own packages, counts for the whole
-    project. A notebook says less and costs more. It is read when it is checked.
-    With ``imports`` the others are read too, for the packages they install, unless
-    they are excluded.
+    Every file of the project is read, wherever it is and whichever paths the run
+    checks: a private index, the name of one of the project's own packages, or a
+    package that one file takes from git or a URL counts for the whole project. An
+    excluded notebook is the one exception. A notebook is the biggest kind of file
+    to read, and ``exclude`` is how a project leaves its notebooks out.
     """
-    notebooks = _not_excluded(project, root, exclude) if imports else []
+    notebooks = _not_excluded(project, root, exclude)
     return sorted(
         {
             *checked,
@@ -330,7 +330,7 @@ def run(
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        to_read = _dependency_files_to_read(project[1], dep_files, root, exclude, check_imports)
+        to_read = _dependency_files_to_read(project[1], dep_files, root, exclude)
         index = build_index(root, project[0], to_read, project[2], imports=check_imports)
         checker = PackageChecker(
             index,

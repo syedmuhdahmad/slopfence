@@ -1647,6 +1647,13 @@ def test_own_names_count_in_excluded_folders_too(write, check):
 # --- A package that one file takes from a place of its own -----------------------------
 
 GIT = "git+https://git.corp.example/corp/corp-auth.git"
+
+
+def one_cell_notebook(line):
+    """The text of a notebook whose one code cell holds ``line``."""
+    return json.dumps({"nbformat": 4, "cells": [{"cell_type": "code", "source": [line]}]})
+
+
 # Each file says where ``corp-auth`` comes from, in its own way.
 SOURCED = {
     "direct reference": ("requirements.txt", f"corp-auth @ {GIT}@v1\nrequests\n"),
@@ -1677,6 +1684,12 @@ SOURCED = {
     "setup.cfg direct reference": (
         "setup.cfg",
         f"[options]\ninstall_requires =\n    corp-auth @ {GIT}\n    requests\n",
+    ),
+    # A notebook is read in every run, also when it is not among the checked files.
+    "notebook egg": ("nb/train.ipynb", one_cell_notebook(f"%pip install {GIT}#egg=corp-auth\n")),
+    "notebook direct reference": (
+        "nb/setup.ipynb",
+        one_cell_notebook(f"!pip install requests 'corp-auth @ {GIT}'\n"),
     ),
 }
 # The files that name the package again, without saying where it comes from.

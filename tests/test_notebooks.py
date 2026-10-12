@@ -656,15 +656,16 @@ def test_a_notebook_whose_installs_all_have_names_has_its_imports_looked_up(
 
 
 def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):
-    """A notebook is read when it is checked. With ``check_imports`` the other
-    notebooks of the project are read too, because what they install is declared.
-    An excluded notebook is never read."""
+    """Every notebook of the project is read in every run, also one that is not
+    checked: a package that it installs from git or a URL is the same package in the
+    other files. Its imports are only collected with ``check_imports``. An excluded
+    notebook is never read."""
     read = []
     real = packages.scan_notebook
     monkeypatch.setattr(
         packages,
         "scan_notebook",
-        lambda text, rel, imports: read.append(rel) or real(text, rel, imports),
+        lambda text, rel, imports: read.append((rel, imports)) or real(text, rel, imports),
     )
     write("nb/a.ipynb", jupyter(["%pip install ghost-a\nimport from_b, from_skipped\n"]))
     write("nb/b.ipynb", jupyter(["%pip install from-b\n"]))
@@ -672,12 +673,14 @@ def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):
     one = [tmp_path / "nb" / "a.ipynb"]
     registry = FakeRegistry(set())
     result = run(one, tmp_path, registry, select=["SLOP001"], exclude=["old"])
-    assert subjects(result) == ["ghost-a"] and read == ["nb/a.ipynb"]
+    assert sorted(read) == [("nb/a.ipynb", False), ("nb/b.ipynb", False)]
+    # The other notebook is read, not checked: its own package is not looked up.
+    assert subjects(result) == ["ghost-a"] and registry.queries == ["ghost-a"]
 
     read.clear()
     registry = FakeRegistry(set())
     result = run(one, tmp_path, registry, select=["SLOP001"], exclude=["old"], check_imports=True)
-    assert sorted(read) == ["nb/a.ipynb", "nb/b.ipynb"]
+    assert sorted(read) == [("nb/a.ipynb", True), ("nb/b.ipynb", True)]
     # from-b is declared by the other notebook, so its import is not looked up.
     assert subjects(result) == ["ghost-a", "from_skipped"]
     assert "from-b" not in registry.queries and "from_b" not in registry.queries
