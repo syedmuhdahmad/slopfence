@@ -5,7 +5,7 @@ from slopfence.analysis import FileSummary, Options, analyze_file, analyze_files
 from slopfence.detectors import FILE_DETECTORS
 from slopfence.engine import run
 from slopfence.registry import OfflineRegistry
-from slopfence.source import load
+from slopfence.source import ALL_RULES, load
 from tests.conftest import FakeRegistry
 
 HELPER = '''
@@ -86,7 +86,7 @@ def test_comments_are_not_read_for_a_file_that_is_only_compared_with(write, tmp_
     src = load(path, tmp_path, comments=False)
     assert (src.comments, src.ignores, src.ignore_file) == ([], {}, False)
     src = load(path, tmp_path)
-    assert (len(src.comments), src.ignores, src.ignore_file) == (2, {1: None}, True)
+    assert (len(src.comments), src.ignores, src.ignore_file) == (2, {1: ALL_RULES}, True)
 
 
 def test_analyze_files_keeps_the_order_of_the_tasks(write, tmp_path):

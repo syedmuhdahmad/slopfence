@@ -304,7 +304,7 @@ def test_cli_private_index_note_and_override(cli_project, monkeypatch, capsys):
     assert "PIP_INDEX_URL" in out["notes"][0] and "secret" not in out["notes"][0]
 
     assert main([".", "--no-color"]) == 0
-    assert "note: SLOP001 made no PyPI lookups" in capsys.readouterr().out
+    assert "note: SLOP001 and SLOP002 made no PyPI lookups" in capsys.readouterr().out
 
     assert main([".", "--format", "json", "--no-detect-private-index"]) == 1
     assert [f["rule"] for f in json.loads(capsys.readouterr().out)["findings"]] == ["SLOP001"]

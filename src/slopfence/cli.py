@@ -5,6 +5,7 @@ import contextlib
 import os
 import signal
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -12,10 +13,17 @@ from slopfence import __version__, reporters
 from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
 from slopfence.analysis import default_jobs
-from slopfence.config import FAIL_ON, ConfigError, load_config, selected_rules
+from slopfence.config import (
+    FAIL_ON,
+    PACKAGE_AGE,
+    ConfigError,
+    is_package_age,
+    load_config,
+    selected_rules,
+)
 from slopfence.engine import Result, run
 from slopfence.indexes import find_private_index
-from slopfence.models import RULES, Severity, plural
+from slopfence.models import NEW_PACKAGE_DAYS, RULES, Severity, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
@@ -42,6 +50,17 @@ def _jobs(value: str) -> int:
     return jobs
 
 
+def _days(value: str) -> int:
+    """Parse ``--min-package-age``: a whole number of days from 1 to 365."""
+    try:
+        days = int(value)
+    except ValueError:
+        days = 0
+    if not is_package_age(days):
+        raise argparse.ArgumentTypeError(f"{value!r} is not {PACKAGE_AGE}")
+    return days
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser. Options left unset default to None so config can fill them."""
     parser = argparse.ArgumentParser(
@@ -57,7 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=["text", "json", "sarif"], default="text")
     parser.add_argument("-o", "--output", type=Path, help="write the report to a file")
     parser.add_argument(
-        "--offline", action="store_true", help="make no network requests (disables SLOP001)"
+        "--offline",
+        action="store_true",
+        help="make no network requests (disables SLOP001 and SLOP002)",
     )
     parser.add_argument(
         "--select", type=_rule_list, help="comma-separated rules to run (overrides config)"
@@ -73,8 +94,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--known-packages",
         type=lambda v: [p.strip() for p in v.split(",") if p.strip()],
-        help="comma-separated private package names or globs that SLOP001 must accept "
-        "(overrides config)",
+        help="comma-separated package names or globs that SLOP001 and SLOP002 must accept "
+        "without a lookup (overrides config)",
+    )
+    parser.add_argument(
+        "--min-package-age",
+        type=_days,
+        metavar="DAYS",
+        help="SLOP002 reports packages whose oldest file on PyPI is younger than this "
+        f"(1 to 365, default: {NEW_PACKAGE_DAYS}; overrides config)",
     )
     parser.add_argument(
         "--check-imports",
@@ -276,6 +304,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.detect_private_index is not None
         else config.detect_private_index
     )
+    min_package_age = (
+        args.min_package_age if args.min_package_age is not None else config.min_package_age
+    )
     fail_on = Severity(args.fail_on or config.fail_on)
     strict = args.strict if args.strict is not None else config.strict
 
@@ -305,7 +336,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if jobs is None:
         jobs = default_jobs()
 
-    registry = OfflineRegistry() if args.offline else PyPIRegistry()
+    # The one look at the clock: cached answers are fresh or old by it, and SLOP002
+    # counts a package's age from it.
+    now = time.time()
+    registry = OfflineRegistry() if args.offline else PyPIRegistry(now=now)
     private_index = find_private_index(root) if detect_private_index and not args.offline else None
     try:
         result = run(
@@ -324,6 +358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             severity=config.severity,
             baseline=baseline,
             inherit_index=detect_private_index,
+            min_package_age=min_package_age,
+            now=now,
         )
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.

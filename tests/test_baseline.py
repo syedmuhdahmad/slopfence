@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 import random
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -16,10 +17,12 @@ from slopfence import cli
 from slopfence.baseline import Baseline, BaselineError, Scope, key_of, normalize_fingerprint
 from slopfence.cli import main
 from slopfence.config import ignored_rules, load_config
+from slopfence.detectors.packages import PACKAGE_RULES
 from slopfence.engine import run
+from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Finding, plural
-from slopfence.registry import OfflineRegistry, PyPIRegistry
-from tests.conftest import FakeRegistry, git, git_init
+from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry
+from tests.conftest import DAY, FakeRegistry, git, git_init
 
 APP = '''\
 import os
@@ -71,6 +74,7 @@ def test_never_fails():
 # until it has both.
 SUBJECTS = {
     "SLOP001": "flask-jwt-simple-auth",
+    "SLOP002": "brand-new-lib",
     "SLOP010": "In a real implementation, call the payment provider",
     "SLOP011": "validate_token",
     "SLOP020": "test_user",
@@ -83,6 +87,26 @@ SUBJECTS = {
 # How many findings the ``project`` fixture has. Tests count with this and with what the
 # fixture's baseline holds, never with a number: a new rule adds a finding to the fixture.
 TOTAL = len(SUBJECTS)
+# How many of them need an answer from PyPI: an offline run has that many fewer.
+FROM_PYPI = len(PACKAGE_RULES)
+
+
+def pypi_cache(**more):
+    """The text of a cache file with PyPI's answers for the ``project`` fixture, and
+    for ``more`` packages: no run with it sends a request.
+
+    ``flask-jwt-simple-auth`` is missing (SLOP001), and ``brand-new-lib`` was first
+    uploaded five days ago (SLOP002).
+    """
+    uploaded = int(time.time()) - 5 * DAY
+    answers = {
+        "requests": [True, 9e12],
+        "flask-jwt-simple-auth": [False, 9e12],
+        "brand-new-lib": [True, 9e12],
+        **more,
+        "_meta": {"brand-new-lib": [uploaded, 1, "active", 9e12]},
+    }
+    return json.dumps(answers)
 
 
 @pytest.fixture
@@ -93,7 +117,7 @@ def project(tmp_path, monkeypatch):
         "src/dates.py": HELPER.format(name="format_date"),
         "src/utils.py": HELPER.format(name="fmt_date"),
         "tests/test_app.py": TESTS,
-        "requirements.txt": "requests>=2\nflask-jwt-simple-auth==1.0\n",
+        "requirements.txt": "requests>=2\nflask-jwt-simple-auth==1.0\nbrand-new-lib\n",
     }
     for rel, text in files.items():
         path = tmp_path / rel
@@ -101,10 +125,7 @@ def project(tmp_path, monkeypatch):
         path.write_text(text, encoding="utf-8")
     cache = tmp_path / "cache" / "slopfence"
     cache.mkdir(parents=True)
-    (cache / "pypi.json").write_text(
-        json.dumps({"requests": [True, 9e12], "flask-jwt-simple-auth": [False, 9e12]}),
-        encoding="utf-8",
-    )
+    (cache / "pypi.json").write_text(pypi_cache(), encoding="utf-8")
     monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -169,7 +190,7 @@ GONE = "{} in the baseline no longer {}. Run --write-baseline again to update th
 
 def test_every_rule_names_a_subject(project):
     """Each rule says what its finding is about, so a baseline survives edits."""
-    result = run([project], project, FakeRegistry({"requests"}))
+    result = run([project], project, PyPIRegistry())  # the answers are in the pinned cache
     assert {f.rule: f.subject for f in result.findings} == SUBJECTS
     assert len(result.findings) == len(SUBJECTS)
     # Every rule in RULES, not a hand-written list: a new rule without a finding in
@@ -262,10 +283,7 @@ def test_baselined_findings_stay_hidden_when_lines_are_added_above(project, caps
         prepend(project / rel, "# a new comment\n\nNEW_CONSTANT = 1\n\n")
     prepend(project / "requirements.txt", "# pinned by ops\nidna\n")
     (project / "cache" / "slopfence" / "pypi.json").write_text(
-        json.dumps(
-            {"requests": [True, 9e12], "idna": [True, 9e12], "flask-jwt-simple-auth": [False, 9e12]}
-        ),
-        encoding="utf-8",
+        pypi_cache(idna=[True, 9e12]), encoding="utf-8"
     )
     # Without the baseline every finding is there, four lines (two in requirements) down.
     code, moved = report(capsys)
@@ -284,7 +302,9 @@ def test_unrelated_edits_keep_findings_hidden(project, capsys):
     edit(app, "def validate_token(token):", "def validate_token(token, *, strict=False):")
     edit(app, "    # In a real implementation, call", "    #In a real implementation,   call")
     edit(app, "return open(path).read()", "return open(path, encoding='utf-8').read()")
-    (project / "requirements.txt").write_text("requests>=3\nflask-jwt-simple-auth>=2.0  # new\n")
+    (project / "requirements.txt").write_text(
+        "requests>=3\nflask-jwt-simple-auth>=2.0  # new\nBrand_New.lib[extra]>=0.2\n"
+    )
     # The SLOP030 message names dates.py:1. It moves; the finding is still about fmt_date.
     prepend(project / "src" / "dates.py", "import datetime\n")
     code, after = report(capsys, "--baseline", "base.json")
@@ -389,8 +409,10 @@ def test_baseline_hides_old_findings_on_changed_lines(write, tmp_path, monkeypat
 
 def test_baseline_with_fail_on_select_and_severity(project, capsys):
     """Only the findings the baseline doesn't hide count for --fail-on."""
-    main([".", "--select", "SLOP001,SLOP020,SLOP022", "--write-baseline", "high.json"])
-    assert [row[1] for row in rows(project / "high.json")] == ["SLOP001", "SLOP020", "SLOP022"]
+    high = sorted(rule.id for rule in RULES.values() if rule.severity.value == "high")
+    main([".", "--select", ",".join(high), "--write-baseline", "high.json"])
+    assert [row[1] for row in rows(project / "high.json")] == high
+    assert high == ["SLOP001", "SLOP002", "SLOP020", "SLOP022"]
     # Every high finding is baselined; the rest are medium or low.
     assert main([".", "--baseline", "high.json", "--fail-on", "high"]) == 0
     assert main([".", "--baseline", "high.json", "--fail-on", "medium"]) == 1
@@ -400,7 +422,7 @@ def test_baseline_with_fail_on_select_and_severity(project, capsys):
     # A severity from the config changes a label, never what the baseline matches.
     (project / "pyproject.toml").write_text('[tool.slopfence.severity]\nSLOP001 = "low"\n')
     code, after = report(capsys, "--baseline", "high.json", "--fail-on", "high")
-    assert (code, after["baselined"]) == (0, 3)
+    assert (code, after["baselined"]) == (0, len(high))
 
 
 def test_sarif_leaves_baselined_findings_out(project, capsys):
@@ -1300,31 +1322,40 @@ def test_write_baseline_with_strict_and_a_file_that_cannot_be_parsed(write, tmp_
 # --- a baseline written without answers from PyPI ---------------------------------------
 
 MAY_BE_MISSING = (
-    "SLOP001 findings may be missing from the baseline: PyPI was not asked, or did not "
+    "SLOP001 and SLOP002 findings may be missing from the baseline: PyPI was not asked, or did not "
     "answer, about some packages (offline, a private package index, or PyPI could not be "
     "reached). Write it again when lookups work."
 )
 
 
 def test_write_baseline_says_when_package_findings_may_be_missing(project, capsys, monkeypatch):
-    """A baseline written without answers from PyPI lacks SLOP001 findings; the report says so."""
+    """A baseline written without answers from PyPI lacks the findings of the package
+    rules; the report says so."""
 
     def notes(*args):
         """The notes of a run that writes a baseline with the given options."""
         return report(capsys, "--write-baseline", "base.json", *args)[1]["notes"]
 
     wrote_all = f"Wrote {TOTAL} findings to the baseline base.json."
-    without_slop001 = f"Wrote {TOTAL - 1} findings to the baseline base.json."
+    without_answers = f"Wrote {TOTAL - FROM_PYPI} findings to the baseline base.json."
     assert notes() == [wrote_all]  # every lookup answered
-    assert notes("--offline") == [without_slop001, MAY_BE_MISSING]
-    # Nothing to say when the rule is off, or when there is no name to look up.
-    assert notes("--offline", "--ignore", "SLOP001") == [without_slop001]
-    assert notes("--offline", "--exclude", "requirements.txt") == [without_slop001]
+    assert notes("--offline") == [without_answers, MAY_BE_MISSING]
+    # Nothing to say when the rules are off, or when there is no name to look up.
+    assert notes("--offline", "--ignore", "SLOP001,SLOP002") == [without_answers]
+    assert notes("--offline", "--ignore", "SLOP001") == [without_answers]  # SLOP002 needs it
+    assert notes("--offline", "--exclude", "requirements.txt") == [without_answers]
+    # One of the two rules is off: only the other one is named.
+    assert notes("--offline", "--ignore", "SLOP002") == [
+        without_answers,
+        MAY_BE_MISSING.replace("SLOP001 and SLOP002", "SLOP001"),
+    ]
     # A private index in the environment: the note that was there explains, this one warns.
     monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.corp.example/simple")
     with_index = notes()
-    assert with_index[0].startswith("SLOP001 made no PyPI lookups: a private package index")
-    assert with_index[1:] == [without_slop001, MAY_BE_MISSING]
+    assert with_index[0].startswith(
+        "SLOP001 and SLOP002 made no PyPI lookups: a private package index"
+    )
+    assert with_index[1:] == [without_answers, MAY_BE_MISSING]
     assert "corp.example" not in " ".join(with_index)  # an index URL is never printed
     monkeypatch.delenv("PIP_INDEX_URL")
     # A run that uses a baseline never prints it.
@@ -1360,11 +1391,19 @@ def test_nothing_is_missing_when_there_was_no_name_to_ask_about(
 def test_write_baseline_says_when_pypi_did_not_answer(project, capsys, monkeypatch, unanswered):
     """PyPI out of reach, or no answer for one name only: its finding may be missing."""
     (project / "cache" / "slopfence" / "pypi.json").write_text("{}", encoding="utf-8")
+    answers = {
+        "requests": Lookup(True),
+        "flask-jwt-simple-auth": Lookup(False),
+        "brand-new-lib": Lookup(True, PackageInfo(int(time.time()) - 5 * DAY, 1, "active")),
+    }
     monkeypatch.setattr(
-        PyPIRegistry, "_query", lambda self, key: None if key in unanswered else key == "requests"
+        PyPIRegistry, "_query", lambda self, key: None if key in unanswered else answers[key]
     )
     code, after = report(capsys, "--write-baseline", "base.json")
     assert code == 0
+    assert [row[1] for row in rows(project / "base.json") if row[0] == "requirements.txt"] == [
+        "SLOP002"  # the one answer that came, about brand-new-lib
+    ]
     assert after["notes"] == [
         f"Wrote {TOTAL - 1} findings to the baseline base.json.",
         MAY_BE_MISSING,
@@ -1383,14 +1422,17 @@ def test_result_names_the_package_rules_that_ran_without_answers(write, check):
 
     write("requirements.txt", "requests\n")
     write("app.py", "import os\n")
+    both = ["SLOP001", "SLOP002"]
     assert check(registry=FakeRegistry({"requests"})).unchecked_rules == []
-    assert check().unchecked_rules == ["SLOP001"]  # offline: nobody was asked
-    assert check("SLOP010").unchecked_rules == []  # the package rule did not run
-    assert check(registry=FakeRegistry({"requests"}), private_index="pip.conf").unchecked_rules == [
-        "SLOP001"
-    ]
+    assert check().unchecked_rules == both  # offline: nobody was asked
+    assert check("SLOP010").unchecked_rules == []  # no package rule ran
+    assert check(ignore=["SLOP002"]).unchecked_rules == ["SLOP001"]
+    assert check("SLOP002").unchecked_rules == ["SLOP002"]
+    assert check(ignore=["SLOP001"]).unchecked_rules == []  # SLOP002 does not run without it
+    with_index = check(registry=FakeRegistry({"requests"}), private_index="pip.conf")
+    assert with_index.unchecked_rules == both
     write("requirements.txt", "requests\nno-answer-zz\n")
-    assert check(registry=Silent({"requests"})).unchecked_rules == ["SLOP001"]
+    assert check(registry=Silent({"requests"})).unchecked_rules == both
     # A name that was never asked about (the file is ignored for SLOP001) leaves nothing open.
     quiet = check(registry=Silent({"requests"}), per_file_ignores={"requirements.txt": ["SLOP001"]})
     assert quiet.unchecked_rules == []
@@ -1411,12 +1453,13 @@ def test_offline_import_checks_count_as_unanswered(write, check):
 
 
 def test_gone_findings_are_only_reported_when_the_run_could_find_them(project, capsys):
-    """Fixed findings are pointed out. Skipped files, skipped rules and SLOP001 are not."""
+    """Fixed findings are pointed out. Skipped files, skipped rules and the package
+    rules are not."""
     main([".", "--write-baseline", "base.json"])
     found = per_file(project / "base.json")
-    # Offline: SLOP001 finds nothing, but its row must not look fixed.
+    # Offline: the package rules find nothing, but their rows must not look fixed.
     code, after = report(capsys, "--offline", "--baseline", "base.json")
-    assert (code, after["notes"], after["baselined"]) == (0, [], TOTAL - 1)
+    assert (code, after["notes"], after["baselined"]) == (0, [], TOTAL - FROM_PYPI)
     # A file that is excluded is not checked: its rows say nothing.
     code, after = report(capsys, "--exclude", "tests", "--baseline", "base.json")
     assert (code, after["notes"]) == (0, [])
@@ -1579,6 +1622,7 @@ def test_baseline_file_is_sorted_stable_and_ascii(project):
     assert len(text.splitlines()) == len(found) + 5
     assert found == [
         ["requirements.txt", "SLOP001", "flask-jwt-simple-auth", 1],
+        ["requirements.txt", "SLOP002", "brand-new-lib", 1],
         ["src/app.py", "SLOP010", "In a real implementation, call the payment provider", 1],
         ["src/app.py", "SLOP011", "validate_token", 1],
         ["src/app.py", "SLOP040", "load", 1],

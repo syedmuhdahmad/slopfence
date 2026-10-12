@@ -79,16 +79,11 @@ class FileSummary:
     imports: list[tuple[str, int, int]] = field(default_factory=list)
     # The file's ignore comments, as in ``SourceFile``.
     ignore_file: bool = False
-    ignores: dict[int, set[str] | None] = field(default_factory=dict)
+    ignores: dict[int, frozenset[str]] = field(default_factory=dict)
 
     def is_ignored(self, rule: str, line: int) -> bool:
         """Whether an ignore comment in the file covers ``rule`` on ``line``."""
-        if self.ignore_file:
-            return True
-        if line not in self.ignores:
-            return False
-        rules = self.ignores[line]
-        return rules is None or rule in rules
+        return self.ignore_file or rule in self.ignores.get(line, ())
 
 
 def analyze_file(options: Options, task: Task) -> FileSummary:

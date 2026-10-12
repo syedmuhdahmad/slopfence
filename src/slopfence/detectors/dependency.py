@@ -1,4 +1,4 @@
-"""What every dependency parser shares (SLOP001).
+"""What every dependency parser shares (SLOP001, SLOP002).
 
 * ``kind_of`` decides, from a file's name and folder, whether it declares
   dependencies and which parser reads it.
@@ -21,8 +21,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
 from typing import NamedTuple
-
-from slopfence.source import IGNORE_RE
 
 
 class Kind(str, Enum):
@@ -133,14 +131,23 @@ class Dependency:
     line: int
     # False for packages that don't come from PyPI (URLs, paths, git, private indexes).
     validate: bool = True
-    # True when an ignore directive covers SLOP001 on this line or file.
-    suppressed: bool = False
+    # The rules that an ignore directive switches off for this dependency: the ones it
+    # names, or all of them for one that names none and for an ``ignore-file``.
+    ignored: frozenset[str] = frozenset()
     # 1-based column of the requirement. Files with one requirement per line report 1.
     col: int = 1
     # True when the entry itself says where the package comes from: a URL, a path, git,
     # or a package source that it picks by name. That holds for the package, not just
     # for this entry: see ``ProjectIndex.sourced_names``.
     own_source: bool = False
+
+    @property
+    def suppressed(self) -> bool:
+        """Whether an ignore directive covers SLOP001 here.
+
+        The name is then never looked up, so SLOP002 can't report it either.
+        """
+        return "SLOP001" in self.ignored
 
 
 @dataclass
@@ -158,8 +165,13 @@ class DependencyFile:
     # marker, an option). Such a file may be a list for another tool.
     plain_list: bool = False
     # Notebooks only: (top-level module, line, column) of every import in a code cell.
-    # Empty unless they were asked for.
+    # Empty unless they were asked for. An import under an ignore comment that covers
+    # SLOP001 is left out: it is never looked up.
     imports: list[tuple[str, int, int]] = field(default_factory=list)
+    # Notebooks only: the rules that an ignore comment switches off for an import, by
+    # the (line, column) of that import. A line of the file can hold a whole cell, or
+    # the whole notebook, so the line alone does not say which import is meant.
+    import_ignores: dict[tuple[int, int], frozenset[str]] = field(default_factory=dict)
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
     # ``setup.py``, ``setup.cfg`` and ``Pipfile`` only: the file lies under a test folder
@@ -382,15 +394,6 @@ def text_lines(text: str) -> list[str]:
     takes its lines from here.
     """
     return [line.removesuffix("\r") for line in text.split("\n")]
-
-
-def suppresses_slop001(comment: str) -> bool:
-    """Whether a comment holds a ``slopfence: ignore`` directive that covers SLOP001."""
-    m = IGNORE_RE.search(comment)
-    if not m:
-        return False
-    rules = m.group("rules")
-    return rules is None or "SLOP001" in {r.strip().upper() for r in rules.split(",")}
 
 
 def requirements_comment(line: str) -> str:

@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/slopfence/registry.py"
+  - "src/slopfence/listing.py"
   - "src/slopfence/indexes.py"
   - "src/slopfence/detectors/packages.py"
   - "src/slopfence/detectors/dependency.py"
@@ -23,5 +24,5 @@ The README section "What slopfence sends over the network" is a promise to users
 - Send package names and nothing else: no code, no file names, no telemetry.
 - **Never print, log or put in a message an index URL.** It can contain credentials. Say where the index is configured instead (`PIP_INDEX_URL`, `pip.conf`).
 - An index is public only when its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org` (`indexes.is_public_index`). Compare whole hosts, never substrings: TestPyPI is not public.
-- The cache file (`~/.cache/slopfence/pypi.json`) must stay readable by older and newer versions: CI pins answers in it as `{"name": [found, timestamp]}`.
+- The cache file (`~/.cache/slopfence/pypi.json`) must stay readable by older and newer versions: CI pins answers in it as `{"name": [found, timestamp]}`. The facts `SLOP002` uses are kept apart, under the key `_meta`, with a timestamp of their own. An entry without facts is trusted as it is: no request, and no `SLOP002` finding.
 - Tests use `FakeRegistry` or a pinned cache. A test that opens a socket is a bug.

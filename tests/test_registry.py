@@ -6,7 +6,6 @@ import os
 import threading
 import time
 import urllib.error
-import urllib.request
 
 import pytest
 
@@ -16,6 +15,7 @@ from slopfence.registry import (
     LOOKUP_WORKERS,
     MISSING_TTL,
     BatchRegistry,
+    Lookup,
     OfflineRegistry,
     PyPIRegistry,
 )
@@ -117,7 +117,7 @@ def pypi(tmp_path, monkeypatch):
         """Answer like PyPI would, and record the request."""
         with lock:
             asked.append(key)
-        return "ghost" not in key
+        return Lookup("ghost" not in key)
 
     monkeypatch.setattr(PyPIRegistry, "_query", query)
     return PyPIRegistry(tmp_path / "cache"), asked
@@ -135,7 +135,7 @@ def test_eight_requests_are_in_flight_at_once(tmp_path, monkeypatch):
         most.append(len(in_flight))
         together.wait(timeout=10)  # times out, and fails the test, with fewer than 8 threads
         in_flight.remove(key)
-        return True
+        return Lookup(True)
 
     monkeypatch.setattr(PyPIRegistry, "_query", query)
     registry = PyPIRegistry(tmp_path / "cache")
@@ -173,7 +173,7 @@ def test_one_name_or_one_worker_starts_no_thread(tmp_path, monkeypatch):
     def query(self, key):
         """Record which thread sends the request."""
         threads.append(threading.current_thread())
-        return True
+        return Lookup(True)
 
     monkeypatch.setattr(PyPIRegistry, "_query", query)
     PyPIRegistry(tmp_path / "a").prefetch(["only-one"])
@@ -276,7 +276,7 @@ def test_answers_before_a_failure_still_count(tmp_path, monkeypatch):
     def query(self, key):
         """Answer the first name, then fail."""
         if key == "pkg-1":
-            return True
+            return Lookup(True)
         self._unreachable = True
         return None
 
@@ -288,14 +288,14 @@ def test_answers_before_a_failure_still_count(tmp_path, monkeypatch):
 
 
 def test_unknown_answer_for_one_name_is_not_cached(tmp_path, monkeypatch):
-    """A rate limit or server error for one name leaves the others alone. The name
-    stays unknown for this run without a second request, and the next run asks again."""
+    """A name without an answer is not stored, and the answers for the others are. The
+    name stays unknown for this run without a second request, and the next run asks again."""
     asked: list[str] = []
 
     def query(self, key):
-        """Answer like PyPI with one name it can't answer for right now."""
+        """Answer every name but one, without calling PyPI unreachable."""
         asked.append(key)
-        return None if key == "busy-pkg" else True
+        return None if key == "busy-pkg" else Lookup(True)
 
     monkeypatch.setattr(PyPIRegistry, "_query", query)
     registry = PyPIRegistry(tmp_path / "cache", workers=1)
@@ -321,24 +321,26 @@ def test_single_lookup_without_an_answer_is_not_repeated(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_rate_limited_run_sends_one_request_per_name(write, tmp_path, monkeypatch, status):
-    """End to end: PyPI answers every lookup with an error status. Each name is asked
-    about twice (by the batch, then by the check) and still requested once. Nothing
-    is reported, and nothing is cached."""
+@pytest.mark.parametrize("workers", [1, 8])
+def test_rate_limited_run_stops_asking(write, tmp_path, monkeypatch, status, workers):
+    """End to end: PyPI answers with an error status. No new request starts after the
+    first such answer: only the ones already in flight were sent, each for another
+    name. Nothing is reported, and nothing is cached."""
     requested: list[str] = []
 
-    def urlopen(request, timeout=None):
+    def no_answer(self, request):
         """Answer like PyPI when it limits requests or is down. No socket is opened."""
         requested.append(request.full_url)
         raise urllib.error.HTTPError(request.full_url, status, "No answer", {}, io.BytesIO())
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(PyPIRegistry, "_open", no_answer)
     names = [f"pkg-number-{n}" for n in range(200)]
     write("requirements.txt", "".join(f"{name}\n" for name in names))
-    registry = PyPIRegistry(tmp_path / "cache")
+    registry = PyPIRegistry(tmp_path / "cache", workers=workers)
     result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
     assert result.findings == []
-    assert sorted(requested) == sorted(f"https://pypi.org/pypi/{name}/json" for name in names)
+    assert 1 <= len(requested) <= workers and len(set(requested)) == len(requested)
+    assert set(requested) <= {f"https://pypi.org/simple/{name}/" for name in names}
     registry.save()
     assert not registry.cache_file.exists()
 

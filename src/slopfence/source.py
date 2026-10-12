@@ -12,13 +12,33 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
+from slopfence.models import RULES
+
 IGNORE_RE = re.compile(r"#\s*slopfence:\s*ignore(?:\[(?P<rules>[A-Z0-9,\s]+)\])?(?!-)", re.I)
+# What an ignore directive that names no rule switches off, and an ``ignore-file`` too.
+ALL_RULES = frozenset(RULES)
 _ESCAPE_SEQ = re.compile(r"\\[ntr]")
 EXAMPLE_DIRS = {"demo", "demos", "example", "examples", "sample", "samples"}
 IGNORE_FILE_RE = re.compile(r"#\s*slopfence:\s*ignore-file\b", re.I)
 # The only nodes that can hold statements. Expressions never do, and they are most
 # of a tree, so a search for functions, classes, ``if`` or ``try`` can skip them.
 _STATEMENT_HOLDERS = (ast.stmt, ast.excepthandler, ast.match_case)
+
+
+def line_ignores(comment: str) -> frozenset[str]:
+    """The rules that a ``slopfence: ignore`` directive in a comment switches off.
+
+    The ones it names, or every rule when it names none. Empty when the comment holds
+    no directive. Every kind of file has its comments read with this: Python source,
+    dependency files and notebook cells.
+    """
+    m = IGNORE_RE.search(comment)
+    if not m:
+        return frozenset()
+    rules = m.group("rules")
+    if rules is None:
+        return ALL_RULES
+    return frozenset(rule.strip().upper() for rule in rules.split(",") if rule.strip())
 
 
 def children(node: ast.AST, kinds: type | tuple[type, ...] = ast.AST) -> list[ast.AST]:
@@ -83,7 +103,8 @@ class SourceFile:
     tree: ast.Module
     comments: list[TextSpan] = field(default_factory=list)
     # line -> rule IDs to ignore on that line; None means every rule.
-    ignores: dict[int, set[str] | None] = field(default_factory=dict)
+    # The rules that an ignore comment switches off, by line (see ``line_ignores``).
+    ignores: dict[int, frozenset[str]] = field(default_factory=dict)
     ignore_file: bool = False
 
     @property
@@ -223,11 +244,8 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
             src.comments.append(TextSpan(line, col + 1, tok.string))
             if IGNORE_FILE_RE.search(tok.string):
                 src.ignore_file = True
-            elif m := IGNORE_RE.search(tok.string):
-                rules = m.group("rules")
-                src.ignores[line] = (
-                    {r.strip().upper() for r in rules.split(",") if r.strip()} if rules else None
-                )
+            elif rules := line_ignores(tok.string):
+                src.ignores[line] = rules
     # The tokenizer turns down some text that the parser takes. The file keeps its
     # tree, and the comments up to that place. SyntaxError includes IndentationError.
     # ValueError: a carriage return before a character that is not ASCII ends with a

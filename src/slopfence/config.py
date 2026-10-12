@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from slopfence.models import RULES, Severity
+from slopfence.models import NEW_PACKAGE_DAYS, RULES, YOUNG_PACKAGE_DAYS, Severity
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -20,6 +20,7 @@ KNOWN_KEYS = {
     "ignore",
     "exclude",
     "known-packages",
+    "min-package-age",
     "check-imports",
     "detect-private-index",
     "fail-on",
@@ -30,6 +31,9 @@ KNOWN_KEYS = {
     "baseline",
 }
 FAIL_ON = [s.value for s in Severity]  # high, medium, low
+# What a ``min-package-age`` must be. A year is the most: SLOP002 never reports a
+# package that is older.
+PACKAGE_AGE = f"a whole number of days from 1 to {YOUNG_PACKAGE_DAYS}"
 
 
 class ConfigError(ValueError):
@@ -44,6 +48,8 @@ class Config:
     ignore: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     known_packages: list[str] = field(default_factory=list)
+    # SLOP002 reports a package whose oldest file on PyPI is younger than this many days.
+    min_package_age: int = NEW_PACKAGE_DAYS
     check_imports: bool = False
     detect_private_index: bool = True
     fail_on: str = "low"
@@ -72,6 +78,12 @@ def _bool(table: dict, key: str, where: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{where}: '{key}' must be true or false")
     return value
+
+
+def is_package_age(value: object) -> bool:
+    """Whether ``value`` can be a ``min-package-age`` (see ``PACKAGE_AGE``)."""
+    # ``type``, not ``isinstance``: True is an int too.
+    return type(value) is int and 1 <= value <= YOUNG_PACKAGE_DAYS
 
 
 def _rule_ids(values: list[str], key: str, where: str) -> list[str]:
@@ -165,6 +177,11 @@ def load_config(root: Path) -> Config:
         config.exclude = _str_list(table, "exclude", where)
     if "known-packages" in table:
         config.known_packages = _str_list(table, "known-packages", where)
+    if "min-package-age" in table:
+        value = table["min-package-age"]
+        if not is_package_age(value):
+            raise ConfigError(f"{where}: 'min-package-age' must be {PACKAGE_AGE}")
+        config.min_package_age = value
     if "fail-on" in table:
         value = table["fail-on"]
         if value not in FAIL_ON:
@@ -194,9 +211,26 @@ def load_config(root: Path) -> Config:
     return config
 
 
+def slop002_has_no_lookups(select: Iterable[str] | None, ignore: Iterable[str]) -> bool:
+    """Whether SLOP002 is not ignored and still must not run, because SLOP001 is ignored.
+
+    SLOP002 reads the answers to SLOP001's PyPI lookups and sends no name itself. A
+    project that ignores SLOP001 sends nothing to PyPI, and a new version must not
+    change that. Naming SLOP002 in ``select`` is how to ask for the lookups without
+    SLOP001. A ``select`` list that doesn't name it leaves it out anyway.
+    """
+    ignored = set(ignore)
+    return not select and "SLOP001" in ignored and "SLOP002" not in ignored
+
+
 def selected_rules(select: Iterable[str] | None, ignore: Iterable[str]) -> set[str]:
-    """The rules that run: the ``select`` list, or every rule, without the ``ignore`` list."""
-    return (set(select) if select else set(RULES)) - set(ignore)
+    """The rules that run: the ``select`` list, or every rule, without the ``ignore`` list.
+
+    SLOP002 is left out too where it has no lookups to read (see ``slop002_has_no_lookups``).
+    """
+    ignored = set(ignore)  # read once: it may be an iterator
+    rules = (set(select) if select else set(RULES)) - ignored
+    return rules - {"SLOP002"} if slop002_has_no_lookups(select, ignored) else rules
 
 
 def ignored_rules(rel_path: str, per_file_ignores: Mapping[str, Iterable[str]]) -> frozenset[str]:

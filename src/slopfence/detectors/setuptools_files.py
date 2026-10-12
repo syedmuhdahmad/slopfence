@@ -21,11 +21,17 @@ from slopfence.detectors.dependency import (
     Requirement,
     parse_requirement,
     requirements_comment,
-    suppresses_slop001,
     text_lines,
 )
 from slopfence.indexes import is_public_index
-from slopfence.source import IGNORE_FILE_RE, SourceFile, char_column, walk
+from slopfence.source import (
+    ALL_RULES,
+    IGNORE_FILE_RE,
+    SourceFile,
+    char_column,
+    line_ignores,
+    walk,
+)
 
 # setup() keywords and [options] keys that hold requirement lists.
 REQUIRES_KEYS = ("install_requires", "setup_requires", "tests_require")
@@ -184,7 +190,7 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
                     rel,
                     lineno,
                     validate=not (parsed.direct or private),
-                    suppressed=ignore_file or suppresses_slop001(comments[lineno - 1]),
+                    ignored=ALL_RULES if ignore_file else line_ignores(comments[lineno - 1]),
                     own_source=parsed.direct,
                 )
             )
@@ -519,7 +525,9 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
                         src.rel,
                         line,
                         validate=not (parsed.direct or private),
-                        suppressed=src.ignore_file or suppresses_slop001(comments.get(line, "")),
+                        ignored=ALL_RULES
+                        if src.ignore_file
+                        else line_ignores(comments.get(line, "")),
                         col=col,
                         own_source=parsed.direct,
                     )
