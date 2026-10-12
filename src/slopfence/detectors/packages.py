@@ -28,7 +28,7 @@ import importlib.util
 import json
 import re
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -53,7 +53,7 @@ from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
 from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
-from slopfence.models import Finding
+from slopfence.models import Finding, plural
 from slopfence.registry import BatchRegistry, OfflineRegistry, Registry, normalize
 from slopfence.source import IGNORE_FILE_RE, load, read_source
 from slopfence.source import relative_path as _rel
@@ -101,6 +101,8 @@ _BYTE_ORDER_MARKS = (
 # nothing for them, and that must never be read as "fixed". SLOP002 (#39) is named
 # before it exists, so that the two rules can never get two lists.
 PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
+# How many file names a note lists before it only counts the rest.
+NOTE_FILE_LIMIT = 3
 
 
 @dataclass
@@ -674,6 +676,13 @@ def _is_installed(name: str, installed: set[str]) -> bool:
 _FileDependencies = tuple[DependencyFile, list[Dependency]]
 
 
+def _listed(files: Sequence[str]) -> str:
+    """File names for a note: the first few, then how many more there are."""
+    shown = ", ".join(files[:NOTE_FILE_LIMIT])
+    more = len(files) - NOTE_FILE_LIMIT
+    return f"{shown} and {plural(more, 'more file')}" if more > 0 else shown
+
+
 class PackageChecker:
     """Looks up dependencies and imports on PyPI and reports the ones that don't exist."""
 
@@ -772,6 +781,50 @@ class PackageChecker:
             for file in self._files(only_paths)
             if self._inherits(file) and any(self._may_be_public(dep) for dep in file.dependencies)
         ]
+
+    def imports_in_files(self, only_paths: set[str]) -> dict[str, list[tuple[str, int, int]]]:
+        """The imports that the checked dependency files hold themselves, by file.
+
+        Each is a (module, line, column), as ``check_imports`` takes them. Only a
+        notebook has any: the imports of a ``setup.py`` are collected with those of
+        every other Python file. Ignore comments were applied when the cells were
+        read. Empty unless the index was built with imports.
+        """
+        return {file.rel: file.imports for file in self._files(only_paths) if file.imports}
+
+    def notes(self, only_paths: set[str], check_imports: bool) -> list[str]:
+        """What the user should know about the lookups of this run, one note each.
+
+        ``only_paths`` is what ``check_dependencies`` got. A note says why nothing was
+        looked up, why imports or the dependencies of some files were not, and which
+        notebooks were too large to read.
+        """
+        notes = []
+        if self.private_index:
+            notes.append(
+                f"SLOP001 made no PyPI lookups: a private package index is configured in "
+                f"{self.private_index}, so packages missing from PyPI may be private. If that "
+                "index only mirrors PyPI, set detect-private-index = false."
+            )
+        elif check_imports and self.imports_may_be_private:
+            notes.append(
+                "SLOP001 didn't look up imports on PyPI: "
+                f"{_listed(self.index.private_index_files)} uses a private package index, so "
+                "unknown imports may be private packages."
+            )
+        if skipped := self.inherited_files(only_paths):
+            notes.append(
+                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: a "
+                f"private package index is set in {_listed(self.inherited_from)}, so "
+                "names missing from PyPI may be private packages. If that index only "
+                "mirrors PyPI, set detect-private-index = false."
+            )
+        if too_large := sorted(file.rel for file in self._files(only_paths) if file.too_large):
+            notes.append(
+                f"SLOP001 didn't read {_listed(too_large)}: a notebook larger than "
+                f"{MAX_BYTES // 2**20} MB is skipped."
+            )
+        return notes
 
     def _lookup_names(self, name: str) -> list[str]:
         """The names to ask PyPI about for ``import name``: none if it needs no lookup.

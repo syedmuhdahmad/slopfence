@@ -12,16 +12,15 @@ from slopfence import diff as diffmod
 from slopfence.analysis import FileSummary, Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded, selected_rules
 from slopfence.detectors import FILE_DETECTORS
-from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, Kind, kind_of
+from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, kind_of
 from slopfence.detectors.duplicates import check_duplicates
-from slopfence.detectors.notebooks import MAX_BYTES as MAX_NOTEBOOK_BYTES
 from slopfence.detectors.packages import (
     LOCK_FILES,
     PACKAGE_RULES,
     PackageChecker,
     build_index,
 )
-from slopfence.models import RULES, Finding, Severity, plural
+from slopfence.models import RULES, Finding, Severity
 from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
@@ -172,17 +171,6 @@ class Result:
     # run was offline, the environment has a private index, or PyPI did not answer.
     # Their findings may be incomplete.
     unchecked_rules: list[str] = field(default_factory=list)
-
-
-# How many file names a note lists before it only counts the rest.
-NOTE_FILE_LIMIT = 3
-
-
-def _listed(files: Sequence[str]) -> str:
-    """File names for a note: the first few, then how many more there are."""
-    shown = ", ".join(files[:NOTE_FILE_LIMIT])
-    more = len(files) - NOTE_FILE_LIMIT
-    return f"{shown} and {plural(more, 'more file')}" if more > 0 else shown
 
 
 def _per_file_matcher(
@@ -400,43 +388,13 @@ def run(
             and (changed is None or s.rel in changed)
             and not switched_off("SLOP001", s.rel)
         }
-        # The imports in the code cells of checked notebooks, under the same opt-in.
-        # Ignore comments were applied when the cells were read. Only notebooks: a
-        # setup.py is a dependency file too, and its imports are already in the list.
-        imports.update(
-            {
-                f.rel: f.imports
-                for f in index.files
-                if check_imports and f.kind is Kind.NOTEBOOK and f.rel in checked_deps
-            }
-        )
+        # The imports that checked dependency files hold themselves, under the same opt-in.
+        imports.update(checker.imports_in_files(checked_deps))
         imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, imported)
         findings.extend(checker.check_dependencies(only_paths=checked_deps))
-        if private_index:
-            result.notes.append(
-                f"SLOP001 made no PyPI lookups: a private package index is configured in "
-                f"{private_index}, so packages missing from PyPI may be private. If that "
-                "index only mirrors PyPI, set detect-private-index = false."
-            )
-        elif check_imports and checker.imports_may_be_private:
-            result.notes.append(
-                f"SLOP001 didn't look up imports on PyPI: {_listed(index.private_index_files)} "
-                "uses a private package index, so unknown imports may be private packages."
-            )
-        if skipped := checker.inherited_files(checked_deps):
-            result.notes.append(
-                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: a "
-                f"private package index is set in {_listed(checker.inherited_from)}, so "
-                "names missing from PyPI may be private packages. If that index only "
-                "mirrors PyPI, set detect-private-index = false."
-            )
-        if too_large := sorted(f.rel for f in index.files if f.too_large and f.rel in checked_deps):
-            result.notes.append(
-                f"SLOP001 didn't read {_listed(too_large)}: a notebook larger than "
-                f"{MAX_NOTEBOOK_BYTES // 2**20} MB is skipped."
-            )
+        result.notes.extend(checker.notes(checked_deps, check_imports))
         for rel, found in imports.items():
             findings.extend(checker.check_imports(rel, found))
         if checker.lookups_unanswered(checked_deps, imported):

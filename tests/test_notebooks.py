@@ -8,6 +8,7 @@ import pytest
 from slopfence import diff as diffmod
 from slopfence.cli import main
 from slopfence.detectors import notebooks, packages
+from slopfence.detectors.dependency import Kind
 from slopfence.detectors.notebooks import read_notebook, scan_notebook
 from slopfence.detectors.pip_commands import pip_install_arguments, pip_requirements, shell_commands
 from slopfence.engine import discover_all, run
@@ -703,6 +704,27 @@ def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):
     # from-b is declared by the other notebook, so its import is not looked up.
     assert subjects(result) == ["ghost-a", "from_skipped"]
     assert "from-b" not in registry.queries and "from_b" not in registry.queries
+
+
+def test_the_engine_takes_imports_from_a_dependency_file_of_any_kind(
+    write, check, not_installed, monkeypatch
+):
+    """``engine.run`` asks the checker for the imports that dependency files hold, and
+    never for the kind of a file. So the next source that carries imports is looked
+    up without a change to the engine."""
+    real = packages.scan_notebook
+
+    def of_another_kind(text, rel, imports):
+        """What the notebook reader found, as if another kind of file held it."""
+        declared = real(text, rel, imports)
+        declared.kind = Kind.PIPFILE
+        return declared
+
+    monkeypatch.setattr(packages, "scan_notebook", of_another_kind)
+    write("demo.ipynb", jupyter(["import ghost_mod\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost_mod"] and "ghost_mod" in registry.queries
 
 
 def test_only_slop001_reads_notebooks(write, check):
