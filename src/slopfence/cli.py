@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from slopfence import __version__, reporters
 from slopfence import diff as diffmod
+from slopfence.analysis import default_jobs
 from slopfence.config import FAIL_ON, ConfigError, load_config
 from slopfence.engine import run
 from slopfence.indexes import find_private_index
@@ -16,6 +18,8 @@ from slopfence.models import RULES, Severity
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
+# What a shell reports for a program stopped with Ctrl-C (128 + SIGINT).
+EXIT_INTERRUPTED = 130
 
 
 def _rule_list(value: str) -> list[str]:
@@ -24,6 +28,17 @@ def _rule_list(value: str) -> list[str]:
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown rule(s): {', '.join(unknown)}")
     return rules
+
+
+def _jobs(value: str) -> int:
+    """Parse ``--jobs``: a whole number, 1 or more."""
+    try:
+        jobs = int(value)
+    except ValueError:
+        jobs = 0
+    if jobs < 1:
+        raise argparse.ArgumentTypeError(f"must be a whole number, 1 or more (got {value!r})")
+    return jobs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="exit 2 if any Python file can't be parsed (--no-strict overrides config)",
     )
+    parser.add_argument(
+        "--jobs",
+        type=_jobs,
+        metavar="N",
+        help="check files in up to N processes (default: one per CPU, at most 8; "
+        "1 uses no worker processes; overrides config)",
+    )
     parser.add_argument("--exit-zero", action="store_true", help="exit 0 even if issues are found")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--list-rules", action="store_true", help="list rules and exit")
@@ -106,8 +128,25 @@ def _use_utf8_output() -> None:
                 stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _end_like_an_interrupted_program() -> None:
+    """End this process the way Ctrl-C ends a program that doesn't catch it.
+
+    A shell stops a script or a loop only when the program it ran died of the
+    interrupt. After a plain exit with status 130 it runs the next command. So the
+    interrupt gets its default action back and is sent again. A shell still shows 130.
+
+    Windows has no such rule. There this does nothing, and the caller exits with 130.
+    """
+    if os.name == "posix":
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGINT)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run slopfence from the command line and return the exit code (0 ok, 1 issues, 2 error)."""
+    """Run slopfence from the command line and return the exit code.
+
+    0 ok, 1 issues, 2 error, 130 stopped with Ctrl-C.
+    """
     _use_utf8_output()
     args = build_parser().parse_args(argv)
 
@@ -157,20 +196,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"slopfence: error: --diff {args.diff}: {err}", file=sys.stderr)
             return EXIT_ERROR
 
+    jobs = args.jobs if args.jobs is not None else config.jobs
+    if jobs is None:
+        jobs = default_jobs()
+
     registry = OfflineRegistry() if args.offline else PyPIRegistry()
     private_index = find_private_index(root) if detect_private_index and not args.offline else None
-    result = run(
-        args.paths,
-        root,
-        registry,
-        select=select,
-        ignore=ignore,
-        changed=changed,
-        exclude=exclude,
-        known_packages=known_packages,
-        check_imports=check_imports,
-        private_index=private_index,
-    )
+    try:
+        result = run(
+            args.paths,
+            root,
+            registry,
+            select=select,
+            ignore=ignore,
+            changed=changed,
+            exclude=exclude,
+            known_packages=known_packages,
+            check_imports=check_imports,
+            private_index=private_index,
+            jobs=jobs,
+        )
+    except KeyboardInterrupt:
+        # No report and no cache file: the run did not finish.
+        print("slopfence: interrupted", file=sys.stderr)
+        _end_like_an_interrupted_program()
+        return EXIT_INTERRUPTED
     if isinstance(registry, PyPIRegistry):
         registry.save()
 

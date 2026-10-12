@@ -9,7 +9,8 @@ paths:
 
 ## Design
 
-- **One job per module and per function.** The pipeline is: find files (`engine`), parse (`source`), per-file detectors (`detectors/`), project-wide rules (duplicates, packages), filters (ignore comments, `--diff`), then `reporters`. Put new code in the stage it belongs to. A stage never reaches into another stage's internals.
+- **One job per module and per function.** The pipeline is: find files (`engine`), handle one file at a time (`analysis`: parse it with `source`, run the per-file `detectors/`, keep a small `FileSummary`), project-wide rules on the summaries (duplicates, packages), filters (ignore comments, `--diff`), then `reporters`. Put new code in the stage it belongs to. A stage never reaches into another stage's internals.
+- **`analysis` may run in worker processes.** What it returns must pickle and stay small: never a syntax tree. It must not import `registry`, so a worker can never reach the network. Nothing in it may depend on state the main process set up after import.
 - **Extend, don't edit.** A new rule is one entry in `models.RULES` and one function registered in `detectors.FILE_DETECTORS`. If `engine.run` needs a new `if` for your rule, the design is wrong.
 - **Depend on protocols, not classes.** Code takes a `Registry`, never a `PyPIRegistry`. Every implementation (`FakeRegistry`, `OfflineRegistry`) must keep working unchanged when you change the protocol.
 - **Small interfaces.** Pass the few values a function needs, not the whole config or the `argparse` namespace.
@@ -18,7 +19,7 @@ paths:
 
 ## Reuse before you write
 
-- Look for an existing helper first: `source.relative_path`, `source.read_source`, `registry.normalize`, `config.is_excluded`, `diff.touches`, and `SourceFile.is_test_file` / `is_example_file` / `text_spans`.
+- Look for an existing helper first: `source.relative_path`, `source.read_source`, `source.walk` / `children` / `child_statements` (one shared walk of the tree), `registry.normalize`, `config.is_excluded`, `diff.touches`, and `SourceFile.is_test_file` / `is_example_file` / `text_spans`.
 - When two places need the same logic, move it into one function and import it. Never copy a function, even under a different name: `SLOP030` runs on this repo and fails CI.
 
 ## Style

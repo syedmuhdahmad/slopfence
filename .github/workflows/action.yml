@@ -105,6 +105,29 @@ jobs:
           if grep -q Traceback err.txt; then echo "::error::slopfence crashed"; exit 1; fi
           grep -q "$(printf 'caf\xc3\xa9')" out.txt || { echo "::error::output is not UTF-8"; exit 1; }
 
+      # 260 files are enough for worker processes to start (one per 100 files, none under
+      # 200). Both ways to start slopfence are run, with the start method of each
+      # platform ("spawn" on Windows and macOS). A pool that can't start prints a warning
+      # and falls back to one process, so an empty stderr shows the workers did the work.
+      - name: Worker processes give the same report as one process
+        run: |
+          venv="$RUNNER_TEMP/slopfence-venv"
+          if [ -x "$venv/bin/python" ]; then bin="$venv/bin"; else bin="$venv/Scripts"; fi
+          many="$RUNNER_TEMP/many"
+          mkdir -p "$many/pkg"
+          for i in $(seq 1 260); do
+            printf '# In a real implementation, use the cache\ndef helper_%s(value):\n    text = str(value)\n    text = text.strip()\n    return text\n' "$i" > "$many/pkg/mod_$i.py"
+          done
+          "$bin/python" -m slopfence "$many" --offline --format json --exit-zero --jobs 1 -o one.json 2> one.err
+          "$bin/python" -m slopfence "$many" --offline --format json --exit-zero --jobs 4 -o module.json 2> module.err
+          "$bin/slopfence" "$many" --offline --format json --exit-zero --jobs 4 -o script.json 2> script.err
+          cat one.err module.err script.err
+          for run in module script; do
+            if [ -s "$run.err" ]; then echo "::error::worker processes printed a warning ($run)"; exit 1; fi
+            cmp one.json "$run.json" || { echo "::error::--jobs 4 and --jobs 1 give different reports ($run)"; exit 1; }
+          done
+          grep -q '"SLOP030"' one.json || { echo "::error::expected duplicate functions in the report"; exit 1; }
+
       # Only for the checker below; the action steps above use the runner's own Python.
       - uses: actions/setup-python@v7
         with:

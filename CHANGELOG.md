@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- On projects with 200 or more Python files, slopfence now starts worker processes: one for every 100 files, up to one per CPU and at most 8. Findings are the same. To switch this off, pass `--jobs 1` or set `jobs = 1` in `[tool.slopfence]` ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12)).
+
+### Added
+
+- `--jobs N` option and `jobs` config key: files are read, parsed and checked in up to `N` worker processes. Default: one per CPU, at most 8. The report is the same with any number of jobs. If worker processes can't start, a warning is printed and the files are checked in one process ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+
+### Changed
+
+- **Much faster on big projects, with far less memory.** The CPython standard library and 127 installed packages (22,864 files) took 5 min 44 s and 8 GB of memory in v0.2.0. Now they take a little over 2 minutes with one process, and 35 to 45 seconds with 8 jobs on 4 cores. The main process needs about 0.3 GB, and each worker 40 to 80 MB ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- Checking a few files of a big project (pre-commit) is faster. The rest of the project is only read for what `SLOP030` needs, and its test files are not read at all ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- PyPI lookups are sent 8 at a time instead of one by one. 200 uncached names took more than 90 seconds and now take about 10. What is sent has not changed. A name is requested once per run, also when PyPI gives no answer for it ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
+- The PyPI cache file is written in one step, so two runs at the same time can't leave a broken file ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
+- Ctrl-C during a scan prints `slopfence: interrupted` and exits with status `130`, instead of a traceback. On Windows, worker processes that are still starting can print tracebacks of their own ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+
+### Fixed
+
+- Findings at the same position (`import a, b` where neither exists) could be listed in a different order from run to run. They are now ordered by message ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- A file that Python only warns about (an invalid escape sequence such as `"\d"`) counted as unparseable when warnings were turned into errors (`python -W error`). Such a file is now always parsed, and Python's warning about it is no longer printed ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+
 ## [0.2.0] - 2026-10-03
 
 Three new rules, private package support, and safer defaults for private code.

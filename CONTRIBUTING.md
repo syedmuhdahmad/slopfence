@@ -90,6 +90,8 @@ The demo project is created at record time by `docs/demo/make-project.sh`, so no
 3. Add tests with **both** flagged and not-flagged cases. Real-world code that must stay quiet is the most valuable test.
 4. Run it against a large codebase (for example your Python install's standard library) and check for false positives before opening the pull request.
 
+Per-file detectors run in worker processes. Write a detector as a plain function of the `SourceFile`: no global state, no network. To visit every node, loop over `src.nodes` instead of calling `ast.walk(src.tree)`. The tree is then walked only once per file.
+
 ## Commit and pull request style
 
 - Use the imperative mood: "Add PyPI lookup cache", not "Added" or "Adds".

@@ -131,7 +131,10 @@ jobs:
           if grep -E '^(docs|\.github)/' contents.txt; then
             echo "::error::the sdist contains docs/ or .github/ files"; exit 1
           fi
-          [ "$size" -lt 100000 ] || { echo "::error::the sdist is larger than 100 KB"; exit 1; }
+          # The limit keeps a demo GIF, a logo or a fixture folder from slipping in. It
+          # was 100 KB until v0.3. Tests ship in the sdist, and the README is in it twice
+          # (as README.md and inside PKG-INFO), so it grows with every feature.
+          [ "$size" -lt 200000 ] || { echo "::error::the sdist is larger than 200 KB"; exit 1; }
       - name: Build a wheel from the sdist and run its tests
         run: |
           mkdir /tmp/from-sdist && tar xzf dist/*.tar.gz -C /tmp/from-sdist

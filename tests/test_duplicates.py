@@ -3,8 +3,10 @@
 import subprocess
 
 from slopfence import diff as diffmod
+from slopfence.detectors.duplicates import TOKEN_SEP, index_functions
 from slopfence.engine import run
 from slopfence.registry import OfflineRegistry
+from slopfence.source import load
 from tests.conftest import rule_lines
 
 FORMAT_DATE = '''
@@ -317,3 +319,38 @@ def {name}(conn, user_id):
     write("a.py", query.format(name="by_id", col="id"))
     write("b.py", query.format(name="by_team", col="team_id"))
     assert check("SLOP030").findings == []
+
+
+def test_fingerprint_is_the_token_sequence(write, tmp_path):
+    """A function's tokens are kept as one string; the tokens and their count come from it."""
+    src = load(write("a.py", FORMAT_DATE + FORMAT_DATE_COPY), tmp_path)
+    original, copy = index_functions(src)
+    assert (original.name, copy.name) == ("format_date", "formatDate")
+    assert original.fingerprint == copy.fingerprint
+    assert TOKEN_SEP.join(original.tokens) == original.fingerprint
+    assert original.size == len(original.tokens) > 10
+    assert original.tokens[:3] == ["arguments", "arg", "v0"]
+
+
+def test_separator_in_a_constant_cannot_fake_a_token_boundary(write, tmp_path, check):
+    """A string that holds the separator character is still one token, so two
+    different functions never get the same fingerprint."""
+    two_constants = """
+def labels(value):
+    first = str(value)
+    second = first.strip()
+    return [second, 'a', 'b']
+"""
+    # One constant whose text is what the two constants above look like when joined.
+    text = f"a'{TOKEN_SEP}Constant{TOKEN_SEP}'b"
+    one_constant = two_constants.replace("'a', 'b'", repr(text)).replace("labels", "names")
+    [two] = index_functions(load(write("a.py", two_constants), tmp_path))
+    [one] = index_functions(load(write("b.py", one_constant), tmp_path))
+    assert two.tokens[-4:] == ["Constant", "'a'", "Constant", "'b'"]
+    # repr() escapes the separator, so the constant splits back into one token: the
+    # function has one constant (two tokens) fewer, not as many as the other one.
+    assert one.tokens[-2:] == ["Constant", repr(text)]
+    assert one.size == len(one.tokens) == two.size - 2
+    assert check("SLOP030").findings == []
+    write("c.py", two_constants.replace("labels", "captions"))  # a real copy is still found
+    assert rule_lines(check("SLOP030"), "SLOP030") == [1]
