@@ -554,6 +554,48 @@ def test_touched_first_copy_of_an_accepted_duplicate_stays_hidden(
     assert full_run(capsys, "--baseline", "base.json") == (0, [])
 
 
+# A one-line change in the body. The two helpers are then 95% alike: a near-copy.
+BODY_EDIT = ("return text.strip()", "return text.strip().lower()")
+
+
+@pytest.mark.parametrize("edited", ["src/dates.py", "src/utils.py"])
+def test_edited_body_of_an_accepted_duplicate_stays_hidden(
+    write, tmp_path, monkeypatch, capsys, edited
+):
+    """A small change in the body of either copy leaves a near-copy. The pair stays accepted,
+    whichever copy it is: the first one has no entry of its own."""
+    write("src/dates.py", helper("format_date"))
+    write("src/utils.py", helper("fmt_date"))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    assert rows(tmp_path / "base.json") == [["src/utils.py", "SLOP030", "fmt_date", 1]]
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "fix")
+    edit(tmp_path / edited, *BODY_EDIT)
+
+    assert diff_run(capsys) == (1, [edited], 0)  # --diff alone reports the near-copy
+    assert diff_run(capsys, "--baseline", "base.json") == (0, [], 1)
+    # A full run never reports a near-copy, so the two runs agree.
+    assert full_run(capsys, "--baseline", "base.json") == (0, [])
+
+
+def test_new_near_copy_of_an_accepted_duplicate_is_reported(write, tmp_path, monkeypatch, capsys):
+    """A function that the pull request adds is new, also when the baseline holds what it copies."""
+    write("src/app.py", "x = 1\n")
+    write("src/dates.py", helper("format_date"))
+    write("src/utils.py", helper("fmt_date"))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    # The old first copy goes, and a near-copy comes in a file that sorts first. The
+    # only function it is like is the one with the entry.
+    (tmp_path / "src" / "dates.py").unlink()
+    write("src/app.py", "x = 1\n\n\n" + helper("stamp").replace(*BODY_EDIT))
+
+    assert diff_run(capsys, "--baseline", "base.json") == (1, ["src/app.py"], 0)
+
+
 def test_new_copy_of_an_accepted_duplicate_is_reported_with_diff(
     write, tmp_path, monkeypatch, capsys
 ):

@@ -321,10 +321,14 @@ def check_duplicates(
     never "the first copy", and it is always reported.
 
     A baseline is written from a full scan, so it has an entry for every identical
-    copy except the first. Two things make a run with ``changed`` agree with it:
+    copy except the first. Three things make a run with ``changed`` agree with it:
 
     * A changed function that is the first copy names a ``peer``: an identical copy,
       an unchanged one where possible. That copy has the entry.
+    * So does a changed function that has no identical copy left, only near-copies,
+      when it was the first of them before the diff: it sorts before each of them,
+      and some of its lines did not change. A small edit to the first copy of an
+      accepted pair leaves exactly that. A function the diff added names no peer.
     * With ``report_unchanged``, the unchanged functions that a full scan reports are
       reported here too. They use up their entries before a changed function with
       the same name can. The caller's ``--diff`` filter drops them afterwards.
@@ -349,6 +353,12 @@ def check_duplicates(
         f = functions[k]
         return changed is not None and touches(changed, f.path, f.line, f.end_line)
 
+    def was_there(k: int) -> bool:
+        """Whether a changed function is older than the diff: one of its lines did not change."""
+        f = functions[k]
+        lines = (changed or {}).get(f.path)  # None: the whole file is new
+        return lines is not None and any(n not in lines for n in range(f.line, f.end_line + 1))
+
     # Near-duplicates are only reported for changed functions (see the module docstring).
     near_for = {k for k in range(len(functions)) if is_changed(k)}
     for i, others in find_duplicates(functions, near_for).items():
@@ -364,6 +374,8 @@ def check_duplicates(
             if is_first:
                 twin = functions[min(identical, key=lambda k: (is_changed(k), order(k)))]
                 peer = (twin.path, twin.name)
+            elif not identical and was_there(i) and all(order(i) < order(k) for k, _ in others):
+                peer = (functions[j].path, functions[j].name)
         elif identical and not is_first and (changed is None or report_unchanged):
             j, score = identical[0], 1.0
         else:

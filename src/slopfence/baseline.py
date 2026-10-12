@@ -233,11 +233,12 @@ def match(
     new one on a changed line is the one that gets reported.
 
     A finding with a ``peer`` (SLOP030 with ``--diff``: a changed function that is the
-    first copy of a group of identical ones) has no entry of its own, because a full
-    scan never reports it. An entry with its key was written for another function, so
-    it leaves that one alone. It is hidden when its peer has an entry, and that entry
-    stays whole for the peer's own finding. An entry that already can't hide every old
-    finding with its key stands for nothing more: something with that key is new.
+    first copy of a group of identical ones, or was until an edit made it a near-copy)
+    has no entry of its own, because a full scan never reports the first copy. An entry
+    with its key was written for another function, so it leaves that one alone. It is
+    hidden when its peer has an entry, and that entry stays whole for the peer's own
+    finding. An entry that already can't hide every old finding with its key stands for
+    nothing more: something with that key is new.
     """
 
     def touched(i: int) -> bool:

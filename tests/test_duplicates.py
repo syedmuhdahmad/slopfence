@@ -435,7 +435,7 @@ def test_peer_is_an_unchanged_copy_where_there_is_one(write, tmp_path):
 
 
 def test_changed_function_with_only_near_copies_has_no_peer(write, tmp_path):
-    """A near-copy is never in a baseline, so nothing can stand for it."""
+    """A new function that is a near-copy was never accepted, so nothing stands for it."""
     git = git_project(tmp_path)
     write("src/db.py", BUILD_QUERY)
     git("add", "-A")
@@ -444,3 +444,27 @@ def test_changed_function_with_only_near_copies_has_no_peer(write, tmp_path):
     changed = diffmod.changed_lines(tmp_path, "main")
     result = run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"], changed=changed)
     assert [(f.path, f.peer) for f in result.findings] == [("src/a_repo.py", None)]
+
+
+def test_edited_first_copy_names_the_copy_it_was_identical_to(write, tmp_path):
+    """An edit turns an identical copy into a near-copy. The first of the two has no
+    baseline entry of its own, so it names the other one. The second one needs no peer."""
+    git = git_project(tmp_path)
+    write("src/a.py", BUILD_QUERY)
+    write("src/b.py", BUILD_QUERY)
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    edited = BUILD_QUERY.replace(".join(clauses)", ".join(sorted(clauses))")
+
+    def peers():
+        """The path and the peer of each finding of a run with ``--diff main``."""
+        changed = diffmod.changed_lines(tmp_path, "main")
+        result = run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"], changed=changed)
+        assert all("% similar to 'build_query'" in f.message for f in result.findings)
+        return [(f.path, f.peer) for f in result.findings]
+
+    write("src/a.py", edited)
+    assert peers() == [("src/a.py", ("src/b.py", "build_query"))]
+    write("src/a.py", BUILD_QUERY)
+    write("src/b.py", edited)
+    assert peers() == [("src/b.py", None)]
