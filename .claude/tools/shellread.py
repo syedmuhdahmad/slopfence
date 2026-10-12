@@ -1,9 +1,9 @@
 """Just enough reading of a shell command line for the git guard hook.
 
 This is not a shell parser. It splits a command line into simple commands, leaves
-out here-document text the shell would only pass on as data, and fills in variables
-set on the same line. Where it can't be sure of a value it says so with None, and
-the caller must not guess.
+out comments and here-document text the shell would only pass on as data, and fills
+in variables set on the same line. Where it can't be sure of a value it says so with
+None, and the caller must not guess.
 """
 
 from __future__ import annotations
@@ -16,17 +16,17 @@ from dataclasses import dataclass
 
 # Shell operators, backticks and line breaks end one simple command and start the next.
 PUNCTUATION = "();<>|&`\n"
-# What follows "<<": an optional "-", then the closing word, quoted or bare. A bare word
-# must start like a name, so that a shift (``1 << 4``) is not taken for a here-document.
-_CLOSING_WORD = re.compile(
-    r"(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|(\\?)([A-Za-z_][^\s;&|<>()'\"`]*))"
-)
+# What follows "<<": an optional "-", then the closing word, which may be quoted in part.
+_CLOSING_WORD = re.compile(r"(-?)[ \t]*((?:'[^']*'|\"[^\"]*\"|\\.|[^\s;&|<>()'\"`\\])+)")
 # A leading NAME=value or NAME+=value word, and a $NAME or ${NAME} reference.
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)(\+?)=(.*)", re.S)
 _VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 # Programs that run their input as a script: a here-document given to one is commands.
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_WORD_BREAK = re.compile(r"[\s;&|()<>]+")
+# Words that come before the program they start, as in ``sudo bash``.
+_WRAPPERS = frozenset({"sudo", "env", "exec", "command", "nohup", "time", "nice"})
+# Characters that end a simple command on a line.
+_COMMAND_BREAKS = ";&|("
 
 # name -> value for variables set on the command line; None for a value that can't be known.
 Variables = Mapping[str, "str | None"]
@@ -34,13 +34,39 @@ Variables = Mapping[str, "str | None"]
 
 @dataclass(frozen=True)
 class HereDocument:
-    """A here-document opened on a line: how it ends and whether the shell expands it."""
+    """A here-document opened on a line: how it ends, and what the shell does with its body."""
 
     closing_word: str
     # ``<<-``: the shell strips leading tabs, also from the closing line.
     tabs_allowed: bool
-    # A quoted closing word: the body is passed on as it is, nothing in it runs.
+    # A closing word with any quoting: the body is passed on as it is, nothing in it runs.
     literal: bool
+    # The body goes to a shell (``bash <<EOF``), which runs it as a script.
+    feeds_a_shell: bool
+
+
+def _is_shell(command_text: str) -> bool:
+    """Whether the simple command that ``command_text`` starts is a shell reading its input."""
+    for word in command_text.split():
+        name = os.path.basename(word)
+        if _ASSIGNMENT.fullmatch(word) or word.startswith("-") or name in _WRAPPERS:
+            continue
+        return name in _SHELLS
+    return False
+
+
+def _here_document(line: str, after_operator: int, command_text: str) -> HereDocument | None:
+    """The here-document whose ``<<`` ends at ``after_operator``, or None if it is not one."""
+    match = _CLOSING_WORD.match(line, after_operator)
+    if match is None:
+        return None
+    written = match.group(2)
+    # The shell removes quoting from the word; the body ends at what is left.
+    closing_word = "".join(shlex.split(written))
+    literal = closing_word != written
+    if not literal and not (closing_word[:1].isalpha() or closing_word[:1] == "_"):
+        return None  # ``1 << 4`` is a shift, not a here-document
+    return HereDocument(closing_word, bool(match.group(1)), literal, _is_shell(command_text))
 
 
 def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
@@ -52,6 +78,7 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
     text, not an operator and not the start of a comment.
     """
     found: list[HereDocument] = []
+    command_starts = [0]  # where the simple command being read began, one per open ``$(``
     index = 0
     while index < len(line):
         char, quote = line[index], quotes[-1]
@@ -65,6 +92,7 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
             index = end + 1  # arithmetic: ``<<`` in it is a shift
         elif line.startswith("$(", index):
             quotes.append("")
+            command_starts.append(index + 2)
             index += 1
         elif char == '"':
             quotes[-1] = "" if quote else '"'
@@ -73,38 +101,64 @@ def _read_line(line: str, quotes: list[str]) -> tuple[str, list[HereDocument]]:
                 quotes[-1] = "'"
             elif char == ")" and len(quotes) > 1:
                 quotes.pop()
+                if len(command_starts) > 1:
+                    command_starts.pop()
             elif char == "#" and (index == 0 or line[index - 1].isspace()):
                 return line[:index], found  # a comment: the rest of the line is not code
             elif line.startswith("<<<", index):
                 index += 2  # a here-string, not a here-document
-            elif line.startswith("<<", index) and (match := _CLOSING_WORD.match(line, index + 2)):
-                quoted = match.group(2) is not None or match.group(3) is not None
-                word = match.group(2) or match.group(3) or match.group(5) or ""
-                found.append(
-                    HereDocument(word, bool(match.group(1)), quoted or bool(match.group(4)))
-                )
-                index = match.end() - 1
+            elif line.startswith("<<", index):
+                document = _here_document(line, index + 2, line[command_starts[-1] : index])
+                if document is not None:
+                    found.append(document)
+            elif char in _COMMAND_BREAKS:
+                command_starts[-1] = index + 1
         index += 1
     return line, found
 
 
-def _runnable(body: list[str], document: HereDocument, feeds_a_shell: bool) -> list[str]:
-    """The lines of a here-document body that the shell may run as commands."""
-    if feeds_a_shell:
+def _substitutions(line: str) -> list[str]:
+    """The commands inside ``$(...)`` and backticks on one line of a here-document body."""
+    found: list[str] = []
+    index = 0
+    while index < len(line):
+        if line[index] == "\\":
+            index += 2  # an escaped ``$`` or backtick is text
+        elif line.startswith("$(", index) and not line.startswith("$((", index):
+            depth, end = 1, index + 2
+            while end < len(line) and depth:
+                depth += (line[end] == "(") - (line[end] == ")")
+                end += 1
+            found.append(line[index + 2 : end - 1] if depth == 0 else line[index + 2 :])
+            index = end
+        elif line[index] == "`":
+            end = line.find("`", index + 1)
+            end = len(line) if end == -1 else end
+            found.append(line[index + 1 : end])
+            index = end + 1
+        else:
+            index += 1
+    return found
+
+
+def _runnable(body: list[str], document: HereDocument) -> list[str]:
+    """What the shell may run as commands from a here-document body."""
+    if document.feeds_a_shell:
         return body  # the body is a script for that shell
     if document.literal:
         return []
-    # An unquoted here-document is expanded: command substitutions in it run.
-    return [line for line in body if "$(" in line or "`" in line]
+    # An unquoted here-document is expanded: command substitutions in it run, the
+    # text around them is still data.
+    return [command for line in body for command in _substitutions(line)]
 
 
 def strip_heredocs(command: str) -> str:
     """Leave out comments, and here-document text that the shell only passes on as data.
 
     Without this, a script or a note that merely mentions a commit command would be
-    read as one. The line that opens a here-document is kept. So is a body the shell
-    does run: one given to a shell (``bash <<EOF``), and the lines of an unquoted
-    here-document that hold a command substitution.
+    read as one. The line that opens a here-document is kept. So is what the shell
+    does run: a body given to a shell (``bash <<EOF``), and the command substitutions
+    in an unquoted here-document.
     """
     lines = command.split("\n")
     kept: list[str] = []
@@ -114,7 +168,6 @@ def strip_heredocs(command: str) -> str:
         line, documents = _read_line(lines[index], quotes)
         index += 1
         kept.append(line)
-        feeds_a_shell = any(os.path.basename(word) in _SHELLS for word in _WORD_BREAK.split(line))
         for document in documents:
             body: list[str] = []
             while index < len(lines):
@@ -123,7 +176,7 @@ def strip_heredocs(command: str) -> str:
                 if (text.lstrip("\t") if document.tabs_allowed else text) == document.closing_word:
                     break
                 body.append(text)
-            kept.extend(_runnable(body, document, feeds_a_shell))
+            kept.extend(_runnable(body, document))
     return "\n".join(kept)
 
 

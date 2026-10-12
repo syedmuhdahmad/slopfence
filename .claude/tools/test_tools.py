@@ -182,13 +182,35 @@ def test_guard_forgets_a_variable_that_gets_an_unknown_value(
         "cd $NO_SUCH_VARIABLE_HERE && git commit -m x",
         "git -C $NO_SUCH_VARIABLE_HERE commit -m x",
         "cd $(mktemp -d) && git commit -m x",
-        "cd /no/such/folder/anywhere && git commit -m x",
         "W=$(pwd)/elsewhere; cd $W && git push",
+        "git -C /no/such/folder/anywhere commit -m x",
+        "mkdir -p /no/such/folder/demo && cd /no/such/folder/demo && git commit -m x",
+        "mkdir demo\ncd demo\ngit init -q\ngit commit -m x",
+        "git clone https://example.com/r.git ../fresh && cd ../fresh && git commit -m x",
+        "mkdir -p out/a/b && cd out && git commit -m x",
     ],
 )
 def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) -> None:
-    """When the folder a git command runs in can't be known, the guard does not guess."""
+    """When the folder a git command runs in can't be known, the guard does not guess.
+
+    That includes a folder that is missing now but that an earlier command on the
+    same line names, and so may create.
+    """
     assert bash_decision(command, project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /no/such/folder/anywhere; git commit -m x",
+        "cd /no/such/folder/anywhere\ngit commit -m x",
+        "cd /no/such/folder/anywhere || git commit -m x",
+        "mkdir other && cd /no/such/folder/anywhere; git commit -m x",
+    ],
+)
+def test_guard_stays_put_after_a_cd_that_fails(project: Path, command: str) -> None:
+    """A ``cd`` to a folder nothing creates fails, so the commit happens where the shell was."""
+    assert bash_decision(command, project) == "deny"
 
 
 @pytest.mark.parametrize(
@@ -200,6 +222,11 @@ def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) ->
         "python3 - <<'PY' && echo ok\ntext = 'git push'\nPY",
         "cat <<'EOF'\n$(git commit -m x)\nEOF",
         "cat <<\\EOF\n`git commit -m x`\nEOF",
+        'cat <<"E"OF\n$(git commit -m x)\nEOF',
+        "cat <<EOF\n$(printf ok) git commit -m x\nEOF",
+        "cat <<EOF\ncost: \\$(git commit -m x)\nEOF",
+        "printf bash <<'EOF'\ngit commit -m x\nEOF",
+        "echo bash; cat <<'EOF'\ngit commit -m x\nEOF",
         "echo \"$(cat <<'EOF'\nhow to: git commit, then git push\nEOF\n)\"",
     ],
 )
@@ -229,8 +256,12 @@ def test_guard_still_sees_commands_around_a_here_document(project: Path, command
     [
         "cat <<EOF\n$(git commit -m x)\nEOF",
         "cat <<EOF\nresult: `git commit -m x`\nEOF",
+        "cat <<EOF\n$(echo $(git commit -m x))\nEOF",
         "bash <<'EOF'\ngit commit -m x\nEOF",
         "/bin/sh -s <<EOF\ncd . && git push\nEOF",
+        "echo ok; sudo bash <<'EOF'\ngit commit -m x\nEOF",
+        "FOO=1 /bin/bash -s <<EOF\ngit commit -m x\nEOF",
+        "cat script | sh <<'EOF'\ngit push\nEOF",
     ],
 )
 def test_guard_reads_here_document_text_the_shell_runs(project: Path, command: str) -> None:
@@ -245,6 +276,8 @@ def test_guard_reads_here_document_text_the_shell_runs(project: Path, command: s
         'echo "<<EOF"\ngit commit -m x',
         "echo hi # <<EOF\ngit commit -m x",
         "echo \\<<EOF\ngit commit -m x\nEOF",
+        "cat <<E\\OF\ntext\nEOF\ngit commit -m x",
+        "cat <<'E'\"OF\"\ntext\nEOF\ngit commit -m x",
     ],
 )
 def test_guard_takes_only_real_here_document_openers(project: Path, command: str) -> None:

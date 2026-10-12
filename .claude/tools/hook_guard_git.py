@@ -8,6 +8,7 @@ lets a command through whenever it can't tell what the command does.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -30,8 +31,11 @@ _SETS_VARIABLES = frozenset(
 )
 
 
-def resolve_folder(where: Path | None, target: str, variables: Variables) -> Path | None:
-    """The folder ``target`` names when seen from ``where``, or None if it can't be known."""
+def resolve_path(where: Path | None, target: str, variables: Variables) -> Path | None:
+    """The path ``target`` names when seen from ``where``, or None if it can't be known.
+
+    The path is not checked: it may not exist.
+    """
     expanded = expand(target, variables)
     if expanded is None:
         return None
@@ -40,7 +44,24 @@ def resolve_folder(where: Path | None, target: str, variables: Variables) -> Pat
         if where is None:
             return None
         path = where / path
-    return path if path.is_dir() else None
+    return Path(os.path.normpath(path))
+
+
+def after_cd(
+    where: Path | None, target: str, variables: Variables, named: set[Path]
+) -> Path | None:
+    """The folder the shell is in after ``cd target``, or None if it can't be known.
+
+    A ``cd`` to a folder that does not exist fails, and the shell stays where it was.
+    But the folder may be missing only because an earlier command on this line is
+    going to create it (``mkdir demo && cd demo``). ``named`` holds the paths those
+    commands mention; a missing folder among them, or above one of them, is unknown.
+    """
+    path = resolve_path(where, target, variables)
+    if path is None or path.is_dir():
+        return path
+    may_be_created = any(path == other or path in other.parents for other in named)
+    return None if may_be_created else where
 
 
 def parse_git(
@@ -52,7 +73,9 @@ def parse_git(
         option = args[index]
         if option in _GIT_VALUE_OPTIONS and index + 1 < len(args):
             if option == "-C":
-                where = resolve_folder(where, args[index + 1], variables)
+                # git stops when the folder is missing, so nothing runs: treat it as unknown.
+                path = resolve_path(where, args[index + 1], variables)
+                where = path if path is not None and path.is_dir() else None
             index += 1
         index += 1
     if index >= len(args):
@@ -97,6 +120,7 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
     """
     where: Path | None = cwd
     variables: dict[str, str | None] = {}
+    named: set[Path] = set()  # paths that commands so far mention, and so may create
     for assigned, words in map(split_assignments, split_commands(command)):
         if words and words[0] == "export":
             assigned, words = split_assignments(words[1:])
@@ -111,8 +135,11 @@ def find_violation(command: str, cwd: Path, event: dict) -> str | None:
                 variables[word.partition("=")[0]] = None
             continue
         if words[0] == "cd":
-            where = resolve_folder(where, words[1], variables) if len(words) > 1 else Path.home()
+            where = after_cd(where, words[1], variables, named) if len(words) > 1 else Path.home()
             continue
+        for word in words[1:]:
+            if not word.startswith("-") and (path := resolve_path(where, word, variables)):
+                named.add(path)
         if words[0] != "git":
             continue
         folder, subcommand, rest = parse_git(words[1:], where, variables)
