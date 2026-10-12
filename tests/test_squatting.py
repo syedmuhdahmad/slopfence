@@ -87,7 +87,8 @@ def test_single_release_package_is_flagged_for_a_year(write, check):
 
 
 def test_quarantined_package_is_flagged(write, check):
-    """PyPI's own marker for suspected malware, whatever the package's age."""
+    """PyPI's own quarantine marker, whatever the package's age. The message says
+    what PyPI says, and no more."""
     write("requirements.txt", "acme-color-logs\nOld_And.Held\n")
     facts = {
         "acme-color-logs": PackageInfo(None, 0, "quarantined"),
@@ -96,13 +97,13 @@ def test_quarantined_package_is_flagged(write, check):
     result = check(registry=FakeFactsRegistry(set(), facts), now=NOW)
     assert [(f.message, f.subject) for f in result.findings] == [
         (
-            "Dependency 'acme-color-logs' is quarantined on PyPI as suspected malware: "
-            "remove it until PyPI clears it",
+            "Dependency 'acme-color-logs' is quarantined by PyPI: remove it until PyPI "
+            "lifts the quarantine",
             "acme-color-logs quarantined",
         ),
         (
-            "Dependency 'Old_And.Held' is quarantined on PyPI as suspected malware: "
-            "remove it until PyPI clears it",
+            "Dependency 'Old_And.Held' is quarantined by PyPI: remove it until PyPI "
+            "lifts the quarantine",
             "old-and-held quarantined",
         ),
     ]
@@ -184,7 +185,7 @@ def test_quarantined_import_has_its_own_subject(write, check):
     assert finding.subject == "held_pkg_zz quarantined"
     assert finding.message == (
         "Import 'held_pkg_zz' is not installed or declared, and the PyPI package with that "
-        "name is quarantined on PyPI as suspected malware: remove it until PyPI clears it"
+        "name is quarantined by PyPI: remove it until PyPI lifts the quarantine"
     )
 
 
@@ -1081,7 +1082,10 @@ def test_kinds_of_risk():
         "pkg",
         "pkg quarantined",
     ]
-    assert not any("malicious" in risk.text for risk in (new_pkg, single, held))
+    # A message states what PyPI says about a package, and never calls it harmful.
+    texts = [risk.text for risk in (new_pkg, single, held)]
+    assert not any(word in text for text in texts for word in ("malicious", "malware"))
+    assert held.text == "is quarantined by PyPI: remove it until PyPI lifts the quarantine"
     assert assess(uploaded(3, 5), NOW)[1] == new_pkg.text  # still a (kind, text) pair
 
 

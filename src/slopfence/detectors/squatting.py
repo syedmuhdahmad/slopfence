@@ -4,7 +4,7 @@ SLOP001 stops reporting an invented package name the moment someone registers it
 What gives such a package away is that it is young: almost nothing that real
 projects depend on was first uploaded in the last few weeks. A package is risky when
 
-* PyPI has quarantined it as suspected malware, or
+* PyPI has quarantined it, or
 * its oldest file on PyPI is less than ``min-package-age`` days old (30), or
 * it is less than a year old and has had one release: what a name looks like that
   was registered once and then left.
@@ -66,7 +66,7 @@ def assess(info: PackageInfo | None, now: float, min_age: int = NEW_PACKAGE_DAYS
     if info.quarantined:
         return Risk(
             QUARANTINED,
-            "is quarantined on PyPI as suspected malware: remove it until PyPI clears it",
+            "is quarantined by PyPI: remove it until PyPI lifts the quarantine",
         )
     if info.first_upload is None or not PYPI_OPENED < info.first_upload < now:
         # Not known, or a date that can't be right: a clock that is behind, a damaged cache.

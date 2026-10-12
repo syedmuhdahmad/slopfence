@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from slopfence.models import YOUNG_PACKAGE_DAYS
 
-# The project status that PyPI gives a package it suspects of being malware.
+# The project status of a package that PyPI has quarantined (PEP 792).
 QUARANTINED = "quarantined"
 # Every status PEP 792 names. Any other value in a listing is read as no status.
 STATUSES = frozenset({"active", "archived", "deprecated", QUARANTINED})
@@ -63,7 +63,7 @@ class PackageInfo:
 
     @property
     def quarantined(self) -> bool:
-        """Whether PyPI has quarantined the package as suspected malware."""
+        """Whether PyPI has quarantined the package."""
         return self.status == QUARANTINED
 
 

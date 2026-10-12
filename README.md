@@ -276,7 +276,7 @@ A module of Python's standard library is never looked up, also one that the Pyth
 | Its oldest file on PyPI is less than 30 days old | `Dependency 'flask-jwt-simple-auth' is new on PyPI (oldest upload 2026-10-02, 1 release): check its PyPI page and make sure it is the package you mean (slopsquatting risk)` |
 | It is less than a year old and has only one release | `Dependency 'acme-token-utils' has only one release on PyPI (uploaded 2026-06-01): check its PyPI page and make sure it is the package you mean (slopsquatting risk)` |
 
-If PyPI itself marks a package as quarantined (suspected malware), `SLOP002` reports that too, whatever the package's age.
+If PyPI has quarantined a package, `SLOP002` reports that too, whatever the package's age: remove it until PyPI lifts the quarantine.
 
 A finding means "look before you install", not "this is malware". Open the package's page on pypi.org. Is it the project you meant? Does it link to a real repository? If yes, add `# slopfence: ignore[SLOP002]` to its line. The finding also goes away by itself when the package gets older or gets a second release.
 
