@@ -902,6 +902,42 @@ def test_cells_that_are_hard_to_read_never_stop_the_run(write, check, cell):
     assert "ghost-after" in subjects(result) and result.parse_errors == []
 
 
+IGNORED_IMPORT = "import corp_private_zz  # slopfence: ignore\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ["x = 1\r", IGNORED_IMPORT, "import ghost_next\n"],
+        ["x = 1  # first\n", "\r\u00e9tape = 2\n", IGNORED_IMPORT, "import ghost_next\n"],
+        ['text = """a\rb"""\n', IGNORED_IMPORT, "import ghost_next\n"],
+    ],
+    ids=["at a line end", "before a letter that is not ASCII", "inside a string"],
+)
+def test_a_carriage_return_inside_a_cell_line_moves_no_import(tmp_path, not_installed, source):
+    """Python's parser ends a line at a carriage return that no line feed follows, and
+    the lines of the cell do not. An import below it could only be matched to the
+    wrong line: the one under an ignore comment would be sent, and reported where the
+    next import is. So no import of such a cell is looked up. Its pip lines are, and
+    so are the imports of the same cell with a line feed in its place."""
+    nb = notebook([])
+    nb["cells"] += [
+        {"cell_type": "code", "metadata": {}, "outputs": [], "source": source},
+        {"cell_type": "code", "metadata": {}, "outputs": [], "source": ["%pip install ghost-pip"]},
+    ]
+    path = tmp_path / "nb.ipynb"
+    path.write_text(json.dumps(nb, indent=1, ensure_ascii=False), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"], check_imports=True)
+    assert subjects(result) == ["ghost-pip"] and registry.queries == ["ghost-pip"]
+
+    path.write_text(path.read_text(encoding="utf-8").replace("\\r", "\\n"), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"], check_imports=True)
+    assert sorted(subjects(result)) == ["ghost-pip", "ghost_next"]
+    assert not any("corp" in name for name in registry.queries)
+
+
 def test_read_notebook_keeps_code_cells_only():
     """Markdown and raw cells, and cells without a string source, are dropped."""
     nb = notebook(["x = 1\n"])

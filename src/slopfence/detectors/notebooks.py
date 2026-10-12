@@ -262,6 +262,9 @@ _CELL_MAGIC = re.compile(r"\s*%%(\w*)")
 # Cell magics that save the cell's body as a file.
 _FILE_CELL_MAGICS = {"writefile", "file"}
 _ASSIGNED_COMMAND = re.compile(r"\s*[A-Za-z_][\w.,\s\[\]]*=\s*[!%]")
+# A carriage return that no line feed follows. Python's parser ends a line there, and
+# nothing else that reads a cell does.
+_LONE_CARRIAGE_RETURN = re.compile(r"\r(?!\n)")
 # Expressions that hold string text over several lines (t-strings since Python 3.14).
 _STRINGS = tuple(
     kind
@@ -336,7 +339,12 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
 
 def view_cell(text: str, want_imports: bool) -> CellView:
     """Find the command lines of a cell and, if it parses as Python, its imports
-    and the ignore comments on its lines. A cell that doesn't parse is not an error."""
+    and the ignore comments on its lines. A cell that doesn't parse is not an error.
+
+    No import is taken from a cell with a carriage return inside a line. The parser
+    counts one more line there than the cell has, so an import could not be matched
+    to its line: to its place in the file, or to the ignore comment on it.
+    """
     view = CellView()
     lines = text.split("\n")
     magic = _CELL_MAGIC.match(lines[0])
@@ -373,7 +381,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
         }
         view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
     view.ignored = {c.line for c in src.comments if suppresses_slop001(c.text)}
-    if want_imports:
+    if want_imports and not _LONE_CARRIAGE_RETURN.search(text):
         for name, lineno, byte_col in top_level_imports(src):
             line = lines[lineno - 1] if lineno <= len(lines) else ""
             view.imports.append((name, lineno, char_column(line, byte_col - 1)))

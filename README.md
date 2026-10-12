@@ -209,6 +209,7 @@ Known limits: a list for another tool whose names mostly exist on PyPI too (`git
   - It changes where Python looks for modules: a `%cd` line, `os.chdir`, or the text `sys.path` or `PYTHONPATH` in a code cell.
 
   Known limit: code that reaches the notebook without a trace in it (a Kaggle utility script, a file uploaded by hand) is not seen. Its import is reported when PyPI has no package of that name. Add the name to `known-packages`.
+- The imports of a code cell with a carriage return inside a line (not at its end) are not looked up: Python counts the lines of such a cell in another way than the file does.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`. An excluded notebook is not read at all.
 
