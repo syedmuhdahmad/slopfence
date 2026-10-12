@@ -138,6 +138,59 @@ def test_guard_follows_the_folder_the_command_runs_in(project: Path, tmp_path: P
     assert bash_decision(f"git -C {project} commit -m x", project, cwd=worktree) == "deny"
 
 
+def test_guard_follows_variables_set_on_the_command_line(project: Path, tmp_path: Path) -> None:
+    """A folder reached through ``W=...; cd $W`` counts, in both directions."""
+    worktree = tmp_path / "wt"
+    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
+    assert bash_decision(f"W={worktree}; cd $W && git commit -m x", project) == "allow"
+    assert bash_decision(f'export W={worktree} && git -C "${{W}}" commit -m x', project) == "allow"
+    assert bash_decision(f"W={project}; cd $W && git commit -m x", project, cwd=worktree) == "deny"
+    assert bash_decision(f"W={project}\ngit -C $W push", project, cwd=worktree) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd $NO_SUCH_VARIABLE_HERE && git commit -m x",
+        "git -C $NO_SUCH_VARIABLE_HERE commit -m x",
+        "cd $(mktemp -d) && git commit -m x",
+        "cd /no/such/folder/anywhere && git commit -m x",
+        "W=$(pwd)/elsewhere; cd $W && git push",
+    ],
+)
+def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) -> None:
+    """When the folder a git command runs in can't be known, the guard does not guess."""
+    assert bash_decision(command, project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'EOF'\nprint('then run: git commit -m x')\nEOF",
+        "cat > notes.txt <<EOF\ngit push origin main\nEOF",
+        "cat <<-EOF > notes.txt\n\tgit commit --amend\n\tEOF\necho done",
+        "python3 - <<'PY' && echo ok\ntext = 'git push'\nPY",
+    ],
+)
+def test_guard_ignores_here_document_bodies(project: Path, command: str) -> None:
+    """Text fed to another program is data: mentioning a commit there is not a commit."""
+    assert bash_decision(command, project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat > notes.txt <<EOF\nsome notes\nEOF\ngit commit -m x",
+        "git commit -F - <<'EOF'\nfix: it's done\nEOF",
+        "python3 -c 'print(1 << 4)' && git commit -m x",
+        "echo hi <<< text && git push",
+    ],
+)
+def test_guard_still_sees_commands_around_a_here_document(project: Path, command: str) -> None:
+    """A real commit before, after or fed by a here-document is still denied on main."""
+    assert bash_decision(command, project) == "deny"
+
+
 def test_guard_leaves_other_repositories_alone(project: Path, tmp_path: Path) -> None:
     """A throwaway repository on main (a test fixture) can be committed to."""
     other = make_repo(tmp_path / "other")
