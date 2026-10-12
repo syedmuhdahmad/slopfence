@@ -242,6 +242,17 @@ def test_guard_stays_put_after_a_cd_that_fails(project: Path, command: str) -> N
     assert bash_decision(command, project) == "deny"
 
 
+def test_guard_stays_put_after_a_cd_that_names_two_folders(project: Path, worktree: Path) -> None:
+    """The shell refuses ``cd a b`` ("too many arguments"), so it goes nowhere.
+
+    It is a ``cd`` that failed, so a later ``cd -`` does not go back to it either.
+    """
+    assert bash_decision(f"cd {worktree} extra; git commit -m x", project) == "deny"
+    assert bash_decision(f"cd {project} extra; git commit -m x", project, cwd=worktree) == "allow"
+    command = f"cd {worktree}; cd {project} extra; cd -; git commit -m x"
+    assert bash_decision(command, project) == "deny"
+
+
 @pytest.mark.parametrize(
     ("moves", "decision"),
     [

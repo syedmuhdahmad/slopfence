@@ -90,12 +90,15 @@ def after_cd(folders: Folders, args: list[str], variables: Variables, named: set
 
     ``cd -`` goes back to the folder the shell was in before the last ``cd`` that worked.
 
-    A ``cd`` to a folder that does not exist fails, and the shell stays where it was.
+    A ``cd`` that fails leaves the shell where it was: one that names two folders
+    ("too many arguments"), or one to a folder that does not exist.
     But the folder may be missing only because an earlier command on this line is
     going to create it (``mkdir demo && cd demo``). ``named`` holds the paths that
     such commands name; a missing folder among them, or above one of them, is unknown.
     """
     operands, follow_links = cd_operands(args)
+    if len(operands) > 1:
+        return folders
     if not operands:
         path: Path | None = Path.home()
     elif operands[0] == "-":
