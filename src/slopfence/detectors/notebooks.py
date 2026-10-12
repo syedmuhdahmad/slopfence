@@ -349,8 +349,9 @@ def view_cell(text: str, want_imports: bool) -> CellView:
             offset += len(line) + 1
         return view
     if magic and magic.group(1) not in _PYTHON_CELL_MAGICS:
-        # %%html, %%writefile, %%sql...: not Python, not shell.
-        target = PurePosixPath(lines[0].split()[-1])
+        # %%html, %%writefile, %%sql...: not Python, not shell. On Windows the path of
+        # the file is written with backslashes.
+        target = PurePosixPath(lines[0].split()[-1].replace("\\", "/"))
         if magic.group(1) in _FILE_CELL_MAGICS and target.suffix == ".py":
             view.written = {target.stem, *target.parts[:-1]}
         return view
