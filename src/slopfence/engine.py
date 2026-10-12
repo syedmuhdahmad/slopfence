@@ -99,6 +99,10 @@ class Result:
     severities: dict[str, Severity] = field(default_factory=dict)
     # The findings the baseline hid. With --diff, only the ones on changed lines.
     baselined: list[Finding] = field(default_factory=list)
+    # The package rules (SLOP001...) that ran without all their answers from PyPI: the
+    # run was offline, the environment has a private index, or PyPI did not answer.
+    # Their findings may be incomplete.
+    unchecked_rules: list[str] = field(default_factory=list)
 
 
 def _per_file_matcher(
@@ -254,6 +258,8 @@ def run(
             )
         for summary in in_scope:
             findings.extend(checker.check_imports(summary.rel, summary.imports))
+        if checker.lookups_unanswered(checked_deps, bool(in_scope)):
+            result.unchecked_rules = sorted(rules & PACKAGE_RULES)
 
     if "SLOP030" in rules:
         project_files = (*sources, *compared_with)

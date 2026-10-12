@@ -223,6 +223,14 @@ def _record_baseline(path: Path, result: Result) -> None:
     """
     baselinemod.write(path, result.findings)
     result.notes.append(f"Wrote {plural(len(result.findings), 'finding')} to the baseline {path}.")
+    if result.unchecked_rules:
+        # Otherwise the next run that reaches PyPI fails, and nobody knows why.
+        result.notes.append(
+            f"{' and '.join(result.unchecked_rules)} findings may be missing from the "
+            "baseline: PyPI was not asked, or did not answer, about some packages (offline, "
+            "a private package index, or PyPI could not be reached). Write it again when "
+            "lookups work."
+        )
     result.baselined, result.findings = result.findings, []
 
 

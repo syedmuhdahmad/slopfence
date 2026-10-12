@@ -434,6 +434,8 @@ class PackageChecker:
         self._missing: dict[str, bool] = {}
         # Import name -> the names to ask PyPI about ([] when it needs no lookup).
         self._candidates: dict[str, list[str]] = {}
+        # Whether the registry had no answer for a name it was asked about.
+        self._unanswered = False
 
     @property
     def imports_may_be_private(self) -> bool:
@@ -482,10 +484,34 @@ class PackageChecker:
         if names:
             self.registry.prefetch(names)
 
+    def _exists(self, name: str) -> bool | None:
+        """What the registry says about ``name``. Remembers when it could not say."""
+        found = self.registry.exists(name)
+        if found is None:
+            self._unanswered = True
+        return found
+
+    def lookups_unanswered(self, only_paths: set[str], imports_checked: bool) -> bool:
+        """Whether this run may have missed findings because PyPI gave no answer.
+
+        That is so when a name was asked about and the registry could not say: PyPI
+        could not be reached, or it sent back something unexpected. It is also so
+        when nobody was asked although there was something to ask about, because the
+        run is offline or the environment configures a private index. ``only_paths``
+        are the dependency files the run looked at, and ``imports_checked`` says
+        whether it looked at the imports of any file.
+        """
+        if self._unanswered:
+            return True
+        asks_nobody = bool(self.private_index) or isinstance(self.registry, OfflineRegistry)
+        return asks_nobody and (
+            imports_checked or any(dep.path in only_paths for dep in self.index.dependencies)
+        )
+
     def check_dependencies(self, only_paths: set[str] | None = None) -> Iterator[Finding]:
         """Report declared dependencies that don't exist on PyPI."""
         for dep in self._lookup_dependencies(only_paths):
-            if self.registry.exists(dep.name) is False:
+            if self._exists(dep.name) is False:
                 yield Finding(
                     "SLOP001",
                     dep.path,
@@ -515,7 +541,7 @@ class PackageChecker:
     def _is_missing(self, name: str) -> bool:
         """Cached per name; every import occurrence is still reported separately."""
         if name not in self._missing:
-            answers = [self.registry.exists(c) for c in self._lookup_names(name)]
+            answers = [self._exists(c) for c in self._lookup_names(name)]
             self._missing[name] = bool(answers) and all(a is False for a in answers)
         return self._missing[name]
 

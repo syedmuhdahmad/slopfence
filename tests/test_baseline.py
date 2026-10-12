@@ -18,7 +18,7 @@ from slopfence.cli import main
 from slopfence.config import load_config
 from slopfence.engine import run
 from slopfence.models import RULES, Finding
-from slopfence.registry import OfflineRegistry
+from slopfence.registry import OfflineRegistry, PyPIRegistry
 from tests.conftest import FakeRegistry
 
 APP = '''\
@@ -1082,6 +1082,89 @@ def test_write_baseline_with_strict_and_a_file_that_cannot_be_parsed(write, tmp_
     assert main([".", "--offline", "--strict", "--write-baseline", "base.json"]) == 2
     assert rows(tmp_path / "base.json") == [["app.py", "SLOP051", "I hope this helps!", 1]]
     assert main([".", "--offline", "--write-baseline", "base.json"]) == 0
+
+
+# --- a baseline written without answers from PyPI ---------------------------------------
+
+MAY_BE_MISSING = (
+    "SLOP001 findings may be missing from the baseline: PyPI was not asked, or did not "
+    "answer, about some packages (offline, a private package index, or PyPI could not be "
+    "reached). Write it again when lookups work."
+)
+
+
+def test_write_baseline_says_when_package_findings_may_be_missing(project, capsys, monkeypatch):
+    """A baseline written without answers from PyPI lacks SLOP001 findings; the report says so."""
+
+    def notes(*args):
+        """The notes of a run that writes a baseline with the given options."""
+        return report(capsys, "--write-baseline", "base.json", *args)[1]["notes"]
+
+    assert notes() == ["Wrote 9 findings to the baseline base.json."]  # every lookup answered
+    assert notes("--offline") == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+    # Nothing to say when the rule is off, or when there is no name to look up.
+    assert notes("--offline", "--ignore", "SLOP001") == [
+        "Wrote 8 findings to the baseline base.json."
+    ]
+    assert notes("--offline", "--exclude", "requirements.txt") == [
+        "Wrote 8 findings to the baseline base.json."
+    ]
+    # A private index in the environment: the note that was there explains, this one warns.
+    monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.corp.example/simple")
+    with_index = notes()
+    assert with_index[0].startswith("SLOP001 made no PyPI lookups: a private package index")
+    assert with_index[1:] == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+    assert "corp.example" not in " ".join(with_index)  # an index URL is never printed
+    monkeypatch.delenv("PIP_INDEX_URL")
+    # A run that uses a baseline never prints it.
+    main([".", "--write-baseline", "base.json"])
+    assert report(capsys, "--offline", "--baseline", "base.json")[1]["notes"] == []
+
+
+@pytest.mark.parametrize(
+    "unanswered", [{"requests", "flask-jwt-simple-auth"}, {"flask-jwt-simple-auth"}]
+)
+def test_write_baseline_says_when_pypi_did_not_answer(project, capsys, monkeypatch, unanswered):
+    """PyPI out of reach, or no answer for one name only: its finding may be missing."""
+    (project / "cache" / "slopfence" / "pypi.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        PyPIRegistry, "_query", lambda self, key: None if key in unanswered else key == "requests"
+    )
+    code, after = report(capsys, "--write-baseline", "base.json")
+    assert code == 0
+    assert after["notes"] == ["Wrote 8 findings to the baseline base.json.", MAY_BE_MISSING]
+
+
+def test_result_names_the_package_rules_that_ran_without_answers(write, check):
+    """``Result.unchecked_rules`` is for any caller: a report can say what it could not check."""
+
+    class Silent(FakeRegistry):
+        """A registry that has no answer for one package."""
+
+        def exists(self, name):
+            """Unknown for ``no-answer-zz``; the usual answer for every other name."""
+            return None if name == "no-answer-zz" else super().exists(name)
+
+    write("requirements.txt", "requests\n")
+    write("app.py", "import os\n")
+    assert check(registry=FakeRegistry({"requests"})).unchecked_rules == []
+    assert check().unchecked_rules == ["SLOP001"]  # offline: nobody was asked
+    assert check("SLOP010").unchecked_rules == []  # the package rule did not run
+    assert check(registry=FakeRegistry({"requests"}), private_index="pip.conf").unchecked_rules == [
+        "SLOP001"
+    ]
+    write("requirements.txt", "requests\nno-answer-zz\n")
+    assert check(registry=Silent({"requests"})).unchecked_rules == ["SLOP001"]
+    # A name that was never asked about (the file is ignored for SLOP001) leaves nothing open.
+    quiet = check(registry=Silent({"requests"}), per_file_ignores={"requirements.txt": ["SLOP001"]})
+    assert quiet.unchecked_rules == []
+
+
+def test_offline_import_checks_count_as_unanswered(write, check):
+    """Offline, no import is looked up: with check-imports there may be findings it missed."""
+    write("app.py", "import made_up_zz\n")
+    assert check("SLOP001").unchecked_rules == []  # imports are not checked: nothing to miss
+    assert check("SLOP001", check_imports=True).unchecked_rules == ["SLOP001"]
 
 
 # --- baselined findings that are gone ---------------------------------------------------
