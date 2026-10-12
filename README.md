@@ -166,6 +166,7 @@ That is the file, the rule, what the finding is about, and how many there are. "
 - `--write-baseline` records every finding of that run and reports none. Use the options your normal runs use (`--select`, `--check-imports`…). Run it online: without answers from PyPI there are no `SLOP001` findings to record, and a note says so. It can't be combined with `--diff`.
 - `--write-baseline` only replaces a baseline. It stops if `FILE` is some other file. It also stops if `FILE` holds findings for files outside the paths you are checking: check the whole project then.
 - `baseline` in the config is relative to the project root. `--baseline FILE` is relative to the folder you are in, and it replaces the config value. `--no-baseline` shows everything again.
+- A file outside the project (`slopfence . ../shared`) is recorded with its full path. That row only matches on a machine where the file has the same path. slopfence only looks at such a file when you give its path to the run.
 - A baseline file that is missing or can't be read is an error (exit code `2`), not an empty baseline.
 - Files that can't be parsed are not findings, so they can't be baselined. Use `exclude` for those.
 

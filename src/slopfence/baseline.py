@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -286,13 +287,30 @@ def _exists(root: Path, path: str) -> bool:
     return os.path.exists(os.path.join(root, path))
 
 
+def _outside_project(path: str) -> bool:
+    """Whether a baseline row names a file outside the project.
+
+    A file in the project is named relative to it. Anything else is outside: an
+    absolute path, and a relative one that climbs out with "..". The text of the row
+    decides, by the rules of every system at once, so a baseline is read the same way
+    everywhere. ``os.path.isabs`` would not do: a Windows path (C:/x) is relative on Linux,
+    and from Python 3.13 on a Linux path (/x) is relative on Windows.
+    """
+    return (
+        path.startswith(("/", "\\"))
+        or bool(ntpath.splitdrive(path)[0])
+        # ntpath takes both "/" and "\\" for a separator.
+        or ntpath.normpath(path).split("\\")[0] == ".."
+    )
+
+
 def _in_scope(path: str, scope: Collection[str]) -> bool:
     """Whether the file of a baseline row is one of, or inside one of, the paths of a run."""
     return any(
         path == given
         or path.startswith(given + "/")
         # The project itself holds every file that is named relative to it.
-        or (given == "." and not os.path.isabs(path))
+        or (given == "." and not _outside_project(path))
         for given in scope
     )
 
@@ -303,9 +321,9 @@ def uncovered(entries: Mapping[Key, int], scope: Collection[str], root: Path) ->
     A run with that scope can't tell whether those findings are still there, and a
     baseline written from it would lose them.
 
-    A file outside the project (an absolute path) is taken to exist. Nothing is looked
-    at outside the project unless the run was asked to check it: a row is data that
-    anyone may edit, and on Windows a path can name another computer.
+    A file outside the project (see ``_outside_project``) is taken to exist. Nothing is
+    looked at outside the project unless the run was asked to check it: a row is data
+    that anyone may edit, and on Windows a path can name another computer.
     """
     outside: Counter[str] = Counter()
     for (path, _, _), count in entries.items():
@@ -314,7 +332,7 @@ def uncovered(entries: Mapping[Key, int], scope: Collection[str], root: Path) ->
     return {
         path: count
         for path, count in sorted(outside.items())
-        if os.path.isabs(path) or _exists(root, path)
+        if _outside_project(path) or _exists(root, path)
     }
 
 

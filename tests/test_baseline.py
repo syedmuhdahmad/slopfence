@@ -967,13 +967,12 @@ def test_odd_paths_in_a_baseline_never_crash(write, tmp_path, monkeypatch, capsy
     write("app.py", "x = 1\n")
     odd = [
         ["a" * 5000 + ".py", "SLOP010", "x", 1],
-        ["nul\x00byte.py", "SLOP010", "x", 1],
-        ["../outside/gone.py", "SLOP010", "x", 2],
+        ["nul\x00byte.py", "SLOP010", "x", 2],
     ]
     (tmp_path / "base.json").write_text(json.dumps({"version": 1, "findings": odd}))
     monkeypatch.chdir(tmp_path)
     code, after = report(capsys, "--offline", "--baseline", "base.json")
-    assert (code, after["notes"]) == (0, [GONE.format("4 findings", "exist")])
+    assert (code, after["notes"]) == (0, [GONE.format("3 findings", "exist")])
     # Writing over it works too: none of those files exists, so nothing is lost.
     assert main([".", "--offline", "--write-baseline", "base.json"]) == 0
     assert rows(tmp_path / "base.json") == []
@@ -1538,28 +1537,48 @@ def test_uncovered_lists_findings_of_existing_files_outside_the_scope(write, tmp
     entries[(elsewhere, "SLOP010", "x")] = 2
     assert baselinemod.uncovered(entries, ["."], root) == {elsewhere: 2}
     assert baselinemod.uncovered(entries, [".", elsewhere.rsplit("/", 1)[0]], root) == {}
+    # So is every path of another system, and one that climbs out. A name is not.
+    rows = {(path, "SLOP010", "x"): 1 for path in [*OUTSIDE, "..hidden/gone.py", "c/gone.py"]}
+    assert list(baselinemod.uncovered(rows, ["."], root)) == sorted(OUTSIDE)
 
 
+# Rows for files outside the project, as slopfence writes them on Linux, macOS and
+# Windows, and as an editor could leave them. The last two climb out of the project.
+OUTSIDE = [
+    "/home/al/zz_outside.py",
+    "C:/Users/al/zz_outside.py",
+    "D:zz_outside.py",
+    "//server/share/zz_outside.py",
+    "../far/zz_outside.py",
+    "src/../../far/zz_outside.py",
+]
+
+
+@pytest.mark.parametrize("row", OUTSIDE)
 def test_no_file_outside_the_project_is_looked_at_for_a_baseline_row(
-    write, tmp_path, monkeypatch, capsys
+    write, tmp_path, monkeypatch, capsys, row
 ):
     """A row is data that anyone may edit. Its path must not make slopfence look at a
     place the run was not asked to check: on Windows such a path can name another
-    computer. A file outside the project is taken to exist, without a look."""
-    write("proj/app.py", "x = 1\n")
-    far = (tmp_path / "far" / "away.py").as_posix()
+    computer. A file outside the project is taken to exist, without a look.
+
+    Whether a row is outside is read from its text, so a baseline gives the same
+    result on every system: a Windows path is not a missing project file on Linux.
+    """
+    write("proj/app.py", "# I hope this helps!\n")
+    kept = ["app.py", "SLOP051", "I hope this helps!", 1]
     (tmp_path / "proj" / "base.json").write_text(
-        json.dumps({"version": 1, "findings": [[far, "SLOP010", "x", 1]]}), encoding="utf-8"
+        json.dumps({"version": 1, "findings": [[row, "SLOP010", "x", 1], kept]}), encoding="utf-8"
     )
     asked = []
     real = os.path.exists
     monkeypatch.setattr(os.path, "exists", lambda path: asked.append(str(path)) or real(path))
     monkeypatch.chdir(tmp_path / "proj")
     code, after = report(capsys, "--offline", "--baseline", "base.json")
-    assert (code, after["notes"]) == (0, [])  # not called gone: nobody looked
+    assert (code, after["baselined"], after["notes"]) == (0, 1, [])  # not called gone
     assert main([".", "--offline", "--write-baseline", "base.json"]) == 2
-    assert f"(for example {far})" in capsys.readouterr().err
-    assert not [path for path in asked if "far" in path]
+    assert f"(for example {row})" in capsys.readouterr().err
+    assert not [path for path in asked if "zz_outside" in path]
 
 
 def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):
