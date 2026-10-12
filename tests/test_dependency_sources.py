@@ -184,6 +184,10 @@ def test_discovery(write, tmp_path):
         ("  requests  ", ("requests", False, True)),
         ("Flask[async] >= 2 ; python_version < '3.11'", ("Flask", False, False)),
         ("celery[redis]", ("celery", False, False)),
+        # Extras as pip takes them: names with commas between them, or none.
+        ("requests[security, socks]>=2", ("requests", False, False)),
+        ("requests [ security , socks_v5 ]", ("requests", False, False)),
+        ("requests[]", ("requests", False, False)),
         ("zope.interface (>=5.0)", ("zope.interface", False, False)),
         ("corp-lib @ https://example.com/corp.whl", ("corp-lib", True, False)),
         # A direct reference in every form: a path, a Hatch context, no space, a URL
@@ -222,6 +226,12 @@ def test_requirement_strings(spec, expected):
         # A call in a CMake file is not a requirement with a bracketed version.
         "cmake_minimum_required(VERSION 3.16)",
         "add_test(NAME requires_clause COMMAND requires_clause)",
+        # A bracket that is no list of extras: bindep's platform selector.
+        "build-essential [platform:dpkg]",
+        "libxml2-dev [platform:dpkg test]",
+        "requests[security socks]",
+        "requests[security,]",
+        "requests[{{ extras }}]",
         # File names.
         "mypkg-1.0-py3-none-any.whl",
         "vendor.tar.gz",
@@ -300,6 +310,9 @@ LONG = [
     ("constraints.txt", f"requests==2.31\nflask{SPACES}> =1\n"),
     # No per-requirement option after the white space.
     ("requirements.txt", "requests\nflask" + "\t" * 100_000 + "-x\n"),
+    # A bracket after the name that is no list of extras.
+    ("requirements.txt", f"requests\nflask[{SPACES}async now]\n"),
+    ("constraints.txt", "requests==2.31\nflask[" + f"async{SPACES}," * 50 + "!]\n"),
     ("setup.cfg", f"[options]\ninstall_requires =\n    requests\n    flask{SPACES}extra words\n"),
     # A line of a TOML string that starts like a table header.
     (
@@ -589,6 +602,32 @@ def test_a_file_with_pip_syntax_is_a_pip_file(write, check, body):
     write("requirements/system.txt", body)
     result = check("SLOP001", registry=FakeRegistry(set()))
     assert {"libpq-dev", "libxml2-dev"} <= {f.subject for f in result.findings}
+
+
+BINDEP = (
+    "# see https://docs.opendev.org/opendev/bindep/ for additional information.\n"
+    "build-essential [platform:dpkg]\ngettext\nlibffi-dev [platform:dpkg]\n"
+    "libffi-devel [platform:rpm]\n"
+)
+
+
+@pytest.mark.parametrize("name", ["other-requirements.txt", "requirements/bindep.txt"])
+def test_a_bindep_list_is_not_a_pip_file(write, check, name):
+    """bindep's ``[platform:dpkg]`` is no list of extras, and pip turns such a line
+    down. So the line is no requirement and proves no pip file: nothing of the list
+    is sent or reported, also when PyPI has one of its names."""
+    write(name, BINDEP)
+    for on_pypi in (set(), {"gettext"}):
+        registry = FakeRegistry(on_pypi)
+        assert check("SLOP001", registry=registry).findings == []
+        assert registry.queries == []
+
+
+def test_a_bracket_that_is_no_extra_leaves_a_plain_list_in_doubt(write, check):
+    """One bindep line in a list of bare names does not make the list a pip file, as
+    a real extra would. PyPI lacks every name, so nothing is reported."""
+    write("requirements/system.txt", "build-essential\nlibpq-dev\nlibffi-dev [platform:dpkg]\n")
+    assert check("SLOP001", registry=FakeRegistry(set())).findings == []
 
 
 def test_requirements_txt_is_never_doubted(write, check):
