@@ -458,12 +458,13 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     has: an underline, a bullet, a directive (see ``_MARKUP_STARTS``). pip reads no
     package from such a line: it turns the file down, or takes the line for an
     option that says nothing. A line that goes on from the one before (it ended
-    with a backslash) is part of that line, whatever it starts with. What a
-    document says still counts: its names are
-    declared, and an entry with a source of its own (``name @ git+...``) keeps that
-    package from being looked up in every other file. A wrong guess about a file can
-    so only keep names on the machine. A list for another package manager yields
-    nothing. The index options of the file count in every case.
+    with a backslash) is part of that line, whatever it starts with.
+
+    What a document says still counts. Its names are declared, and an entry with a
+    source of its own (``name @ git+...``) keeps that package from being looked up
+    in every other file. So a wrong guess about a file can only keep names on the
+    machine. A list for another package manager yields nothing. The index options
+    of the file count in every case.
     """
     lines = text_lines(text)
     pip_lines = _pip_lines(lines)
