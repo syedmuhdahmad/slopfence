@@ -471,14 +471,17 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
             continue
         valid += 1
         pip_syntax = pip_syntax or not parsed.bare or spec != line
+        # A URL in an option after the requirement counts like one in the requirement
+        # (see ``parse_requirement``): v0.2 kept the name of such a line on the machine.
+        sourced = parsed.direct or "://" in line
         deps.append(
             Dependency(
                 parsed.name,
                 rel,
                 lineno,
-                validate=not (parsed.direct or private_index or links),
+                validate=not (sourced or private_index or links),
                 suppressed=suppressed,
-                own_source=parsed.direct,
+                own_source=sourced,
             )
         )
     found = DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
@@ -914,11 +917,10 @@ class PackageChecker:
                 "from PyPI may be private packages. If that index only mirrors PyPI, set "
                 "detect-private-index = false."
             )
-        unread = [rel for rel in self.inherited_from if rel in unreadable]
         return (
-            f"{_listed(unread)} could not be read and may set a private package index, so "
-            "names missing from PyPI may be private packages. Repair or exclude that "
-            "file, or set detect-private-index = false."
+            f"{_listed(self.inherited_from)} could not be read and may set a private package "
+            "index, so names missing from PyPI may be private packages. Repair or exclude "
+            "that file, or set detect-private-index = false."
         )
 
     def _lookup_names(self, name: str) -> list[str]:

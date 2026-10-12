@@ -207,7 +207,8 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
             warnings.simplefilter("ignore")
             tree = ast.parse(text, filename=str(path))
     # RecursionError and MemoryError: an expression nested thousands deep, in a file
-    # nobody wrote by hand. Which of the two it is depends on the Python version.
+    # nobody wrote by hand. Which of the two it is depends on the expression and on
+    # the Python version.
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
 

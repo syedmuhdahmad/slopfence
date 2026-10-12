@@ -569,6 +569,23 @@ def test_a_links_option_after_a_requirement_covers_its_file(write, check, option
     assert registry.queries == ["ghost-pin"]
 
 
+def test_a_url_in_an_option_after_a_requirement_keeps_the_name_on_the_machine(write, check):
+    """v0.2 looked up no name whose line held a URL with a password, wherever the URL
+    stood. An option after the requirement that is no index option still says where
+    the package comes from: the name is not sent, from this file or another."""
+    option = "--config-settings=url=https://deploy:secret@files.corp.example/x"
+    write("requirements.txt", f"requests==2.32.0\ncorp-auth==1.0 {option}\n")
+    write("constraints.txt", "corp-auth==1.0\nrequests==2.32.0\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and set(registry.queries) == {"requests"}
+    # The look-alike: a hash is no URL, so the name is looked up, here and elsewhere.
+    write("requirements.txt", "requests==2.32.0\ncorp-auth==1.0 --hash=sha256:abcd\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("constraints.txt", 1, 1), ("requirements.txt", 2, 1)]
+
+
 APT_LIST = "build-essential\nlibpq-dev\nlibxml2-dev\nrequests\n"
 
 
