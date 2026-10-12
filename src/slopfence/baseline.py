@@ -231,6 +231,13 @@ def match(
     the first ones in the file are hidden. With ``changed`` (``--diff``), findings
     outside the changed lines use up the entries first: they are the old ones, so a
     new one on a changed line is the one that gets reported.
+
+    A finding with a ``peer`` (SLOP030 with ``--diff``: a changed function that is the
+    first copy of a group of identical ones) has no entry of its own, because a full
+    scan never reports it. An entry with its key was written for another function, so
+    it leaves that one alone. It is hidden when its peer has an entry, and that entry
+    stays whole for the peer's own finding. An entry that already can't hide every old
+    finding with its key stands for nothing more: something with that key is new.
     """
 
     def touched(i: int) -> bool:
@@ -244,9 +251,17 @@ def match(
     remaining = dict(baseline.entries)
     hidden_at: set[int] = set()
     for i in order:
-        if remaining.get(keys[i], 0) > 0:
+        if findings[i].peer is None and remaining.get(keys[i], 0) > 0:
             remaining[keys[i]] -= 1
             hidden_at.add(i)
+    # The keys with more old findings than their entry hides.
+    short = {keys[i] for i in range(len(findings)) if i not in hidden_at and not touched(i)}
+    for i, finding in enumerate(findings):
+        if i not in hidden_at and finding.peer is not None:
+            path, subject = finding.peer
+            peer_key = (path, finding.rule, normalize_fingerprint(subject))
+            if peer_key in baseline.entries and peer_key not in short:
+                hidden_at.add(i)
     return Match(
         new=[f for i, f in enumerate(findings) if i not in hidden_at],
         hidden=[f for i, f in enumerate(findings) if i in hidden_at],

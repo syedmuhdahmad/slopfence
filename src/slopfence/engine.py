@@ -264,6 +264,8 @@ def run(
                 changed,
                 # A copy of code from a file where SLOP030 is off is still reported.
                 ignored={s.rel for s in project_files if switched_off("SLOP030", s.rel)},
+                # With --diff, a baseline must also see what did not change.
+                report_unchanged=baseline is not None,
             )
         )
 

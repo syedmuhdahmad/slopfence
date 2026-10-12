@@ -3,7 +3,7 @@
 import subprocess
 
 from slopfence import diff as diffmod
-from slopfence.detectors.duplicates import TOKEN_SEP, index_functions
+from slopfence.detectors.duplicates import TOKEN_SEP, check_duplicates, index_functions
 from slopfence.engine import run
 from slopfence.registry import OfflineRegistry
 from slopfence.source import load
@@ -384,3 +384,63 @@ def test_one_order_decides_the_first_copy(write, check):
     result = check("SLOP030")
     assert [f.path for f in result.findings] == ["a/b.py", "a/d.py", "a/e.py"]
     assert all("'format_date' in a-b/c.py:1" in m for m in messages(result))
+
+
+def test_diff_mode_can_also_report_unchanged_copies(write, tmp_path):
+    """``report_unchanged`` adds what a full scan finds; a changed first copy names a peer."""
+    git = git_project(tmp_path)
+    write("src/a.py", FORMAT_DATE)
+    write("src/b.py", FORMAT_DATE_COPY)
+    write("src/c.py", FORMAT_DATE)
+    git("add", ".")
+    git("commit", "-q", "-m", "init")
+    write("src/a.py", FORMAT_DATE.replace("for display", "for people"))  # the docstring only
+    changed = diffmod.changed_lines(tmp_path, "main")
+    sources = [load(tmp_path / "src" / f"{name}.py", tmp_path) for name in "abc"]
+    functions = [f for src in sources for f in index_functions(src)]
+    checked = {src.rel for src in sources}
+
+    [first] = check_duplicates(functions, checked, changed)
+    # The changed function is the first copy: a full scan would not report it at all.
+    assert (first.path, first.peer) == ("src/a.py", ("src/b.py", "formatDate"))
+    both = sorted(
+        check_duplicates(functions, checked, changed, report_unchanged=True), key=lambda f: f.path
+    )
+    assert [(f.path, f.peer) for f in both] == [
+        ("src/a.py", ("src/b.py", "formatDate")),
+        ("src/b.py", None),
+        ("src/c.py", None),
+    ]
+    # A full scan reports the same two unchanged copies, and it never names a peer.
+    full = sorted(check_duplicates(functions, checked), key=lambda f: f.path)
+    assert both[1:] == full
+    assert all(f.peer is None for f in full)
+
+
+def test_peer_is_an_unchanged_copy_where_there_is_one(write, tmp_path):
+    """Both of the first two copies changed: the peer is the third, which did not."""
+    git = git_project(tmp_path)
+    for name in "abc":
+        write(f"src/{name}.py", FORMAT_DATE)
+    git("add", ".")
+    git("commit", "-q", "-m", "init")
+    for name in "ab":
+        write(f"src/{name}.py", FORMAT_DATE.replace("for display", "for people"))
+    changed = diffmod.changed_lines(tmp_path, "main")
+    sources = [load(tmp_path / "src" / f"{name}.py", tmp_path) for name in "abc"]
+    functions = [f for src in sources for f in index_functions(src)]
+    found = {f.path: f.peer for f in check_duplicates(functions, {s.rel for s in sources}, changed)}
+    # b.py is not the first copy: a full scan reports it, so it needs no peer.
+    assert found == {"src/a.py": ("src/c.py", "format_date"), "src/b.py": None}
+
+
+def test_changed_function_with_only_near_copies_has_no_peer(write, tmp_path):
+    """A near-copy is never in a baseline, so nothing can stand for it."""
+    git = git_project(tmp_path)
+    write("src/db.py", BUILD_QUERY)
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    write("src/a_repo.py", BUILD_QUERY_NEAR)
+    changed = diffmod.changed_lines(tmp_path, "main")
+    result = run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"], changed=changed)
+    assert [(f.path, f.peer) for f in result.findings] == [("src/a_repo.py", None)]

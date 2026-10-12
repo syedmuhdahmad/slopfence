@@ -104,6 +104,11 @@ class Finding:
     subject: str | None = None
     # Set by the engine when the config gives this rule another severity.
     severity_override: Severity | None = None
+    # SLOP030 with --diff only: (path, subject) of an identical function whose
+    # baseline entry also stands for this finding. A full scan never reports the first
+    # copy of a group of identical functions, so that copy has no entry of its own
+    # (see ``baseline.match``).
+    peer: tuple[str, str] | None = None
 
     @property
     def severity(self) -> Severity:

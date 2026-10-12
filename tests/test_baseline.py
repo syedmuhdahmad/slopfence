@@ -1,8 +1,10 @@
 """Baseline mode (#51): accept today's findings, report only new ones."""
 
 import ast
+import difflib
 import json
 import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from slopfence.cli import main
 from slopfence.config import load_config
 from slopfence.engine import run
 from slopfence.models import RULES, Finding
+from slopfence.registry import OfflineRegistry
 from tests.conftest import FakeRegistry
 
 APP = '''\
@@ -503,6 +506,331 @@ def test_invalid_baseline_config(tmp_path, monkeypatch, capsys, value):
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline"]) == 2
     assert "[tool.slopfence]: 'baseline' must be a file path" in capsys.readouterr().err
+
+
+# --- duplicates with --diff (a full scan never reports the first copy) ------------------
+
+
+def helper(name, doc="Format a date."):
+    """A function that SLOP030 matches with every other ``helper``, whatever its docstring."""
+    return HELPER.format(name=name).replace("\n", f'\n    """{doc}"""\n', 1)
+
+
+# Only SLOP030 matters in these tests.
+ONLY_SLOP030 = ["--offline", "--select", "SLOP030"]
+
+
+def diff_run(capsys, *args):
+    """``--diff main``: the exit code, the path of each finding, and the baselined count."""
+    code, after = report(capsys, *ONLY_SLOP030, "--diff", "main", *args)
+    return code, [f["path"] for f in after["findings"]], after["baselined"]
+
+
+def full_run(capsys, *args):
+    """A run without ``--diff``: the exit code and the path of each finding."""
+    code, after = report(capsys, *ONLY_SLOP030, *args)
+    return code, [f["path"] for f in after["findings"]]
+
+
+def test_touched_first_copy_of_an_accepted_duplicate_stays_hidden(
+    write, tmp_path, monkeypatch, capsys
+):
+    """With --diff a changed first copy is a finding; the entry of its twin stands for it."""
+    write("src/dates.py", helper("format_date", "Fromat a date."))
+    write("src/utils.py", helper("fmt_date", "Fromat a date."))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    # The full scan reports the second copy only, so only that one is recorded.
+    assert rows(tmp_path / "base.json") == [["src/utils.py", "SLOP030", "fmt_date", 1]]
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "typo")
+    edit(tmp_path / "src" / "dates.py", "Fromat", "Format")  # the first copy's docstring only
+
+    assert diff_run(capsys) == (1, ["src/dates.py"], 0)  # --diff alone reports it
+    assert diff_run(capsys, "--baseline", "base.json") == (0, [], 1)
+    # Both copies touched: the second is hidden by its own entry, the first by its twin's.
+    edit(tmp_path / "src" / "utils.py", "Fromat", "Format")
+    assert diff_run(capsys, "--baseline", "base.json") == (0, [], 2)
+    assert full_run(capsys, "--baseline", "base.json") == (0, [])
+
+
+def test_new_copy_of_an_accepted_duplicate_is_reported_with_diff(
+    write, tmp_path, monkeypatch, capsys
+):
+    """A new copy is reported, also when it sorts first and every other copy is baselined."""
+    for name in ("b", "c", "d"):
+        write(f"src/{name}.py", helper(f"f{name}"))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    write("src/a.py", helper("fa"))
+
+    # The copy it points at (b.py) was the first one until now: it has no entry.
+    assert diff_run(capsys, "--baseline", "base.json") == (1, ["src/a.py"], 0)
+    # A full run blames the old first copy in its place, and fails as well.
+    assert full_run(capsys, "--baseline", "base.json") == (1, ["src/b.py"])
+    # A new copy that sorts last is reported by both, in the same place.
+    (tmp_path / "src" / "a.py").unlink()
+    write("src/z.py", helper("fz"))
+    assert diff_run(capsys, "--baseline", "base.json") == (1, ["src/z.py"], 0)
+    assert full_run(capsys, "--baseline", "base.json") == (1, ["src/z.py"])
+
+
+def test_touched_first_copy_and_a_new_copy_give_one_finding(write, tmp_path, monkeypatch, capsys):
+    """Touching the first copy of an accepted pair never lets a new copy slip past --diff."""
+    write("src/dates.py", helper("format_date", "Fromat a date."))
+    write("src/utils.py", helper("fmt_date"))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    edit(tmp_path / "src" / "dates.py", "Fromat", "Format")
+    write("src/aaa_new.py", helper("brand_new_copy"))
+
+    # The same function and the same count as the full run: dates.py is not the first
+    # copy any more. The new first copy is hidden by the entry of the accepted twin.
+    assert diff_run(capsys, "--baseline", "base.json") == (1, ["src/dates.py"], 1)
+    assert full_run(capsys, "--baseline", "base.json") == (1, ["src/dates.py"])
+
+
+# Two methods that SLOP030 never takes for copies of each other.
+METHOD = (
+    "    def {name}(self, value, fmt='%Y'):\n        if value is None:\n"
+    "            return ''\n        text = value.strftime(fmt)\n        return text.strip()\n"
+)
+OTHER_METHOD = (
+    "    def {name}(self, items, sep=','):\n        if not items:\n"
+    "            return ''\n        joined = sep.join(items)\n        return joined.upper()\n"
+)
+
+
+def test_unchanged_duplicates_use_their_baseline_entries_first(tmp_path, monkeypatch, capsys):
+    """With --diff an old duplicate keeps its entry; a new one with its name is reported."""
+    (tmp_path / "aaa.py").write_text("class Base:\n" + METHOD.format(name="render"))
+    (tmp_path / "aab.py").write_text("class Other:\n" + OTHER_METHOD.format(name="join_up"))
+    models = tmp_path / "models.py"
+    models.write_text("class A:\n" + METHOD.format(name="to_text"))
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    assert rows(tmp_path / "base.json") == [["models.py", "SLOP030", "to_text", 1]]
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    # A second method named to_text in the same file. It copies another function.
+    models.write_text(models.read_text() + "\n\nclass B:\n" + OTHER_METHOD.format(name="to_text"))
+
+    code, after = report(capsys, *ONLY_SLOP030, "--diff", "main", "--baseline", "base.json")
+    assert (code, [(f["path"], f["line"]) for f in after["findings"]]) == (1, [("models.py", 10)])
+    assert after["baselined"] == 0  # the old one is hidden, but it is not on a changed line
+    code, after = report(capsys, *ONLY_SLOP030, "--baseline", "base.json")
+    assert (code, [f["line"] for f in after["findings"]], after["baselined"]) == (1, [10], 1)
+
+
+def test_new_first_copy_cannot_hide_behind_an_entry_of_the_same_name(tmp_path, monkeypatch, capsys):
+    """The entry of an old duplicate named like the twin does not stand for a new copy.
+
+    models.py has an accepted duplicate named to_text, and a second to_text that copies
+    nothing yet. A new file then copies the second one and sorts first. The old first
+    copy is now the one a full scan reports, and --diff must fail as well.
+    """
+    (tmp_path / "base_model.py").write_text("class Base:\n" + METHOD.format(name="render"))
+    (tmp_path / "models.py").write_text(
+        "class A:\n"
+        + METHOD.format(name="to_text")
+        + "\n\nclass B:\n"
+        + OTHER_METHOD.format(name="to_text")
+    )
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    assert rows(tmp_path / "base.json") == [["models.py", "SLOP030", "to_text", 1]]
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    (tmp_path / "aaa_new.py").write_text("class New:\n" + OTHER_METHOD.format(name="join_up"))
+
+    assert full_run(capsys, "--baseline", "base.json") == (1, ["models.py"])
+    assert diff_run(capsys, "--baseline", "base.json") == (1, ["aaa_new.py"], 0)
+
+
+def test_new_first_copy_cannot_use_the_entry_of_a_function_it_replaced(
+    tmp_path, monkeypatch, capsys
+):
+    """An entry that a rewritten function left behind does not hide what it is now.
+
+    render was an accepted copy. It is rewritten into a copy of to_text, the function
+    below it. A full scan now reports to_text, which has no entry. With --diff the
+    finding is on render, the first copy, and the old entry named render must not hide it.
+    """
+    (tmp_path / "base_model.py").write_text("class Base:\n" + METHOD.format(name="show"))
+    models = tmp_path / "models.py"
+    models.write_text(
+        "class A:\n"
+        + METHOD.format(name="render")
+        + "\n\nclass B:\n"
+        + OTHER_METHOD.format(name="to_text")
+    )
+    monkeypatch.chdir(tmp_path)
+    main([".", *ONLY_SLOP030, "--write-baseline", "base.json"])
+    assert rows(tmp_path / "base.json") == [["models.py", "SLOP030", "render", 1]]
+    commit_all(tmp_path)
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    models.write_text(
+        "class A:\n"
+        + OTHER_METHOD.format(name="render")
+        + "\n\nclass B:\n"
+        + OTHER_METHOD.format(name="to_text")
+    )
+
+    code, after = report(capsys, *ONLY_SLOP030, "--baseline", "base.json")
+    assert (code, [(f["path"], f["line"]) for f in after["findings"]]) == (1, [("models.py", 10)])
+    code, after = report(capsys, *ONLY_SLOP030, "--diff", "main", "--baseline", "base.json")
+    assert (code, [(f["path"], f["line"]) for f in after["findings"]]) == (1, [("models.py", 2)])
+
+
+def test_peer_entry_hides_a_finding_without_being_used_up():
+    """A finding with a peer is hidden when the peer has an entry. The entry stays whole."""
+    baseline = Baseline({("b.py", "SLOP030", "fmt_date"): 1})
+    first = Finding("SLOP030", "a.py", 1, 1, "m", subject="format_date", peer=("b.py", "fmt_date"))
+    own = Finding("SLOP030", "b.py", 1, 1, "m", subject="fmt_date")
+    other = Finding("SLOP030", "c.py", 1, 1, "m", subject="x", peer=("d.py", "not_recorded"))
+    matched = baselinemod.match([first, own, other], baseline)
+    assert (matched.hidden, matched.new, matched.unused) == ([first, own], [other], {})
+    # Without the peer's own finding, the entry is still all there afterwards.
+    alone = baselinemod.match([first], baseline)
+    assert (alone.hidden, alone.unused) == ([first], {("b.py", "SLOP030", "fmt_date"): 1})
+
+
+def test_finding_with_a_peer_never_uses_an_entry_with_its_own_key():
+    """A full scan would not report it, so an entry with its key belongs to another function."""
+    baseline = Baseline({("z.py", "SLOP030", "render"): 1})
+    first = Finding("SLOP030", "z.py", 2, 1, "m", end_line=6, subject="render", peer=("z.py", "x"))
+    matched = baselinemod.match([first], baseline, {"z.py": {3}})
+    assert (matched.new, matched.hidden) == ([first], [])
+    assert matched.unused == {("z.py", "SLOP030", "render"): 1}
+
+
+def test_peer_entry_that_is_too_small_for_the_old_findings_hides_nothing_more():
+    """One entry, two old findings with its key: one of them is new, so the peer is not hidden."""
+    baseline = Baseline({("b.py", "SLOP030", "to_text"): 1})
+    first = Finding(
+        "SLOP030", "a.py", 1, 1, "m", end_line=5, subject="new", peer=("b.py", "to_text")
+    )
+    old = Finding("SLOP030", "b.py", 2, 1, "m", end_line=6, subject="to_text")
+    newly_blamed = Finding("SLOP030", "b.py", 10, 1, "m", end_line=14, subject="to_text")
+    matched = baselinemod.match([first, old, newly_blamed], baseline, {"a.py": None})
+    assert (matched.hidden, matched.new) == ([old], [first, newly_blamed])
+    # When the second finding with that key is on a changed line, it is reported itself,
+    # and the function with the peer stays hidden: the old one it copies is accepted.
+    matched = baselinemod.match([first, old, newly_blamed], baseline, {"a.py": None, "b.py": {12}})
+    assert (matched.hidden, matched.new) == ([first, old], [newly_blamed])
+
+
+# Function bodies that SLOP030 never takes for copies of each other.
+BODIES = [
+    "    if value is None:\n        return ''\n    text = value.strftime(fmt)\n    return text\n",
+    "    items = []\n    for part in value:\n        items.append(fmt % part)\n    return items\n",
+    "    try:\n        number = int(value)\n    except ValueError:\n        number = 0\n"
+    "    return number + len(fmt)\n",
+    "    while value and value[-1] in fmt:\n        value = value[:-1]\n    count = len(value)\n"
+    "    return count, value\n",
+]
+FILES = ["a/m1.py", "a/m2.py", "a-b/m3.py", "lib/x.py", "svc/y.py", "svc/z.py", "top.py"]
+NAMES = ["render", "to_text", "load", "clean", "fmt", "build"]
+
+
+def random_function(rng, taken):
+    """A function or a method with one of BODIES. Functions get a name the file doesn't have."""
+    method = rng.random() < 0.4
+    name = rng.choice(NAMES)
+    while not method and name in taken:
+        name = rng.choice(NAMES) + str(rng.randrange(100))
+    if not method:
+        taken.add(name)
+    return {"name": name, "body": rng.randrange(len(BODIES)), "method": method, "doc": "Do it."}
+
+
+def module_text(functions):
+    """The source of a module with these functions. Each method gets a class of its own."""
+    parts = []
+    for number, function in enumerate(functions):
+        text = f'    """{function["doc"]}"""\n' + BODIES[function["body"]]
+        if function["method"]:
+            body = "".join(f"    {line}\n" for line in text.splitlines())
+            parts.append(
+                f"class C{number}:\n    def {function['name']}(self, value, fmt='%Y'):\n{body}"
+            )
+        else:
+            parts.append(f"def {function['name']}(value, fmt='%Y'):\n{text}")
+    return "\n\n".join(parts)
+
+
+def random_pull_request(rng, project):
+    """Change ``project`` like a pull request does: edit docstrings, add and delete functions."""
+    for _ in range(rng.randint(1, 3)):
+        kind = rng.choice(["touch", "touch", "add", "add", "delete"])
+        files = [rel for rel, functions in project.items() if functions]
+        if kind == "touch" and files:
+            rng.choice(project[rng.choice(files)])["doc"] += " Fixed a typo."
+        elif kind == "add":
+            functions = project.setdefault(rng.choice(FILES), [])
+            taken = {f["name"] for f in functions if not f["method"]}
+            functions.insert(rng.randint(0, len(functions)), random_function(rng, taken))
+        elif kind == "delete" and files:
+            functions = project[rng.choice(files)]
+            functions.pop(rng.randrange(len(functions)))
+
+
+def changed_lines(before, after):
+    """What ``git diff`` would say changed between two versions of a project's files."""
+    changed = {}
+    for rel, text in after.items():
+        if rel not in before:
+            changed[rel] = None
+        elif text != before[rel]:
+            old, new = before[rel].splitlines(), text.splitlines()
+            blocks = difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+            changed[rel] = {
+                line + 1 for tag, _, _, j1, j2 in blocks if tag != "equal" for line in range(j1, j2)
+            }
+    return changed
+
+
+def duplicates(root, project, **kwargs):
+    """Write the files of ``project`` under ``root`` and check them for duplicates."""
+    for rel in FILES:
+        path = root / rel
+        path.unlink(missing_ok=True)
+        if project.get(rel):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(module_text(project[rel]), encoding="utf-8")
+    return run([root], root, OfflineRegistry(), select=["SLOP030"], **kwargs)
+
+
+def test_diff_run_and_full_run_agree_about_duplicates(tmp_path):
+    """With a baseline, a --diff run fails when a full run fails, and only then.
+
+    150 small random projects with groups of identical functions, some in classes
+    and some with the same name in one file. Each gets a baseline, then a random pull
+    request. If the full run finds a new duplicate, the pull request added one, and
+    --diff has to report something too. If it finds none, --diff must be silent.
+    """
+    rng = random.Random(51)
+    kinds = {True: 0, False: 0}
+    for case in range(150):
+        root = tmp_path / str(case)
+        project = {}
+        for rel in rng.sample(FILES, rng.randint(2, 6)):
+            taken = set()
+            project[rel] = [random_function(rng, taken) for _ in range(rng.randint(1, 3))]
+        accepted = Baseline(baselinemod.count_findings(duplicates(root, project).findings))
+        before = {rel: module_text(functions) for rel, functions in project.items() if functions}
+        random_pull_request(rng, project)
+        after = {rel: module_text(functions) for rel, functions in project.items() if functions}
+        full = duplicates(root, project, baseline=accepted)
+        diff = duplicates(root, project, baseline=accepted, changed=changed_lines(before, after))
+        assert bool(diff.findings) == bool(full.findings), (case, full.findings, diff.findings)
+        kinds[bool(full.findings)] += 1
+    # Both kinds of pull request came up often enough to mean something.
+    assert min(kinds.values()) >= 30
 
 
 # --- a baseline file that can't be used -------------------------------------------------

@@ -304,6 +304,7 @@ def check_duplicates(
     changed: ChangedLines | None = None,
     *,
     ignored: Collection[str] = (),
+    report_unchanged: bool = False,
 ) -> Iterator[Finding]:
     """SLOP030 for functions in ``checked`` files, compared with all ``functions``.
 
@@ -318,6 +319,15 @@ def check_duplicates(
     ``ignored`` are the files where SLOP030 is switched off (``per-file-ignores``).
     They come before every other file. So a copy of their code somewhere else is
     never "the first copy", and it is always reported.
+
+    A baseline is written from a full scan, so it has an entry for every identical
+    copy except the first. Two things make a run with ``changed`` agree with it:
+
+    * A changed function that is the first copy names a ``peer``: an identical copy,
+      an unchanged one where possible. That copy has the entry.
+    * With ``report_unchanged``, the unchanged functions that a full scan reports are
+      reported here too. They use up their entries before a changed function with
+      the same name can. The caller's ``--diff`` filter drops them afterwards.
     """
 
     def position(func: Function) -> tuple[bool, str, int]:
@@ -343,19 +353,21 @@ def check_duplicates(
     near_for = {k for k in range(len(functions)) if is_changed(k)}
     for i, others in find_duplicates(functions, near_for).items():
         func = functions[i]
-        if changed is None:
-            others = [(j, score) for j, score in others if score >= 1.0]
         if func.path not in checked or not others:
             continue
-        if changed is not None:
-            if not is_changed(i):
-                continue
-            others = sorted(others, key=lambda m: (is_changed(m[0]), order(m[0])))
+        identical = sorted((j for j, score in others if score >= 1.0), key=order)
+        # The first copy: a full scan does not report it, the other copies point here.
+        is_first = bool(identical) and order(i) < order(identical[0])
+        peer = None
+        if is_changed(i):
+            j, score = min(others, key=lambda m: (is_changed(m[0]), order(m[0])))
+            if is_first:
+                twin = functions[min(identical, key=lambda k: (is_changed(k), order(k)))]
+                peer = (twin.path, twin.name)
+        elif identical and not is_first and (changed is None or report_unchanged):
+            j, score = identical[0], 1.0
         else:
-            if all(order(i) < order(j) for j, _ in others):
-                continue  # the first copy: the others point here
-            others = sorted(others, key=lambda m: order(m[0]))
-        j, score = others[0]
+            continue
         other = functions[j]
         how = "identical to" if score >= 1.0 else f"{int(score * 100)}% similar to"
         yield Finding(
@@ -367,4 +379,5 @@ def check_duplicates(
             "reuse it instead of keeping two copies",
             end_line=func.end_line,
             subject=func.name,
+            peer=peer,
         )
