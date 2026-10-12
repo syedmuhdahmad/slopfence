@@ -192,6 +192,25 @@ def test_slop001_is_not_looked_up_in_ignored_files(write, check):
     assert len(registry.batches) == 1  # the batch was really used
 
 
+def test_imports_under_an_ignore_comment_are_not_looked_up(write, check):
+    """An ignore comment that covers SLOP001 hides the finding, so the name is not sent
+    either: not for a whole file, and not for one line. Another rule's comment changes nothing."""
+    write("src/skipped.py", "# slopfence: ignore-file\nimport corp_file_zz\n")
+    write(
+        "src/app.py",
+        "import corp_line_zz  # slopfence: ignore\n"
+        "import corp_rule_zz  # slopfence: ignore[SLOP001]\n"
+        "import made_up_zz  # slopfence: ignore[SLOP010]\n"
+        "import shared_zz  # slopfence: ignore\n",
+    )
+    write("src/other.py", "import shared_zz\n")  # the same module, without a comment
+    registry = FakeBatchRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert [(f.path, f.line) for f in result.findings] == [("src/app.py", 3), ("src/other.py", 1)]
+    asked = {*registry.queries, *(name for batch in registry.batches for name in batch)}
+    assert asked == {"made_up_zz", "made-up-zz", "shared_zz", "shared-zz"}
+
+
 def test_dependencies_of_an_ignored_file_still_count_as_declared(write, check):
     """Switching SLOP001 off for pyproject.toml stops its lookups, not what it declares."""
     write("pyproject.toml", '[project]\nname = "demo"\ndependencies = ["corp-auth-zz"]\n')

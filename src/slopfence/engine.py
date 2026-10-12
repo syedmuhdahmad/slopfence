@@ -288,15 +288,16 @@ def run(
             rel for p in dep_files if not switched_off("SLOP001", rel := _rel_to(p, root))
         }
         # Imports are only sent to PyPI when the user opts in (they can reveal private
-        # names), and never for files outside the diff.
-        in_scope = [
-            s
+        # names), and never for files outside the diff. Nor is an import under an ignore
+        # comment: its finding would be dropped, so there is nothing to ask for.
+        imports = {
+            s.rel: [found for found in s.imports if not s.is_ignored("SLOP001", found[1])]
             for s in sources
             if check_imports
             and (changed is None or s.rel in changed)
             and not switched_off("SLOP001", s.rel)
-        ]
-        imported = [name for s in in_scope for name, _, _ in s.imports]
+        }
+        imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, imported)
         findings.extend(checker.check_dependencies(only_paths=checked_deps))
@@ -312,8 +313,8 @@ def run(
                 f"SLOP001 didn't look up imports on PyPI: {files} uses a private package "
                 "index, so unknown imports may be private packages."
             )
-        for summary in in_scope:
-            findings.extend(checker.check_imports(summary.rel, summary.imports))
+        for rel, found in imports.items():
+            findings.extend(checker.check_imports(rel, found))
         if checker.lookups_unanswered(checked_deps, imported):
             result.unchecked_rules = sorted(rules & PACKAGE_RULES)
 

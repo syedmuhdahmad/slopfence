@@ -180,7 +180,7 @@ slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. 
 | Dependencies declared in `requirements*.txt` and `pyproject.toml` | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent. Neither is any dependency in a file that uses a private index: `--index-url` / `--extra-index-url` in a requirements file, a `[[tool.poetry.source]]` or `[[tool.uv.index]]` that isn't PyPI (unless it's `explicit`, which only affects the dependencies that name it), or a per-dependency Poetry `source` or `[tool.uv.sources]` entry |
 | Imports in your source code that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
-Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`. Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. `--offline` sends nothing at all.
+Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. `--offline` sends nothing at all.
 
 ### Private package indexes
 
