@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterator
 
 from slopfence.models import Finding
-from slopfence.source import SourceFile, child_statements
+from slopfence.source import SourceFile, child_statements, walk
 
 # --- SLOP040 ------------------------------------------------------------------------
 
@@ -247,7 +247,10 @@ def _first_word(doc: str) -> str:
 
 
 def _is_fake_value(node: ast.expr | None) -> bool:
-    """A hardcoded result: True, or a literal collection of constants."""
+    """A hardcoded result: True, or a literal collection of constants.
+
+    Recursion is safe here: Python refuses more than 200 nested brackets.
+    """
     if isinstance(node, ast.Constant):
         return node.value is True
     if isinstance(node, (ast.Dict, ast.List, ast.Tuple, ast.Set)):
@@ -274,15 +277,30 @@ def _returns_nothing(body: list[ast.stmt]) -> bool:
     )
 
 
+def _mentions(expr: ast.expr, *words: str) -> bool:
+    """Whether a name or a constant anywhere in ``expr`` contains one of ``words``.
+
+    This stands in for a search of ``ast.unparse(expr)``, which recurses once per
+    nesting level and so fails on an expression with thousands of terms.
+    """
+    for node in walk(expr):
+        if not isinstance(node, ast.Constant):
+            texts = [value for _, value in ast.iter_fields(node) if isinstance(value, str)]
+        elif type(node.value) in (int, float, complex):
+            continue  # a number holds no word, and repr() of a huge int raises ValueError
+        else:
+            texts = [repr(node.value)]  # None, True, a string
+        if any(word in text for word in words for text in texts):
+            return True
+    return False
+
+
 def _promises_a_value(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """A return annotation that ``None`` doesn't satisfy (not None, Optional or Any)."""
     ann = func.returns
-    if ann is None:
+    if ann is None or _mentions(ann, "None", "Optional"):
         return False
-    text = ast.unparse(ann)
-    if "None" in text or "Optional" in text:
-        return False
-    return _last_name(ann) not in NONE_ANNOTATIONS and text not in NONE_ANNOTATIONS
+    return _last_name(ann) not in NONE_ANNOTATIONS
 
 
 def _ignores_its_inputs(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -317,7 +335,7 @@ def _candidate_functions(
     todo = child_statements(tree)[::-1]
     while todo:
         child = todo.pop()
-        if isinstance(child, ast.If) and "TYPE_CHECKING" in ast.unparse(child.test):
+        if isinstance(child, ast.If) and _mentions(child.test, "TYPE_CHECKING"):
             continue
         if isinstance(child, ast.ClassDef):
             bases = {

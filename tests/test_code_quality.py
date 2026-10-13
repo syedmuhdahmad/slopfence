@@ -91,6 +91,14 @@ def test_swallowed_exception_skips_tests_and_examples(write, check):
         ),
         ('def rates():\n    """Exchange rates, hardcoded for now."""\n    return [1.0, 2.0]\n', 3),
         ('def send(msg):\n    """TODO: send the email."""\n    pass\n', 3),
+        # A stub defined inside another function.
+        (
+            'def outer():\n    def validate(token):\n        """Validate the token."""\n'
+            "        return True\n\n    return validate\n",
+            4,
+        ),
+        # A return type written as a string still promises a value.
+        ('def fetch() -> "list[User]":\n    """Fetch users from the database."""\n    pass\n', 3),
     ],
 )
 def test_stub_function_flagged(write, check, code, line):
@@ -113,6 +121,11 @@ def test_stub_function_flagged(write, check, code, line):
         "    pass\n",
         'def save(self) -> None:\n    """Save the record."""\n    pass\n',
         'def load(self) -> Optional[Data]:\n    """Load the data."""\n    return None\n',
+        # Return types that None satisfies, however they are spelled.
+        'def load(self) -> Data | None:\n    """Load the data."""\n    return None\n',
+        'def load(self) -> "Data | None":\n    """Load the data."""\n    return None\n',
+        'def load(self) -> typing.Optional[Data]:\n    """Load the data."""\n    return None\n',
+        'def load(self) -> t.Any:\n    """Load the data."""\n    return None\n',
         # No docstring: nothing promised.
         "def validate(token):\n    return True\n",
         # Abstract methods, overloads, properties, Protocols, ABCs, TYPE_CHECKING.
@@ -148,6 +161,27 @@ def test_stub_function_not_flagged(write, check, code):
     """Real code, honest constants, hooks and declared interfaces are fine."""
     write("app.py", code)
     assert check("SLOP011").findings == []
+
+
+def test_type_checking_block_is_skipped_however_it_is_spelled(write, check):
+    """``if typing.TYPE_CHECKING:`` holds declarations, like ``if TYPE_CHECKING:``."""
+    write(
+        "app.py",
+        "import typing\n\nif typing.TYPE_CHECKING:\n"
+        '    def fetch() -> Data:\n        """Fetch."""\n        ...\n',
+    )
+    assert check("SLOP011").findings == []
+
+
+def test_huge_number_in_return_annotation_is_read(write, check):
+    """Looking for ``None`` in an annotation never turns a number into text: Python
+    refuses that for an int of more than 4,300 digits."""
+    huge = "0x" + "f" * 4000
+    code = f'def fetch_key() -> Literal[{huge}]:\n    """Fetch the key."""\n    pass\n'
+    write("app.py", code)
+    result = check("SLOP011")
+    assert result.parse_errors == []
+    assert rule_lines(result, "SLOP011") == [3]
 
 
 def test_stub_function_skips_tests(write, check):

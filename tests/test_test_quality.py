@@ -250,6 +250,12 @@ def test_swallow_not_flagged_when_reraised_or_other_asserts(write, check):
             except Exception as e:
                 pytest.fail(str(e))
 
+        def test_fail_on_a_call_result(self):
+            try:
+                assert compute() == 1
+            except Exception as e:
+                self.reporter().fail(str(e))
+
         def test_specific_exception():
             try:
                 assert compute() == 1

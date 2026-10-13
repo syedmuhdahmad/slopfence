@@ -156,18 +156,23 @@ def _tokens(node: ast.AST, rename: dict[str, str], local: set[str], out: list[st
         todo.extend(reversed(children(node)))
 
 
-def _functions(
-    node: ast.AST, owner: str | None = None
-) -> Iterator[tuple[FunctionNode, str | None]]:
-    """Every function and method under ``node``, with the class it's defined in."""
-    for child in child_statements(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child, owner
-            yield from _functions(child, None)
-        elif isinstance(child, ast.ClassDef):
-            yield from _functions(child, child.name)
-        else:
-            yield from _functions(child, owner)
+def _functions(tree: ast.Module) -> Iterator[tuple[FunctionNode, str | None]]:
+    """Every function and method in ``tree``, with the class it's defined in.
+
+    In source order, a function before the ones inside it.
+    """
+    # A stack instead of recursion: an ``if`` with a thousand ``elif`` branches is a
+    # thousand statements deep. Each entry holds the class its children are methods of.
+    todo: list[tuple[ast.AST, str | None]] = [(tree, None)]
+    while todo:
+        node, owner = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node, owner
+            owner = None
+        elif isinstance(node, ast.ClassDef):
+            owner = node.name
+        # Reversed, so the first child is taken off the stack first.
+        todo.extend((child, owner) for child in reversed(child_statements(node)))
 
 
 def index_functions(src: SourceFile) -> list[Function]:

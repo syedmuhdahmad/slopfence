@@ -315,6 +315,43 @@ def {name}(conn, user_id):
     assert check("SLOP030").findings == []
 
 
+def test_functions_are_indexed_in_source_order_with_their_class(write, tmp_path):
+    """A method belongs to its class, also under an ``if``; a function inside it does not."""
+    path = write(
+        "shapes.py",
+        """
+        def top(a):
+            b = a + 1
+            c = b * 2
+            return c
+
+
+        class Shape:
+            def area(self, w):
+                def scale(v):
+                    x = v * 2
+                    y = x + 1
+                    return y
+
+                return scale(w)
+
+            if FAST:
+
+                def perimeter(self, w):
+                    p = w * 4
+                    q = p + 1
+                    return q
+        """,
+    )
+    functions = index_functions(load(path, tmp_path))
+    assert [(f.name, f.owner) for f in functions] == [
+        ("top", None),
+        ("area", "Shape"),
+        ("scale", None),
+        ("perimeter", "Shape"),
+    ]
+
+
 def test_fingerprint_is_the_token_sequence(write, tmp_path):
     """A function's tokens are kept as one string; the tokens and their count come from it."""
     src = load(write("a.py", FORMAT_DATE + FORMAT_DATE_COPY), tmp_path)

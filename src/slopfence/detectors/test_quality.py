@@ -20,12 +20,15 @@ FAIL_CALLS = {"fail", "skip", "xfail"}
 
 
 def _dotted(node: ast.AST) -> str:
+    """The dotted name ``a.b.c``. Anything but a name ends it: ``f().b.c`` gives ``b.c``."""
+    # A loop instead of recursion: generated code chains thousands of attributes.
+    attrs: list[str] = []
+    while isinstance(node, ast.Attribute):
+        attrs.append(node.attr)
+        node = node.value
     if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value)
-        return f"{base}.{node.attr}" if base else node.attr
-    return ""
+        attrs.append(node.id)
+    return ".".join(reversed(attrs))
 
 
 def _root_name(node: ast.AST) -> str | None:
