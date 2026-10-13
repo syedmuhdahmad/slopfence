@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import Path
 
 from slopfence import reporters
 from slopfence.engine import Result
@@ -126,3 +127,19 @@ def test_sarif_says_one_finding_in_the_singular():
     notes = [n["message"]["text"] for n in run["invocations"][0]["toolExecutionNotifications"]]
     assert notes == ["a note of the run", "1 finding hidden by the baseline"]
     assert len(run["results"]) == 2
+
+
+def test_sarif_help_uri_matches_readme_detector_heading():
+    """Keep every SARIF rule link anchored to the README's current detector heading."""
+    readme = Path(__file__).parents[1] / "README.md"
+    heading = next(
+        line[3:].strip()
+        for line in readme.read_text(encoding="utf-8").splitlines()
+        if line.startswith("## ") and line[3:].strip().lower() == "detectors"
+    )
+    anchor = re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")
+
+    run = json.loads(reporters.sarif(_result()))["runs"][0]
+    uris = {rule["helpUri"] for rule in run["tool"]["driver"]["rules"]}
+
+    assert uris == {f"https://github.com/syedmuhdahmad/slopfence#{anchor}"}
