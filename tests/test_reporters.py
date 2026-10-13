@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import Path
 
 from slopfence import reporters
 from slopfence.engine import Result
@@ -126,3 +127,70 @@ def test_sarif_says_one_finding_in_the_singular():
     notes = [n["message"]["text"] for n in run["invocations"][0]["toolExecutionNotifications"]]
     assert notes == ["a note of the run", "1 finding hidden by the baseline"]
     assert len(run["results"]) == 2
+
+
+def _readme_anchors(text):
+    """The section anchors GitHub builds for the headings in *text*.
+
+    Only ATX headings outside fenced code blocks count. The slug rule covers the
+    cases the README uses: lower case, markdown links reduced to their text,
+    punctuation dropped, spaces turned into hyphens. It does not model every
+    GitHub rule -- two headings with the same text (GitHub suffixes the second
+    with "-1"), or code indented by four spaces -- so it promises no more than
+    the README needs.
+    """
+    anchors = set()
+    fence = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        match = re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", stripped)
+        if match:
+            # GitHub shows a link's text, not its target, so drop the target
+            # before slugging ("...([released](url))" -> "...(released)").
+            title = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", match.group(1))
+            slug = re.sub(r"[^\w\- ]", "", title.strip().lower())
+            anchors.add(slug.replace(" ", "-"))
+    return anchors
+
+
+def test_readme_anchors_drop_link_text_and_skip_fenced_code():
+    """_readme_anchors builds GitHub's slug for a heading that holds a link, and
+    ignores a "#" line inside a fenced code block."""
+    text = (
+        "### v0.2: private code, new rules ([released](https://github.com/x/y/releases/tag/v0.2.0))\n"
+        "\n"
+        "```\n"
+        "# not a heading\n"
+        "```\n"
+        "## Real heading\n"
+    )
+    anchors = _readme_anchors(text)
+    assert "v02-private-code-new-rules-released" in anchors
+    assert "not-a-heading" not in anchors
+    assert "real-heading" in anchors
+
+
+def test_every_help_uri_points_to_a_readme_heading():
+    """Each rule's helpUri must resolve to a heading in the README.
+
+    GitHub code scanning shows this link next to every finding, so a renamed
+    section has to break this test instead of sending readers to the top of
+    the page.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    anchors = _readme_anchors(readme)
+    driver = json.loads(reporters.sarif(_result()))["runs"][0]["tool"]["driver"]
+    assert driver["rules"], "the SARIF driver lists no rules"
+    for rule in driver["rules"]:
+        fragment = rule["helpUri"].partition("#")[2]
+        assert fragment, f"{rule['id']}: helpUri has no fragment: {rule['helpUri']}"
+        assert fragment in anchors, f"{rule['id']}: {rule['helpUri']} matches no README heading"

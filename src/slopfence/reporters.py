@@ -11,6 +11,9 @@ from slopfence.models import RULES, Severity, plural
 
 _SEVERITY_ORDER = [Severity.HIGH, Severity.MEDIUM, Severity.LOW]
 _SARIF_LEVEL = {Severity.HIGH: "error", Severity.MEDIUM: "warning", Severity.LOW: "note"}
+# Where a SARIF finding links for help. A test keeps it in step with the
+# README's headings (tests/test_reporters.py), so editing it alone is not enough.
+_HELP_URI = "https://github.com/syedmuhdahmad/slopfence#detectors"
 _COLOR = {Severity.HIGH: "\033[31m", Severity.MEDIUM: "\033[33m", Severity.LOW: "\033[36m"}
 _RESET, _BOLD, _DIM, _GREEN = "\033[0m", "\033[1m", "\033[2m", "\033[32m"
 
@@ -93,7 +96,7 @@ def sarif(result: Result, strict: bool = False) -> str:
             "id": rule.id,
             "name": rule.name,
             "shortDescription": {"text": rule.summary},
-            "helpUri": "https://github.com/syedmuhdahmad/slopfence#planned-detectors",
+            "helpUri": _HELP_URI,
             # The severity this run used: the config can give a rule another one.
             "defaultConfiguration": {
                 "level": _SARIF_LEVEL[result.severities.get(rule.id, rule.severity)]
