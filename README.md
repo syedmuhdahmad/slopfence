@@ -16,7 +16,7 @@ slopfence finds the junk that AI coding assistants leave behind (hallucinated pa
 
 ![slopfence checking an AI-written billing service: it finds a dependency that doesn't exist on PyPI, a placeholder comment, leftover "Certainly!" chat text, and three tests that can't fail](https://raw.githubusercontent.com/syedmuhdahmad/slopfence/main/docs/demo.gif)
 
-> 🚧 **Status: alpha (v0.2, Python only).** Ten detectors work, each tuned against 20,000+ files of real-world code for false positives. Expect rough edges. Feedback is very welcome. See [Contributing](#contributing).
+> 🚧 **Status: alpha (v0.3, Python only).** Ten detectors work, each tuned against 20,000+ files of real-world code for false positives. Expect rough edges. Feedback is very welcome. See [Contributing](#contributing).
 
 ---
 
@@ -337,7 +337,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: syedmuhdahmad/slopfence@v0.2.0
+      - uses: syedmuhdahmad/slopfence@v0.3.0
 ```
 
 On pull requests it automatically checks only the changed lines (set `diff: none` to check everything, or `diff: <ref>` for a specific ref). To show findings inline on the pull request, set `sarif-file: slopfence.sarif` and upload it with `github/codeql-action/upload-sarif` (needs `security-events: write`).
@@ -350,7 +350,7 @@ A `baseline` in your `pyproject.toml` applies here too: baselined findings are n
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/syedmuhdahmad/slopfence
-    rev: v0.2.0
+    rev: v0.3.0
     hooks:
       - id: slopfence
 ```
@@ -504,7 +504,7 @@ tests/test_user.py
 
 ### v0.2: private code, new rules ([released](https://github.com/syedmuhdahmad/slopfence/releases/tag/v0.2.0))
 
-Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/milestone/2). Upcoming work is on the [roadmap board](https://github.com/users/syedmuhdahmad/projects/1).
+Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/milestone/2).
 
 #### Planned features
 
@@ -535,15 +535,27 @@ Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/mil
 - [x] Test coverage measured in CI ([#48](https://github.com/syedmuhdahmad/slopfence/issues/48))
 - [x] Release v0.2.0 ([#25](https://github.com/syedmuhdahmad/slopfence/issues/25))
 
-### Later
+### v0.3: speed, baselines, more dependency sources ([released](https://github.com/syedmuhdahmad/slopfence/releases/tag/v0.3.0))
 
-- [ ] `SLOP050` comments that only restate the code ([#23](https://github.com/syedmuhdahmad/slopfence/issues/23))
+Tracked in the [v0.3.0 milestone](https://github.com/syedmuhdahmad/slopfence/milestone/4).
+
 - [x] Parallel processing for large repos ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
+- [x] PyPI lookups in one batch ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
 - [x] Baseline mode: fail only on new findings ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51))
 - [x] Per-file ignores and per-rule severity overrides ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - [x] `SLOP001` also checks `setup.py`, `setup.cfg`, `Pipfile`, notebooks and more requirements file names ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
-- [ ] JavaScript / TypeScript (npm registry)
 - [x] `SLOP002` slopsquatting risk: dependencies that exist on PyPI but are new ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
+- [x] Release v0.3.0 ([#56](https://github.com/syedmuhdahmad/slopfence/issues/56))
+
+### v0.4 (planned)
+
+Tracked in the [v0.4.0 milestone](https://github.com/syedmuhdahmad/slopfence/milestone/5). Upcoming work is on the [roadmap board](https://github.com/users/syedmuhdahmad/projects/1).
+
+- [ ] `SLOP050` comments that only restate the code, as the first opt-in rule ([#23](https://github.com/syedmuhdahmad/slopfence/issues/23))
+
+### Later
+
+- [ ] JavaScript / TypeScript (npm registry)
 - [ ] VS Code extension
 - [ ] Optional `--llm` second opinion
 
