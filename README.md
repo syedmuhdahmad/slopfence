@@ -181,7 +181,7 @@ That is the file, the rule, what the finding is about, and how many there are. "
 | File | What is checked |
 |---|---|
 | Requirements files | Every requirement line. Options, URLs and paths are skipped |
-| `pyproject.toml` | `[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables |
+| `pyproject.toml` | `[build-system]` requires, `[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables |
 | `setup.cfg` | `install_requires`, `setup_requires`, `tests_require` and `[options.extras_require]` |
 | `setup.py` | The same keywords of `setup()`, when the list is written in the file, or in a variable that is assigned in the file. The file is read, never run. Anything computed is skipped |
 | `Pipfile` | `[packages]` and `[dev-packages]` |

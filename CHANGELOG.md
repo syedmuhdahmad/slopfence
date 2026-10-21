@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`SLOP001` reads `[build-system]` requires.** The packages a `pyproject.toml` names in `[build-system]` `requires` (PEP 518) are installed and run by every `pip install` of the project, so an invented one there is now looked up and reported like a missing dependency anywhere else, with the same private-index rules ([#73](https://github.com/syedmuhdahmad/slopfence/issues/73)).
+
 ### Fixed
 
 - `SLOP001`: an ignore comment on a `pyproject.toml` requirement written with TOML escapes, such as `"corp-lib; python_version<\"3.12\""`, now stops both the finding and the PyPI lookup. Before, the name was sent to pypi.org and reported on the line that opens the array. The same happened to an entry after one that holds an escaped `]`, and to an entry that a comment on the array's first line names. Each entry is now reported on its own line. A comment on the line that opens the array still covers the entries that v0.3 reported there ([#97](https://github.com/syedmuhdahmad/slopfence/issues/97))

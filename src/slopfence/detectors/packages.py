@@ -903,6 +903,10 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
+    # [build-system] requires (PEP 518): installed and run by every `pip install`
+    # of the project, so its names are looked up like the other lists (#73).
+    for spec in _array(_table(data.get("build-system")).get("requires")):
+        add_spec("build-system", "requires", spec)
     optional_table = (
         "project.optional-dependencies"
         if "project.optional-dependencies" in finder.ranges
