@@ -524,7 +524,11 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
         found = _parse_requirements(text, rel)
         comments = [requirements_comment(line) for line in text_lines(text)]
     else:
-        found = _parse_pyproject(text, rel) if kind is Kind.PYPROJECT else _parse_pipfile(text, rel)
+        found = (
+            _parse_pyproject(text, rel, _in_test_folder(path, root))
+            if kind is Kind.PYPROJECT
+            else _parse_pipfile(text, rel)
+        )
         comments = toml_comments(text)
     if any(IGNORE_FILE_RE.search(c) for c in comments):
         for dep in found.dependencies:
@@ -863,7 +867,7 @@ def _array(value: object) -> list:
     return value if isinstance(value, list) else []
 
 
-def _parse_pyproject(text: str, rel: str) -> DependencyFile:
+def _parse_pyproject(text: str, rel: str, in_test_folder: bool = False) -> DependencyFile:
     """Dependencies in pyproject.toml: PEP 621, dependency groups and Poetry tables."""
     found = DependencyFile(rel, Kind.PYPROJECT)
     data = _load_toml(text)
@@ -915,8 +919,9 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         add_spec("project", "dependencies", spec)
     # [build-system] requires (PEP 518): installed and run by every `pip install`
     # of the project, so its names are looked up like the other lists (#73).
-    for spec in _array(_table(data.get("build-system")).get("requires")):
-        add_spec("build-system", "requires", spec, inherits_index=False)
+    if not in_test_folder:
+        for spec in _array(_table(data.get("build-system")).get("requires")):
+            add_spec("build-system", "requires", spec, inherits_index=False)
     optional_table = (
         "project.optional-dependencies"
         if "project.optional-dependencies" in finder.ranges
