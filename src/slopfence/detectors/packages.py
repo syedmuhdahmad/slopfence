@@ -878,7 +878,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     uv_sources = {normalize(n) for n in _table(_table(tool.get("uv")).get("sources"))}
     private_index = found.private_index = uses_private_index(tool)
 
-    def add_spec(table: str, array: str, spec: object) -> None:
+    def add_spec(table: str, array: str, spec: object, inherits_index: bool = True) -> None:
         """Record one PEP 508 requirement string from ``table.array``.
 
         A string that is no requirement is never looked up. The name it starts with
@@ -899,14 +899,24 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         # A comment on the line where v0.3 reported the entry kept its name on the
         # machine. It still does, also where the entry is reported on another line.
         ignored = finder.ignored(line) | finder.ignored(finder.spec_in_v03(table, array, spec))
-        deps.append(Dependency(name, rel, line, validate, ignored, own_source=sourced))
+        deps.append(
+            Dependency(
+                name,
+                rel,
+                line,
+                validate,
+                ignored,
+                own_source=sourced,
+                inherits_index=inherits_index,
+            )
+        )
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
     # [build-system] requires (PEP 518): installed and run by every `pip install`
     # of the project, so its names are looked up like the other lists (#73).
     for spec in _array(_table(data.get("build-system")).get("requires")):
-        add_spec("build-system", "requires", spec)
+        add_spec("build-system", "requires", spec, inherits_index=False)
     optional_table = (
         "project.optional-dependencies"
         if "project.optional-dependencies" in finder.ranges
@@ -1125,6 +1135,7 @@ class PackageChecker:
             and may_look_up(dep.ignored.__contains__, self._rules)
             and not self._is_known(dep.name)
             and normalize(dep.name) not in self._not_from_pypi
+            and not (not dep.inherits_index and self.inherited_from)
         )
 
     def _inherits(self, file: DependencyFile) -> bool:
@@ -1159,7 +1170,25 @@ class PackageChecker:
         return [
             file.rel
             for file in self._files(only_paths)
-            if self._inherits(file) and any(self._may_be_public(dep) for dep in file.dependencies)
+            if (
+                self._inherits(file)
+                or any(
+                    not dep.inherits_index
+                    and self.inherited_from
+                    and dep.validate
+                    and may_look_up(dep.ignored.__contains__, self._rules)
+                    and not self._is_known(dep.name)
+                    and normalize(dep.name) not in self._not_from_pypi
+                    for dep in file.dependencies
+                )
+            )
+            and any(
+                dep.validate
+                and may_look_up(dep.ignored.__contains__, self._rules)
+                and not self._is_known(dep.name)
+                and normalize(dep.name) not in self._not_from_pypi
+                for dep in file.dependencies
+            )
         ]
 
     def imports_in_files(self, only_paths: set[str]) -> dict[str, list[tuple[str, int, int]]]:

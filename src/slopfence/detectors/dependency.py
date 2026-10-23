@@ -140,6 +140,10 @@ class Dependency:
     # or a package source that it picks by name. That holds for the package, not just
     # for this entry: see ``ProjectIndex.sourced_names``.
     own_source: bool = False
+    # False when the dependency does not inherit a private index set in another project
+    # file.  Used for [build-system] requires so they stay on the machine when another
+    # file names a private index.
+    inherits_index: bool = True
 
     @property
     def suppressed(self) -> bool:

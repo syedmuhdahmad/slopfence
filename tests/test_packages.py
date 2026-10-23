@@ -79,7 +79,7 @@ def test_pyproject_build_system_requires_private_index(tmp_path, write):
     write(
         "pyproject.toml",
         '[build-system]\nrequires = ["corp-build-tool"]\n\n'
-        "[project]\nname = \"demo\"\ndependencies = [\"corp-auth\"]\n\n"
+        '[project]\nname = "demo"\ndependencies = ["corp-auth"]\n\n'
         '[tool.uv]\nindex-url = "https://pkgs.corp.example/simple"\n',
     )
     deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path).dependencies
@@ -87,6 +87,26 @@ def test_pyproject_build_system_requires_private_index(tmp_path, write):
         "corp-build-tool": False,
         "corp-auth": False,
     }
+
+
+def test_pyproject_build_system_requires_inherits_private_index_from_other_file(
+    write, check, tmp_path
+):
+    """A private index in another file (requirements.txt) covers [build-system] requires
+    in pyproject.toml, so no build dependency is sent to PyPI."""
+    write(
+        "requirements.txt",
+        "--index-url https://pkgs.corp.example/simple\ncorp-auth\n",
+    )
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\n',
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert result.findings == []
 
 
 def test_pyproject_without_build_system(write, check, tmp_path):
