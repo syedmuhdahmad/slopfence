@@ -1,3 +1,5 @@
+import textwrap
+
 import pytest
 
 from slopfence.detectors.packages import parse_dependency_file
@@ -264,6 +266,177 @@ def test_pyproject_line_is_the_dependency_entry(write, check):
     assert rule_lines(result, "SLOP001") == [6]
 
 
+def test_ignore_comment_applies_to_entry_written_with_escapes(write, check):
+    """An ignore comment keeps an entry with escaped quotes on the machine, in every
+    array of requirement strings: the entry is found on its own line."""
+    write(
+        "pyproject.toml",
+        r"""
+        [project]
+        name = "demo"
+        dependencies = [
+            "corp-lib; python_version<\"3.12\"",  # slopfence: ignore[SLOP001]
+            "corp-lib2; python_version<'3.12'",  # slopfence: ignore[SLOP001]
+        ]
+
+        [project.optional-dependencies]
+        dev = [
+            "corp-dev; os_name == \u0022nt\u0022",  # slopfence: ignore[SLOP001]
+        ]
+
+        [dependency-groups]
+        lint = [
+            "corp-lint; sys_platform == \"win32\"",  # slopfence: ignore[SLOP001]
+        ]
+        """,
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert rule_lines(result, "SLOP001") == []
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        r"""
+        dependencies = [
+            "corp-a; platform_version == \"]\"",  # slopfence: ignore[SLOP001]
+            "corp-b",  # slopfence: ignore[SLOP001]
+        ]
+        """,
+        """
+        dependencies = [  # was "corp-b"
+            "corp-b",  # slopfence: ignore[SLOP001]
+        ]
+        """,
+    ],
+    ids=["escaped-bracket", "name-in-comment"],
+)
+def test_ignore_comment_applies_after_a_bracket_or_name_outside_an_entry(write, check, array):
+    """A bracket in an earlier entry's string does not end the array, and a name in
+    a comment is no entry: the entry is found on its own line, with its comment."""
+    write("pyproject.toml", '[project]\nname = "demo"\n' + textwrap.dedent(array))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert rule_lines(result, "SLOP001") == []
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        r"""
+        dependencies = [  # slopfence: ignore[SLOP001]
+            "corp-lib; python_version<\"3.12\"",
+        ]
+        """,
+        r"""
+        [project.optional-dependencies]
+        dev = [  # slopfence: ignore[SLOP001]
+            "corp-dev; os_name == \"nt\"",
+        ]
+        """,
+        r"""
+        dependencies = [  # slopfence: ignore[SLOP001]
+            "corp-a; platform_release == \"5.0]\"",
+            "corp-b",
+        ]
+        """,
+        """
+        dependencies = [
+            \"\"\"corp-lib; extra == \"\"\"\"\",  # slopfence: ignore[SLOP001]
+        ]
+        """,
+    ],
+    ids=["escaped-entry", "optional-escaped-entry", "after-escaped-bracket", "five-quotes"],
+)
+def test_ignore_comment_where_v03_reported_an_entry_still_applies(write, check, array):
+    """v0.3 reported these entries on the line that opens their array (or found the
+    entry where it is, for the five quotes), so an ignore comment there kept their
+    names on the machine. It still does."""
+    write("pyproject.toml", '[project]\nname = "demo"\n' + textwrap.dedent(array))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert rule_lines(result, "SLOP001") == []
+
+
+def test_ignore_comment_on_the_array_line_leaves_a_plain_entry_reported(write, check):
+    """A comment on the line that opens an array never covered an entry that v0.3
+    found on its own line, and it still does not."""
+    write(
+        "pyproject.toml",
+        """
+        [project]
+        name = "demo"
+        dependencies = [  # slopfence: ignore[SLOP001]
+            "ghost-lib",
+        ]
+        """,
+    )
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert rule_lines(result, "SLOP001") == [4]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        r'"ghost-lib; python_version<\"3.12\""',
+        r'"ghost-lib; python_version<\u00223.12\u0022"',
+        r'"ghost-lib; platform_version == \"C:\\x\""',
+        """'''ghost-lib; python_version<"3.12"'''""",
+        '"""ghost-lib; python_version<"3.12""""',
+    ],
+    ids=[
+        "escaped-quote",
+        "unicode-escape",
+        "escaped-backslash",
+        "multi-line-literal",
+        "quote-before-closing-quotes",
+    ],
+)
+def test_entry_written_with_escapes_is_reported_on_its_own_line(write, check, entry):
+    """Without an ignore comment, an entry written with TOML escapes is still
+    reported, on its own line rather than the line that opens the array."""
+    write(
+        "pyproject.toml",
+        f"""
+        [project]
+        name = "demo"
+        dependencies = [
+            "requests",
+            {entry},
+        ]
+        """,
+    )
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == ["requests", "ghost-lib"]
+    assert rule_lines(result, "SLOP001") == [5]
+
+
+def test_escaped_quotes_in_a_multi_line_string_end_it_nowhere(write, check):
+    """A ``\\\"\"\"`` inside a multi-line string does not end it, so the entries after
+    it are found on their own lines, and their ignore comments apply."""
+    write(
+        "pyproject.toml",
+        r'''
+        [project]
+        name = "demo"
+        description = """He said \""" hi"""
+        dependencies = [
+            "ghost-lib",
+            "corp-lib",  # slopfence: ignore[SLOP001]
+        ]
+        ''',
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == ["ghost-lib"]
+    assert rule_lines(result, "SLOP001") == [5]
+
+
 def test_pyproject_external_sources(tmp_path, write):
     """A dependency from a URL, git or a named source is declared but not looked up."""
     write(
@@ -349,3 +522,15 @@ def test_toml_comments():
 
     text = 'a = "x # no"  # yes\nb = \'# no\'\nc = """\n# no\n"""  # end\n# top'
     assert toml_comments(text) == ["# yes", "", "", "", "# end", "# top"]
+
+
+def test_toml_strings_are_read_as_toml_reads_them():
+    """Each string is kept on the line it starts on and decoded by TOML's reader; a
+    string in a comment is none, and so is one cut short."""
+    from slopfence.detectors.packages import _toml_lines, _toml_string
+
+    text = 'a = ["x\\"]", \'z\']  # ["no"]\nb = """one\ntwo"""'
+    lines = _toml_lines(text)
+    values = [[_toml_string(source) for _, source in line.strings] for line in lines]
+    assert values == [['x"]', "z"], ["one\ntwo"], []]
+    assert _toml_string('"cut') is None

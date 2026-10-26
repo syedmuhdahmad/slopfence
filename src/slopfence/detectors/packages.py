@@ -341,39 +341,125 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool | None]:
     return names, False
 
 
-def toml_comments(text: str) -> list[str]:
-    """The comment part of each line ("" if none), ignoring "#" inside TOML strings.
+@dataclass(frozen=True)
+class _TomlLine:
+    """One line of a TOML text, split up the way a TOML reader sees it."""
 
-    Tracks multi-line strings across lines so quoted values can never carry
-    a slopfence directive.
+    code: str  # what is neither inside a string nor in the comment
+    comment: str  # "#" included; "" if the line has none
+    # (column, source) of each string that starts on the line, quotes and escapes
+    # included. A multi-line string is kept whole, on the line it starts on.
+    strings: tuple[tuple[int, str], ...]
+
+
+def _multiline_end(line: str, i: int, delimiter: str) -> int:
+    """Where a multi-line string that is open at ``line[i]`` ends: just after its
+    closing delimiter, or -1 when it goes on to the next line.
+
+    In a basic string (``\"\"\"``) a backslash escapes the next character. One or two
+    quotes just before the delimiter belong to the string: ``'''a'''''`` is ``a''``.
     """
-    comments: list[str] = []
-    multiline: str | None = None
-    for line in text_lines(text):
-        comment, i = "", 0
+    quote = delimiter[0]
+    while i < len(line):
+        if quote == '"' and line[i] == "\\":
+            i += 2
+        elif line.startswith(delimiter, i):
+            end = i + 3
+            while end < min(len(line), i + 5) and line[end] == quote:
+                end += 1
+            return end
+        else:
+            i += 1
+    return -1
+
+
+def _toml_lines(text: str) -> list[_TomlLine]:
+    """Each line of a TOML text, split into code, strings and comment.
+
+    Tracks multi-line strings across lines, so a "#" inside a string never starts a
+    comment and a bracket inside one is never code.
+    """
+    lines = text_lines(text)
+    code: list[list[str]] = [[] for _ in lines]
+    comments = [""] * len(lines)
+    strings: list[list[tuple[int, str]]] = [[] for _ in lines]
+    # (line, column, delimiter) of a multi-line string that is still open.
+    opened: tuple[int, int, str] | None = None
+    for n, line in enumerate(lines):
+        i = 0
         while i < len(line):
-            if multiline:
-                end = line.find(multiline, i)
+            if opened:
+                start, column, delimiter = opened
+                end = _multiline_end(line, i, delimiter)
                 if end == -1:
                     break
-                i, multiline = end + 3, None
+                i, opened = end, None
+                block = "\n".join(lines[start : n + 1])
+                strings[start].append((column, block[column : len(block) - len(line) + i]))
                 continue
             if line.startswith(('"""', "'''"), i):
-                multiline, i = line[i : i + 3], i + 3
+                opened, i = (n, i, line[i : i + 3]), i + 3
                 continue
             ch = line[i]
             if ch in "\"'":
                 j = i + 1
                 while j < len(line) and line[j] != ch:
                     j += 2 if ch == '"' and line[j] == "\\" else 1
+                strings[n].append((i, line[i : j + 1]))
                 i = j + 1
                 continue
             if ch == "#":
-                comment = line[i:]
+                comments[n] = line[i:]
                 break
+            code[n].append(ch)
             i += 1
-        comments.append(comment)
-    return comments
+    return [
+        _TomlLine("".join(chars), comment, tuple(found))
+        for chars, comment, found in zip(code, comments, strings, strict=True)
+    ]
+
+
+def _toml_string(source: str) -> str | None:
+    """The value of a TOML string written as ``source``, or None if it is no string.
+
+    TOML's own reader decodes it, so every way of writing a character (``\\"``,
+    ``\\u0022``) gives the value that the reader of the whole file gave.
+    """
+    try:
+        return tomllib.loads(f"v = {source}")["v"]
+    except ValueError:  # the scanner split a string where TOML does not: no match
+        return None
+
+
+def _code_in_v03(line: str) -> str:
+    """The code of a TOML line as v0.2 and v0.3 saw it when they counted brackets.
+
+    They paired quotes up without escapes, and stopped at the first "#" outside them.
+    Only ``_LineFinder.spec_in_v03`` reads this: it must find the line on which those
+    versions reported an entry, their mistakes included.
+    """
+    code: list[str] = []
+    quote: str | None = None
+    for ch in line:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            break
+        else:
+            code.append(ch)
+    return "".join(code)
+
+
+def toml_comments(text: str) -> list[str]:
+    """The comment part of each line ("" if none), ignoring "#" inside TOML strings.
+
+    Tracks multi-line strings across lines so quoted values can never carry
+    a slopfence directive.
+    """
+    return [line.comment for line in _toml_lines(text)]
 
 
 def _is_too_large(path: Path) -> bool:
@@ -609,35 +695,37 @@ class _LineFinder:
     def __init__(self, text: str) -> None:
         """``text`` is the whole pyproject.toml."""
         self.lines = text_lines(text)
-        self.comments = toml_comments(text)
+        self.toml_lines = _toml_lines(text)
         self.ranges = _table_ranges(self.lines)
         # (line, column) of entries already matched, so repeated specs map to
         # successive occurrences and several entries can share one line.
         self.used: set[tuple[int, int]] = set()
-        # The same for the searches that ``key_in_v02`` makes.
+        # The same for the searches that ``key_in_v02`` and ``spec_in_v03`` make.
         self._used_by_v02: set[tuple[int, int]] = set()
+        self._used_by_v03: set[tuple[int, int]] = set()
+        # The code of each line (0-based), in which the brackets of an array are
+        # counted. And the same as v0.3 saw it, for ``spec_in_v03``.
+        self._code = [line.code for line in self.toml_lines]
+        self._code_in_v03 = [_code_in_v03(line) for line in self.lines]
+        # (column, value) of the strings of a line (0-based), read when a search
+        # first gets to the line.
+        self._values: dict[int, list[tuple[int, str | None]]] = {}
 
-    def _array_range(self, start: int, end: int, key: str) -> tuple[int, int] | None:
-        """Lines spanned by `key = [ ... ]` inside a table, using quote-aware bracket counting."""
+    def _array_range(
+        self, start: int, end: int, key: str, code: Sequence[str]
+    ) -> tuple[int, int] | None:
+        """Lines spanned by `key = [ ... ]` inside a table.
+
+        The brackets are counted in ``code``, the code of each line of the file.
+        """
         key_re = re.compile(r"""^\s*["']?""" + re.escape(key) + r"""["']?\s*=""")
         for i in range(start, end + 1):
             if not key_re.match(self.lines[i]):
                 continue
             depth, seen_open = 0, False
             for j in range(i, end + 1):
-                quote: str | None = None
-                for ch in self.lines[j]:
-                    if quote:
-                        if ch == quote:
-                            quote = None
-                    elif ch in "\"'":
-                        quote = ch
-                    elif ch == "#":
-                        break
-                    elif ch == "[":
-                        depth, seen_open = depth + 1, True
-                    elif ch == "]":
-                        depth -= 1
+                depth += code[j].count("[") - code[j].count("]")
+                seen_open = seen_open or "[" in code[j]
                 if seen_open and depth <= 0:
                     return i, j
             return i, end
@@ -646,34 +734,75 @@ class _LineFinder:
     def _search(
         self,
         table: str,
-        pattern: re.Pattern[str],
+        columns: Callable[[int], Iterable[int]],
         array: str | None = None,
         used: set[tuple[int, int]] | None = None,
+        code: Sequence[str] | None = None,
     ) -> int:
-        """The line (1-based) of the first match of ``pattern`` in a table that no
-        earlier search took, or the first line of the table when there is none.
+        """The line (1-based) of the first match in a table that no earlier search
+        took, or the first line of the table when there is none.
 
-        A table without a header of its own is searched for in the whole file.
-        ``array`` narrows the search to that array of the table. ``used`` holds the
-        matches that are taken: the finder's own, unless another set is given.
+        ``columns`` gives the columns of the matches on a line (0-based). A table
+        without a header of its own is searched for in the whole file. ``array``
+        narrows the search to that array of the table, which ends where the
+        brackets in ``code`` say (by default, the code outside strings and
+        comments). ``used`` holds the matches that are taken: the finder's own,
+        unless another set is given.
         """
         used = self.used if used is None else used
+        code = self._code if code is None else code
         start, end = self.ranges.get(table, (0, len(self.lines) - 1))
-        if array is not None and (span := self._array_range(start, end, array)):
+        if array is not None and (span := self._array_range(start, end, array, code)):
             start, end = span
         for i in range(start, end + 1):
-            line = self.lines[i]
-            if line.lstrip().startswith("#"):  # commented-out entries
-                continue
-            for m in pattern.finditer(line):
-                if (i, m.start()) not in used:
-                    used.add((i, m.start()))
+            for column in columns(i):
+                if (i, column) not in used:
+                    used.add((i, column))
                     return i + 1
         return start + 1
 
+    def _pattern_columns(self, pattern: re.Pattern[str], i: int) -> list[int]:
+        """Where ``pattern`` matches line ``i`` (0-based), unless it is commented out."""
+        line = self.lines[i]
+        if line.lstrip().startswith("#"):
+            return []
+        return [m.start() for m in pattern.finditer(line)]
+
+    def _string_columns(self, value: str, i: int) -> list[int]:
+        """Where a string that reads as ``value`` starts on line ``i`` (0-based).
+
+        A string is compared by what it says, not how it is written. Text in a
+        comment is no string, so a commented-out entry never matches.
+        """
+        if i not in self._values:
+            strings = self.toml_lines[i].strings
+            self._values[i] = [(column, _toml_string(source)) for column, source in strings]
+        return [column for column, read in self._values[i] if read == value]
+
     def spec(self, table: str, array: str, spec: str) -> int:
-        quoted = re.compile(r"""(["'])""" + re.escape(spec) + r"\1")
-        return self._search(table, quoted, array)
+        """The line (1-based) of the requirement string ``spec`` in ``table.array``.
+
+        An entry written with escapes (``"pkg; python_version<\\"3.12\\""``) is found
+        on its own line too, so the ignore comment there applies to it.
+        """
+        return self._search(table, lambda i: self._string_columns(spec, i), array)
+
+    def spec_in_v03(self, table: str, array: str, spec: str) -> int:
+        """The line (1-based) on which v0.3 reported the requirement string ``spec``.
+
+        v0.3, like v0.2, looked for the string as TOML reads it in the text as it is
+        written, and paired quotes up without escapes to find the end of the array.
+        An entry written with escapes it reported on the line that opens its array.
+        That is where a user of v0.3 put the ignore comment for it.
+        """
+        pattern = re.compile(r"""(["'])""" + re.escape(spec) + r"\1")
+        return self._search(
+            table,
+            lambda i: self._pattern_columns(pattern, i),
+            array,
+            used=self._used_by_v03,
+            code=self._code_in_v03,
+        )
 
     def key(self, table: str, name: str) -> int:
         """The line (1-based) of the entry ``name`` of a table.
@@ -685,7 +814,8 @@ class _LineFinder:
         if own := self.ranges.get(f"{table}.{name}"):
             return own[0] + 1
         key = re.escape(name)
-        return self._search(table, re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]"""))
+        pattern = re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]""")
+        return self._search(table, lambda i: self._pattern_columns(pattern, i))
 
     def key_in_v02(self, table: str, name: str) -> int:
         """The line (1-based) on which v0.2 reported the entry ``name`` of a table.
@@ -696,12 +826,14 @@ class _LineFinder:
         That is where a user of v0.2 put the ignore comment for it.
         """
         pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
-        return self._search(table, pattern, used=self._used_by_v02)
+        return self._search(
+            table, lambda i: self._pattern_columns(pattern, i), used=self._used_by_v02
+        )
 
     def ignored(self, line: int) -> frozenset[str]:
         """The rules that an ignore comment on a line (1-based) switches off."""
-        on_line = self.comments[line - 1] if 0 < line <= len(self.comments) else ""
-        return line_ignores(on_line)
+        lines = self.toml_lines
+        return line_ignores(lines[line - 1].comment if 0 < line <= len(lines) else "")
 
 
 def _load_toml(text: str) -> dict | None:
@@ -764,7 +896,10 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         direct = parsed.direct if parsed else "://" in spec
         sourced = direct or normalize(name) in uv_sources
         validate = parsed is not None and not (private_index or sourced)
-        deps.append(Dependency(name, rel, line, validate, finder.ignored(line), own_source=sourced))
+        # A comment on the line where v0.3 reported the entry kept its name on the
+        # machine. It still does, also where the entry is reported on another line.
+        ignored = finder.ignored(line) | finder.ignored(finder.spec_in_v03(table, array, spec))
+        deps.append(Dependency(name, rel, line, validate, ignored, own_source=sourced))
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
