@@ -1,9 +1,11 @@
 """Replacing a file in one step: the PyPI cache and the baseline are written this way."""
 
 import os
+import stat
 
 import pytest
 
+from slopfence import files as filesmod
 from slopfence.files import replace_text
 
 
@@ -38,6 +40,23 @@ def test_failed_replace_keeps_the_old_file_and_leaves_no_temporary_file(tmp_path
         replace_text(path, "new")
     assert path.read_text(encoding="utf-8") == "old"
     assert [p.name for p in tmp_path.iterdir()] == ["data.json"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
+def test_replace_text_sets_the_mode_before_the_text_goes_in(tmp_path, monkeypatch):
+    """A file that only its owner may read never holds the text with wider permissions."""
+    modes = []
+    write = filesmod._write
+
+    def write_and_record(path, text):
+        """Note the permissions the file has at the moment the text goes in."""
+        modes.append(stat.S_IMODE(os.stat(path).st_mode) if path.exists() else None)
+        write(path, text)
+
+    monkeypatch.setattr(filesmod, "_write", write_and_record)
+    replace_text(tmp_path / "report.json", "secret", 0o600)
+    assert modes == [0o600]
+    assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o600
 
 
 def test_replace_text_in_a_missing_folder_is_an_error(tmp_path):

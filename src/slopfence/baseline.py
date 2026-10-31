@@ -23,7 +23,7 @@ from pathlib import Path
 
 from slopfence.config import is_excluded
 from slopfence.diff import ChangedLines, touches
-from slopfence.files import replace_text
+from slopfence.files import write_text
 from slopfence.models import RULES, Finding, plural
 from slopfence.source import relative_path
 
@@ -128,8 +128,7 @@ def write(path: Path, findings: Iterable[Finding]) -> None:
     The file is replaced in one step, so a run that fails or is stopped never leaves
     half a baseline behind.
     """
-    # realpath: write through a symbolic link instead of putting a file in its place.
-    replace_text(Path(os.path.realpath(path)), dumps(count_findings(findings)))
+    write_text(path, dumps(count_findings(findings)))
 
 
 def _is_row(row: object) -> bool:

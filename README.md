@@ -68,7 +68,7 @@ slopfence --diff main
 | `--exit-zero` | Always exit 0 (report only) |
 | `--list-rules` | Show all rules with the severities this project uses |
 
-Exit codes: `0` no issues (or none at or above `--fail-on`, or none that the baseline doesn't hide), `1` issues found, `2` error (bad options or config, a baseline file that is missing, not valid or can't be written, or unparseable files with `--strict`), `130` stopped with Ctrl-C.
+Exit codes: `0` no issues (or none at or above `--fail-on`, or none that the baseline doesn't hide), `1` issues found, `2` error (bad options or config, a baseline file that is missing, not valid or can't be written, a report file (`-o`) that can't be written, or unparseable files with `--strict`), `130` stopped with Ctrl-C.
 
 Run slopfence with a Python at least as new as the syntax your code uses; otherwise newer syntax can't be parsed. Python also limits how deeply code can be nested, and the limit depends on the version and the operating system: Python 3.11, for example, stops at about 3,000 chained operators in one expression. A file beyond the limit of the Python that runs slopfence counts as unparseable, like a file with a syntax error.
 
