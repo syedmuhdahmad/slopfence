@@ -46,6 +46,83 @@ def test_pyproject_dependencies(write, check, tmp_path):
     assert rule_lines(result, "SLOP001") == [3]
 
 
+def test_pyproject_build_system_requires(write, check, tmp_path):
+    """[build-system] requires is read like the other lists: an invented build
+    dependency is looked up, a known one is not, and the line is its entry (#73)."""
+    write(
+        "pyproject.toml",
+        """
+        [build-system]
+        requires = ["setuptools>=61", "ghost-build-zz>=1"]
+
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    assert [(d.name, d.line, d.validate) for d in declared.dependencies] == [
+        ("requests", 6, True),
+        ("setuptools", 2, True),
+        ("ghost-build-zz", 2, True),
+    ]
+    result = check("SLOP001", registry=FakeRegistry({"requests", "setuptools"}))
+    assert rule_lines(result, "SLOP001") == [2]
+    assert "ghost-build-zz" in result.findings[0].message
+
+
+def test_pyproject_build_system_requires_private_index(tmp_path, write):
+    """A project-wide private index covers build dependencies too: the names in
+    [build-system] requires are declared but not sent to pypi.org."""
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["corp-build-tool"]\n\n'
+        '[project]\nname = "demo"\ndependencies = ["corp-auth"]\n\n'
+        '[tool.uv]\nindex-url = "https://pkgs.corp.example/simple"\n',
+    )
+    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path).dependencies
+    assert {d.name: d.validate for d in deps} == {
+        "corp-build-tool": False,
+        "corp-auth": False,
+    }
+
+
+def test_pyproject_build_system_requires_inherits_private_index_from_other_file(
+    write, check, tmp_path
+):
+    """A private index in another file (requirements.txt) covers [build-system] requires
+    in pyproject.toml, so no build dependency is sent to PyPI."""
+    write(
+        "requirements.txt",
+        "--index-url https://pkgs.corp.example/simple\ncorp-auth\n",
+    )
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\n',
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert result.findings == []
+
+
+def test_pyproject_without_build_system(write, check, tmp_path):
+    """A pyproject.toml without a [build-system] table reads exactly as before."""
+    write(
+        "pyproject.toml",
+        """
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    assert [d.name for d in declared.dependencies] == ["requests"]
+    result = check("SLOP001", registry=FakeRegistry({"requests"}))
+    assert result.findings == []
+
+
 def test_poetry_dependencies(tmp_path, write):
     """Poetry tables are read. ``python`` is not a package, and a path dependency is
     declared but not looked up."""
@@ -349,3 +426,23 @@ def test_toml_comments():
 
     text = 'a = "x # no"  # yes\nb = \'# no\'\nc = """\n# no\n"""  # end\n# top'
     assert toml_comments(text) == ["# yes", "", "", "", "# end", "# top"]
+
+
+def test_pyproject_build_system_requires_skipped_in_test_folder(write, check):
+    """A pyproject.toml under a test folder keeps [project] lists but skips
+    [build-system] requires, so fixture build backends are not flagged."""
+    write(
+        "tests/fixture/pyproject.toml",
+        """
+        [build-system]
+        requires = ["setuptools>=61", "ghost-build-zz>=1"]
+
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == []
+    assert registry.queries == ["requests"]

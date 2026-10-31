@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`SLOP001` reads `[build-system]` requires.** The packages a `pyproject.toml` names in `[build-system]` `requires` (PEP 518) are installed and run by every `pip install` of the project, so an invented one there is now looked up and reported like a missing dependency anywhere else, with the same private-index rules ([#73](https://github.com/syedmuhdahmad/slopfence/issues/73)).
+
 ## [0.3.0] - 2026-10-14
 
 A new rule for packages that are new on PyPI, a baseline for the findings you already have, more dependency files, and worker processes for large projects.
