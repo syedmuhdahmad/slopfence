@@ -358,7 +358,9 @@ def run(
     A private index in a project file covers that file. With ``inherit_index`` it also
     covers the dependency files that name no index of their own (``setup.py``,
     ``setup.cfg``, ``Pipfile``, notebooks, and requirements files that v0.2 did not
-    read), unless the file that names it is excluded.
+    read), unless the file that names it is excluded, and the ``[build-system]``
+    requires of every ``pyproject.toml`` (see ``Dependency.inherits_index``), whatever
+    kind of file names it.
 
     Files are parsed and checked in up to ``jobs`` worker processes when there are
     enough of them (see ``analysis.analyze_files``). The result does not depend on
@@ -429,6 +431,11 @@ def run(
             inherited_from=[
                 rel
                 for rel in index.install_index_files
+                if inherit_index and not is_excluded(rel, exclude)
+            ],
+            private_from=[
+                rel
+                for rel in [*index.private_index_files, *index.unreadable_index_files]
                 if inherit_index and not is_excluded(rel, exclude)
             ],
             now=time.time() if now is None else now,

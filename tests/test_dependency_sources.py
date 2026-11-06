@@ -1890,6 +1890,74 @@ def test_every_file_that_can_name_an_index_is_inherited_from(write, check, name,
     assert f"a private package index is set in {name}" in result.notes[0]
 
 
+# Every kind of file that can name a private index, in its own way, also covers the
+# [build-system] requires of a pyproject.toml: they are installed from the project's
+# own index like the rest of the build.
+BUILD_SYSTEM_INDEX = {
+    "setup.cfg": f"[metadata]\nname = demo\n\n[easy_install]\nindex_url = {PRIVATE}\n",
+    "setup.py": (
+        "from setuptools import setup\n"
+        'setup(name="demo", dependency_links=["https://pkgs.corp.example/simple/x"])\n'
+    ),
+    "train.ipynb": json.dumps(
+        {
+            "nbformat": 4,
+            "cells": [{"cell_type": "code", "source": [f"%pip install -i {PRIVATE} corp-auth\n"]}],
+        }
+    ),
+    "tests/fixture/setup.cfg": f"[easy_install]\nindex_url = {PRIVATE}\n",
+    "Pipfile": f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n',
+    "tools/Pipfile.lock": json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}}),
+    "deploy/requirements.txt": f"--index-url {PRIVATE}\ncorp-auth==1.4.0\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(BUILD_SYSTEM_INDEX))
+def test_a_private_index_in_any_file_holds_back_build_system_requires(write, check, name):
+    """Whatever file names it, a private index keeps the [build-system] requires of
+    pyproject.toml on the machine, and the note names that file."""
+    write(name, BUILD_SYSTEM_INDEX[name])
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\n',
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert result.notes == [
+        f"SLOP001 didn't look up the [build-system] requires in pyproject.toml: "
+        f"a private package index is set in {name}, so names missing from PyPI may "
+        "be private packages. If that index only mirrors PyPI, set detect-private-index "
+        "= false."
+    ]
+    assert "secret" not in result.notes[0]
+
+
+def test_build_system_requires_held_back_by_an_unreadable_index_file(write, check):
+    """A pyproject.toml that can't be read may set a private index nobody can see, so
+    the [build-system] requires of another pyproject.toml stay on the machine."""
+    write(
+        "docs/pyproject.toml",
+        '[[tool.uv.index]]\nname = "corp"\nurl = "https://pkgs.corp.example/simple"\n'
+        "this line is not TOML\n",
+    )
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\n',
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert result.notes == [
+        "SLOP001 didn't look up the [build-system] requires in pyproject.toml: "
+        "docs/pyproject.toml could not be read and may set a private package index, "
+        "so names missing from PyPI may be private packages. Repair or exclude that "
+        "file, or set detect-private-index = false."
+    ]
+
+
 UV_INDEX = f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\n'
 PIPFILE_INDEX = f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n'
 LOCKED_INDEX = json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}, "default": {}})
