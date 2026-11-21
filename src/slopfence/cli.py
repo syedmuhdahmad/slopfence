@@ -17,6 +17,7 @@ from slopfence.config import (
     FAIL_ON,
     PACKAGE_AGE,
     ConfigError,
+    find_root,
     is_package_age,
     load_config,
     selected_rules,
@@ -200,15 +201,18 @@ def _end_like_an_interrupted_program() -> None:
 def _project_root(first_path: Path) -> Path:
     """The project a run belongs to, found from the first path it was given.
 
-    That is the git repository the path is in. Without one, it is the current folder
-    when the path is inside it, and else the path's own folder.
+    That is the git repository the path is in. Without one, it is the project that
+    the path's ``pyproject.toml`` marks (see ``config.find_root``), so the config and
+    the paths in a report or a baseline don't depend on the folder slopfence is
+    started in. Without that too, it is the current folder when the path is inside
+    it, and else the path's own folder.
     """
     start = first_path.resolve()
     folder = start if start.is_dir() else start.parent
     # --list-rules takes a path that doesn't exist: the nearest folder that does stands in.
     while not folder.is_dir() and folder != folder.parent:
         folder = folder.parent
-    root = diffmod.repo_root(folder)
+    root = diffmod.repo_root(folder) or find_root(folder)
     if root is None:
         cwd = Path.cwd().resolve()
         root = cwd if folder == cwd or cwd in folder.parents else folder
