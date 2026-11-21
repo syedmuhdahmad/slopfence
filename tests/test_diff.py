@@ -23,14 +23,17 @@ def _program(folder: Path) -> Path:
     return program
 
 
-def _started(monkeypatch) -> list[list[str]]:
-    """Record the command of every program that ``diff`` starts from now on."""
+def _started(monkeypatch, environments: list | None = None) -> list[list[str]]:
+    """Record the command of every program that ``diff`` starts from now on, and in
+    ``environments``, when given, the environment each one gets."""
     commands: list[list[str]] = []
     real = subprocess.run
 
     def record(command, **kwargs):
-        """Note the command, then run it."""
+        """Note the command and its environment, then run it."""
         commands.append(list(command))
+        if environments is not None:
+            environments.append(kwargs.get("env"))
         return real(command, **kwargs)
 
     monkeypatch.setattr(diffmod.subprocess, "run", record)
@@ -192,12 +195,15 @@ def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, m
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     git(tmp_path, "add", ".")
     git(tmp_path, "commit", "-q", "-m", "init")
-    commands = _started(monkeypatch)
+    environments: list[dict[str, str]] = []
+    commands = _started(monkeypatch, environments)
     diffmod.repo_root(tmp_path)
     diffmod.changed_lines(tmp_path, "HEAD")
     assert len(commands) == 4
-    for command in commands:
-        assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+    for command, environment in zip(commands, environments, strict=True):
+        assert command[1:3] == ["-c", "core.fsmonitor=false"]
+        assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+        assert environment["PATH"] == os.environ["PATH"], "the rest of the environment stays"
 
 
 # --- What a diff says changed: read from git's output, whatever the files hold. ---
@@ -241,10 +247,9 @@ def test_an_added_line_that_looks_like_a_file_header_is_only_a_line(tmp_path, pl
 def test_a_finding_below_a_planted_header_line_is_still_reported(tmp_path, monkeypatch, capsys):
     """The same, from the command line: the placeholder below the planted line is found."""
     _committed(tmp_path, {"app.py": b"x = 1\ny = 2\n\n\ndef f():\n    return 1\n"})
-    (tmp_path / "app.py").write_text(
-        'x = 1\nDOC = """\n++ /dev/null\n"""\ny = 2\n\n\ndef f():\n'
-        "    # In a real implementation, use the cache\n    return 1\n",
-        encoding="utf-8",
+    (tmp_path / "app.py").write_bytes(
+        b'x = 1\nDOC = """\n++ /dev/null\n"""\ny = 2\n\n\ndef f():\n'
+        b"    # In a real implementation, use the cache\n    return 1\n"
     )
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 1
@@ -288,9 +293,7 @@ def test_a_file_with_a_space_in_its_name_has_its_changed_lines(tmp_path, name):
 def test_a_finding_in_a_file_with_a_space_in_its_name_is_reported(tmp_path, monkeypatch, capsys):
     """From the command line: --diff no longer passes over such a file."""
     _committed(tmp_path, {"my file.py": b"x = 1\n"})
-    (tmp_path / "my file.py").write_text(
-        "x = 1\n# In a real implementation, do it\n", encoding="utf-8"
-    )
+    (tmp_path / "my file.py").write_bytes(b"x = 1\n# In a real implementation, do it\n")
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 1
     assert "my file.py" in capsys.readouterr().out
@@ -339,8 +342,10 @@ def test_function_that_becomes_a_copy_by_losing_a_line_is_reported_with_diff(
     """Deleting the one line that made two functions differ adds no line, and still
     makes a copy: --diff reports it, as the next full run would (#71)."""
     _two_functions(tmp_path)
-    b = (tmp_path / "b.py").read_text(encoding="utf-8")
-    (tmp_path / "b.py").write_text(b.replace("    print(items)\n", ""), encoding="utf-8")
+    # Bytes in and bytes out: written as text, every line would get a Windows line
+    # end there, and git would see the whole file as changed.
+    b = (tmp_path / "b.py").read_bytes()
+    (tmp_path / "b.py").write_bytes(b.replace(b"    print(items)\n", b""))
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 1
     out = capsys.readouterr().out
@@ -361,9 +366,9 @@ def test_deletion_that_makes_no_copy_reports_nothing_with_diff(
 ):
     """Taking a line out somewhere else changes nothing: no finding appears (#71)."""
     _two_functions(tmp_path)
-    b = (tmp_path / "b.py").read_text(encoding="utf-8")
-    assert old in b
-    (tmp_path / "b.py").write_text(b.replace(old, new), encoding="utf-8")
+    b = (tmp_path / "b.py").read_bytes()
+    assert old.encode() in b
+    (tmp_path / "b.py").write_bytes(b.replace(old.encode(), new.encode()))
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 0
     assert "No issues found" in capsys.readouterr().out
@@ -391,3 +396,10 @@ def test_parse_unified_diff_reads_a_hunk_by_its_counts():
         "app.py": {2, 3, 4, diffmod.Removed(9)},
         "b.py": {1},
     }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a path without a drive is only a Windows matter")
+def test_folder_without_a_drive_is_no_full_path_on_windows(tmp_path):
+    """``\\tools`` names a folder on the current drive, which is the project's drive."""
+    _program(tmp_path / "tools")
+    assert diffmod.find_git("\\tools") is None
