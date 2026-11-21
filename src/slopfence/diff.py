@@ -34,13 +34,15 @@ _NO_GIT = "git is not installed"
 # How every git command is started. git reads the config of the repository it runs in,
 # and that repository is the project being checked.
 _GIT_OPTIONS = (
-    # Only read: don't refresh the index file on the side. That write would also run
-    # the repository's ``post-index-change`` hook.
-    "--no-optional-locks",
     # ``core.fsmonitor`` can name a program, which git then runs to ask what changed.
     "-c",
     "core.fsmonitor=false",
 )
+# Only read: don't refresh the index file on the side. That write would also run the
+# repository's ``post-index-change`` hook. Set in the environment, not with
+# ``--no-optional-locks``: a git from before 2.15 turns that option down and ignores
+# the variable.
+_GIT_ENVIRONMENT = {"GIT_OPTIONAL_LOCKS": "0"}
 
 
 class DiffError(RuntimeError):
@@ -59,7 +61,9 @@ def find_git(search_path: str) -> str | None:
     for entry in search_path.split(os.pathsep):
         # Windows takes a folder with quotes around it.
         folder = entry.strip('"')
-        if not os.path.isabs(folder):
+        # ``Path.is_absolute``, not ``os.path.isabs``: before Python 3.13 that one
+        # takes ``\\tools`` on Windows for a full path, and it has no drive.
+        if not Path(folder).is_absolute():
             continue
         program = os.path.join(folder, _GIT_PROGRAM)
         if os.path.isfile(program) and os.access(program, os.X_OK):
@@ -81,6 +85,7 @@ def _git(root: Path, *args: str) -> str:
         result = subprocess.run(
             [program, *_GIT_OPTIONS, *args],
             cwd=root,
+            env={**os.environ, **_GIT_ENVIRONMENT},
             capture_output=True,
             check=True,
             # git emits UTF-8 paths; don't decode with the locale (cp1252 on Windows).

@@ -23,14 +23,17 @@ def _program(folder: Path) -> Path:
     return program
 
 
-def _started(monkeypatch) -> list[list[str]]:
-    """Record the command of every program that ``diff`` starts from now on."""
+def _started(monkeypatch, environments: list | None = None) -> list[list[str]]:
+    """Record the command of every program that ``diff`` starts from now on, and in
+    ``environments``, when given, the environment each one gets."""
     commands: list[list[str]] = []
     real = subprocess.run
 
     def record(command, **kwargs):
-        """Note the command, then run it."""
+        """Note the command and its environment, then run it."""
         commands.append(list(command))
+        if environments is not None:
+            environments.append(kwargs.get("env"))
         return real(command, **kwargs)
 
     monkeypatch.setattr(diffmod.subprocess, "run", record)
@@ -192,9 +195,19 @@ def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, m
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     git(tmp_path, "add", ".")
     git(tmp_path, "commit", "-q", "-m", "init")
-    commands = _started(monkeypatch)
+    environments: list[dict[str, str]] = []
+    commands = _started(monkeypatch, environments)
     diffmod.repo_root(tmp_path)
     diffmod.changed_lines(tmp_path, "HEAD")
     assert len(commands) == 4
-    for command in commands:
-        assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+    for command, environment in zip(commands, environments, strict=True):
+        assert command[1:3] == ["-c", "core.fsmonitor=false"]
+        assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+        assert environment["PATH"] == os.environ["PATH"], "the rest of the environment stays"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a path without a drive is only a Windows matter")
+def test_folder_without_a_drive_is_no_full_path_on_windows(tmp_path):
+    """``\\tools`` names a folder on the current drive, which is the project's drive."""
+    _program(tmp_path / "tools")
+    assert diffmod.find_git("\\tools") is None
