@@ -45,7 +45,11 @@ CHAT_PATTERNS = [
         r"file|class|method|snippet|module)\b",
         r"\bbelow is (the|an?) (updated|revised|complete|full|modified|corrected) "
         r"(version|code|function|implementation|script|file|class|method|snippet|module)\b",
-        r"\bas an ai( language model)?\b",
+        # An assistant that speaks of itself: "As an AI language model", "As an AI, I
+        # can't...". Not "as an AI SDK data part" or "as an AI agent", where "AI" only
+        # describes the next word: that is prose about software.
+        r"\bas an ai language model\b",
+        r"\bas an ai( assistant| model)?,? i(?=[\s'\u2019])",
         r"\bi hope (this|that) helps\b",
         r"\blet me know if (you('d| would) like|you need|you have any (other |more |further )?"
         r"questions|there('s| is) anything else|you want)\b",

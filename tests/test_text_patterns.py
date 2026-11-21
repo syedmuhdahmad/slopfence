@@ -162,3 +162,42 @@ def test_placeholders_skipped_in_demo_and_example_code(write, check, rel):
 def test_placeholders_still_flagged_in_similar_names(write, check):
     write("src/democracy.py", "# In a real implementation, validate the token\n")
     assert rule_lines(check("SLOP010"), "SLOP010") == [1]
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "# As an AI language model, I cannot run this",
+        "# as an AI language model this is beyond what can be done",
+        "# As an AI, I don't have access to your files",
+        "# As an AI I can't browse the web, so check the link yourself",
+        "# As an AI assistant, I am not able to test this",
+        "# Note: as an AI model, I'm unable to verify the output",
+    ],
+)
+def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
+    """ "As an AI" is chat text when the writer goes on about itself: "As an AI, I ..."."""
+    write("src/app.py", f"x = 1\n{comment}\n")
+    assert rule_lines(check("SLOP051"), "SLOP051") == [2]
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        # Docstrings of Significant-Gravitas/AutoGPT, which uses Vercel's "AI SDK".
+        "# Emit as an AI SDK v5 data part.",
+        "# Resolved display name, retained as an AI SDK data part on replay.",
+        "# Emit as an AI SDK v5 data part so the client surfaces it as",
+        # The same shape: "AI" describes the noun that follows it.
+        "# Registered as an AI provider plugin at import time",
+        "# Runs as an AI agent with its own tool list",
+        "# Treat this service as an AI gateway",
+        "# Use it as an AI assistant for code review",
+        "# Works as an AI I/O layer between the model and the tools",
+        "# Counted as an aid allocation, so only the stored choice applies",
+    ],
+)
+def test_ai_as_a_plain_word_is_not_flagged(write, check, comment):
+    """ "as an AI SDK", "as an AI agent": prose about software, not an assistant talking."""
+    write("src/app.py", f"x = 1\n{comment}\n")
+    assert check("SLOP051").findings == []
