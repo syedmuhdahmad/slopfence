@@ -339,3 +339,71 @@ def test_replaced_report_keeps_its_permissions(tmp_path):
     assert main([str(tmp_path), "--offline", "--format", "json", "-o", str(report)]) == 0
     assert "version" in json.loads(report.read_text())
     assert stat.S_IMODE(report.stat().st_mode) == 0o600
+
+
+def _crash_in_a_rule(monkeypatch):
+    """Make one rule raise, the way a bug in slopfence would."""
+    from slopfence import detectors
+
+    def broken_rule(src):
+        """Stand in for a rule with a bug in it."""
+        raise RuntimeError("line one\nline two")
+
+    monkeypatch.setitem(detectors.FILE_DETECTORS, "SLOP040", broken_rule)
+
+
+def test_crash_in_a_rule_exits_2_with_one_line(tmp_path, capsys, monkeypatch):
+    """A bug in slopfence is an error (2), never "issues found" (1), and says so in a line (#67)."""
+    (tmp_path / "app.py").write_text(SLOPPY)
+    monkeypatch.delenv("SLOPFENCE_DEBUG", raising=False)
+    _crash_in_a_rule(monkeypatch)
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_ERROR
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    [line] = captured.err.splitlines()
+    assert line.startswith("slopfence: internal error (RuntimeError) while checking app.py.")
+    assert "https://github.com/syedmuhdahmad/slopfence/issues" in line
+    assert "SLOPFENCE_DEBUG=1" in line
+
+
+def test_crash_outside_a_file_names_no_file(tmp_path, capsys, monkeypatch):
+    """A crash that belongs to no single file still exits 2 with the one line (#67)."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    monkeypatch.delenv("SLOPFENCE_DEBUG", raising=False)
+    monkeypatch.setattr(climod, "run", mock.Mock(side_effect=ZeroDivisionError("oops")))
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_ERROR
+    [line] = capsys.readouterr().err.splitlines()
+    assert line.startswith("slopfence: internal error (ZeroDivisionError). This is a bug")
+
+
+@pytest.mark.parametrize("value", ["1", "true"])
+def test_debug_variable_adds_the_traceback(tmp_path, capsys, monkeypatch, value):
+    """With SLOPFENCE_DEBUG set, the traceback follows the line, for the bug report (#67)."""
+    (tmp_path / "app.py").write_text(SLOPPY)
+    monkeypatch.setenv("SLOPFENCE_DEBUG", value)
+    _crash_in_a_rule(monkeypatch)
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_ERROR
+    first, *rest = capsys.readouterr().err.splitlines()
+    assert first.startswith("slopfence: internal error (RuntimeError) while checking app.py.")
+    assert "SLOPFENCE_DEBUG" not in first
+    assert "Traceback (most recent call last):" in rest
+    assert "RuntimeError: line one" in rest
+    assert any("broken_rule" in line for line in rest)
+
+
+@pytest.mark.parametrize("value", ["", "0"])
+def test_debug_variable_switched_off_prints_no_traceback(tmp_path, capsys, monkeypatch, value):
+    """An empty SLOPFENCE_DEBUG, or 0, is "off": one line and no traceback (#67)."""
+    (tmp_path / "app.py").write_text(SLOPPY)
+    monkeypatch.setenv("SLOPFENCE_DEBUG", value)
+    _crash_in_a_rule(monkeypatch)
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_ERROR
+    assert len(capsys.readouterr().err.splitlines()) == 1
+
+
+def test_bad_options_still_exit_through_argparse(tmp_path, capsys):
+    """The catch-all leaves argparse's own exit alone: a usage error, status 2, no "bug" line."""
+    with pytest.raises(SystemExit) as stopped:
+        main([str(tmp_path), "--write-baseline", "b.json", "--diff", "HEAD"])
+    assert stopped.value.code == 2
+    assert "internal error" not in capsys.readouterr().err
