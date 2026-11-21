@@ -198,3 +198,196 @@ def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, m
     assert len(commands) == 4
     for command in commands:
         assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+
+
+# --- What a diff says changed: read from git's output, whatever the files hold. ---
+
+BODY = """\
+    total = 0
+    for item in items:
+        if item.price > limit:
+            total += item.price * rate
+        else:
+            total += item.price
+    total = round(total, 2)
+    return total
+"""
+
+
+def _committed(root: Path, files: dict[str, bytes]) -> None:
+    """Make ``root`` a repository with one commit that holds ``files`` (path -> bytes)."""
+    git_init(root)
+    # The bytes of the files are what the tests are about: git must not convert them.
+    git(root, "config", "core.autocrlf", "false")
+    for rel, data in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "init")
+
+
+@pytest.mark.parametrize("planted", ["++ /dev/null", "++ b/other.py", "++ b/app.py\t"])
+def test_an_added_line_that_looks_like_a_file_header_is_only_a_line(tmp_path, planted):
+    """An added line ``++ /dev/null`` reads ``+++ /dev/null`` in a diff, like the
+    header of a deleted file. It must not end the file: the changes below it would be
+    lost, and a finding there would pass a --diff run."""
+    old = b"x = 1\ny = 2\nz = 3\n\n\ndef f():\n    return 1\n"
+    _committed(tmp_path, {"app.py": old, "other.py": b"a = 1\n"})
+    new = f'x = 1\nDOC = """\n{planted}\n"""\ny = 2\nz = 3\n\n\ndef f():\n    # new\n    return 1\n'
+    (tmp_path / "app.py").write_bytes(new.encode())
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2, 3, 4, 10}}
+
+
+def test_a_finding_below_a_planted_header_line_is_still_reported(tmp_path, monkeypatch, capsys):
+    """The same, from the command line: the placeholder below the planted line is found."""
+    _committed(tmp_path, {"app.py": b"x = 1\ny = 2\n\n\ndef f():\n    return 1\n"})
+    (tmp_path / "app.py").write_text(
+        'x = 1\nDOC = """\n++ /dev/null\n"""\ny = 2\n\n\ndef f():\n'
+        "    # In a real implementation, use the cache\n    return 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 1
+    assert "SLOP010" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("separator", ["\r", "\x0c", "\x1c", "\x85", "\u2028"])
+def test_only_a_line_feed_ends_a_line_of_a_diff(tmp_path, separator):
+    """A carriage return, a form feed and the like are part of a line. Read as line
+    ends, they would put the rest of the line at the start of a line of its own,
+    where ``+++ /dev/null`` passes for a header."""
+    _committed(tmp_path, {"app.py": b"x = 1\ny = 2\nz = 3\n\n\n\nw = 4\n"})
+    new = f"x = 1\nplanted = 0  #{separator}+++ /dev/null\ny = 2\nz = 3\n\n\n\nw = 4\nv = 5\n"
+    (tmp_path / "app.py").write_bytes(new.encode())
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2, 9}}
+
+
+def test_files_with_windows_line_ends_have_the_same_changed_lines(tmp_path):
+    """``\\r\\n`` at the end of every line changes nothing about which lines changed."""
+    _committed(tmp_path, {"app.py": b"x = 1\r\ny = 2\r\n"})
+    (tmp_path / "app.py").write_bytes(b"x = 1\r\nnew = 0\r\ny = 2\r\nlast = 3\r\n")
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2, 4}}
+
+
+def test_a_file_without_a_final_line_end_is_read_to_its_last_line(tmp_path):
+    """git adds a note after the last line of such a file. It is no line of the file."""
+    _committed(tmp_path, {"app.py": b"x = 1\ny = 2", "next.py": b"a = 1\n"})
+    (tmp_path / "app.py").write_bytes(b"x = 1\ny = 3")
+    (tmp_path / "next.py").write_bytes(b"a = 1\nb = 2\n")
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2}, "next.py": {2}}
+
+
+@pytest.mark.parametrize("name", ["my file.py", "a b/c d.py"])
+def test_a_file_with_a_space_in_its_name_has_its_changed_lines(tmp_path, name):
+    """git ends the header of such a file with a tab. The tab is not part of the name."""
+    _committed(tmp_path, {name: b"x = 1\n"})
+    (tmp_path / name).write_bytes(b"x = 1\ny = 2\n")
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {name: {2}}
+
+
+def test_a_finding_in_a_file_with_a_space_in_its_name_is_reported(tmp_path, monkeypatch, capsys):
+    """From the command line: --diff no longer passes over such a file."""
+    _committed(tmp_path, {"my file.py": b"x = 1\n"})
+    (tmp_path / "my file.py").write_text(
+        "x = 1\n# In a real implementation, do it\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 1
+    assert "my file.py" in capsys.readouterr().out
+
+
+def test_removed_lines_are_marked_where_they_were(tmp_path):
+    """Lines that were only taken out leave no changed line. The place is kept: the
+    number of the line that now comes before it, 0 at the top of the file."""
+    _committed(tmp_path, {"app.py": b"a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"})
+    (tmp_path / "app.py").write_bytes(b"b = 2\nc = 3\ne = 5\n")
+    changed = diffmod.changed_lines(tmp_path, "HEAD")
+    assert changed == {"app.py": {diffmod.Removed(0), diffmod.Removed(2)}}
+
+
+def test_lines_replaced_by_fewer_lines_are_changed_lines(tmp_path):
+    """Three lines that become one: that line changed, and nothing else is marked."""
+    _committed(tmp_path, {"app.py": b"a = 1\nb = 2\nc = 3\nd = 4\n"})
+    (tmp_path / "app.py").write_bytes(b"a = 1\nx = 0\nd = 4\n")
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2}}
+
+
+def test_touches_counts_lines_removed_inside_a_span():
+    """A function is changed when lines were taken out between two of its lines. A
+    finding on one line is not: no line of it changed."""
+    changed = {"app.py": {diffmod.Removed(4)}}
+    assert diffmod.touches(changed, "app.py", 3, 9)
+    assert diffmod.touches(changed, "app.py", 4, 5)
+    assert not diffmod.touches(changed, "app.py", 4, None)
+    assert not diffmod.touches(changed, "app.py", 4, 4)
+    assert not diffmod.touches(changed, "app.py", 5, 9), "removed above its first line"
+    assert not diffmod.touches(changed, "app.py", 1, 4), "removed below its last line"
+    assert not diffmod.touches(changed, "other.py", 3, 9)
+
+
+def _two_functions(root: Path) -> None:
+    """The project of #71: ``sum_prices`` is ``total_price`` plus one line."""
+    a = f"def total_price(items, limit, rate):\n{BODY}"
+    b = f"def sum_prices(items, limit, rate):\n    print(items)\n{BODY}"
+    b += "\n\ndef other(x):\n    y = x + 1\n    print(y)\n    z = y * 2\n    return z\n"
+    _committed(root, {"a.py": a.encode(), "b.py": b.encode()})
+
+
+def test_function_that_becomes_a_copy_by_losing_a_line_is_reported_with_diff(
+    tmp_path, monkeypatch, capsys
+):
+    """Deleting the one line that made two functions differ adds no line, and still
+    makes a copy: --diff reports it, as the next full run would (#71)."""
+    _two_functions(tmp_path)
+    b = (tmp_path / "b.py").read_text(encoding="utf-8")
+    (tmp_path / "b.py").write_text(b.replace("    print(items)\n", ""), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 1
+    out = capsys.readouterr().out
+    assert "SLOP030" in out and "'sum_prices' is identical to 'total_price' in a.py:1" in out
+    assert main([".", "--offline"]) == 1
+    assert "'sum_prices' is identical to 'total_price' in a.py:1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("    print(y)\n", ""),  # a line of a function that is no copy of anything
+        ("\n\ndef other", "\ndef other"),  # a blank line between two functions
+    ],
+)
+def test_deletion_that_makes_no_copy_reports_nothing_with_diff(
+    tmp_path, monkeypatch, capsys, old, new
+):
+    """Taking a line out somewhere else changes nothing: no finding appears (#71)."""
+    _two_functions(tmp_path)
+    b = (tmp_path / "b.py").read_text(encoding="utf-8")
+    assert old in b
+    (tmp_path / "b.py").write_text(b.replace(old, new), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 0
+    assert "No issues found" in capsys.readouterr().out
+
+
+def test_deletion_next_to_an_old_finding_does_not_report_it(tmp_path, monkeypatch, capsys):
+    """A finding on one line is not new because the line after it was deleted."""
+    _committed(tmp_path, {"app.py": b"x = 1\n# In a real implementation, do it\ny = 2\nz = 3\n"})
+    (tmp_path / "app.py").write_bytes(b"x = 1\n# In a real implementation, do it\nz = 3\n")
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 0
+    assert "No issues found" in capsys.readouterr().out
+
+
+def test_parse_unified_diff_reads_a_hunk_by_its_counts():
+    """The header of a hunk says how many lines follow. Those lines are never read as
+    headers, whatever they look like."""
+    text = (
+        "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        "@@ -2,2 +2,3 @@\n--- a/gone.py\n-x\n+++ /dev/null\n+@@ -1 +1 @@\n+diff --git a/x b/x\n"
+        "@@ -9,2 +9,0 @@\n-a\n-b\n"
+        "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1 @@\n+new\n"
+    )
+    assert diffmod.parse_unified_diff(text) == {
+        "app.py": {2, 3, 4, diffmod.Removed(9)},
+        "b.py": {1},
+    }

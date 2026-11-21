@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
-_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+# The header of a hunk: how many lines of the old file it takes out, where it is in
+# the new file, and how many lines it puts in. A count that is left out is 1.
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 # How ``git diff`` is asked, so that the answer does not depend on the user's git config.
 _DIFF_OPTIONS = (
@@ -23,8 +26,18 @@ _DIFF_OPTIONS = (
     "--dst-prefix=b/",
 )
 
-# path (relative to repo root) -> changed line numbers; None means the whole file is new.
-ChangedLines = dict[str, "set[int] | None"]
+
+@dataclass(frozen=True)
+class Removed:
+    """A place where a diff only took lines out of a file, so that no line there is
+    new: between line ``after`` and the next one. 0 is the top of the file."""
+
+    after: int
+
+
+# path (relative to repo root) -> the numbers of its added and changed lines, and the
+# places where lines were only removed; None means the whole file is new.
+ChangedLines = dict[str, "set[int | Removed] | None"]
 
 
 # The file name of the git program. Windows adds ``.exe`` to a program that is started
@@ -83,16 +96,23 @@ def _git(root: Path, *args: str) -> str:
             cwd=root,
             capture_output=True,
             check=True,
-            # git emits UTF-8 paths; don't decode with the locale (cp1252 on Windows).
-            encoding="utf-8",
-            errors="surrogateescape",
         )
     # Removed since it was found a moment ago.
     except FileNotFoundError as err:
         raise DiffError(_NO_GIT) from err
     except subprocess.CalledProcessError as err:
-        raise DiffError(err.stderr.strip() or f"git {' '.join(args)} failed") from err
-    return result.stdout
+        raise DiffError(_text(err.stderr).strip() or f"git {' '.join(args)} failed") from err
+    return _text(result.stdout)
+
+
+def _text(output: bytes) -> str:
+    """What git wrote, as text, byte for byte.
+
+    git emits UTF-8 paths, whatever the locale is (cp1252 on Windows). And it is
+    decoded here, not by ``subprocess``: that would turn every carriage return into a
+    line end, also one in the middle of a line of a diff.
+    """
+    return output.decode("utf-8", "surrogateescape")
 
 
 def repo_root(start: Path) -> Path | None:
@@ -127,22 +147,57 @@ def unquote_git_path(path: str) -> str:
     return out.decode("utf-8", "surrogateescape")
 
 
+def _new_path(header: str) -> str | None:
+    """The path of the new file that a ``+++ `` line names. None for a deleted file."""
+    target = header[4:]
+    if not target.startswith('"'):
+        # git puts a tab after a name with a space in it. A name that ends in a tab
+        # is written in quotes.
+        target = target.removesuffix("\t")
+    target = unquote_git_path(target)
+    return None if target == "/dev/null" else target.removeprefix("b/")
+
+
 def parse_unified_diff(diff_text: str) -> ChangedLines:
-    """The added and changed lines of each file in a diff whose new paths start with ``b/``."""
+    """What changed in each file of a diff whose new paths start with ``b/``: its added
+    and changed lines, and the places where lines were only removed (see ``Removed``).
+
+    The lines of a hunk are counted off by the numbers in its header and never read as
+    anything else. They hold the text of the files, and an added line ``++ /dev/null``
+    reads ``+++ /dev/null`` in a diff, like the header of a deleted file. For the same
+    reason only a line feed ends a line: a carriage return or a form feed in the
+    middle of a line must not put the rest of it at the start of a line of its own.
+    """
     changed: ChangedLines = {}
     current: str | None = None
-    for line in diff_text.splitlines():
+    # The lines of the hunk that are still to come: from the old file, and for the new one.
+    old = new = 0
+    for line in diff_text.split("\n"):
+        if old or new:
+            if old and line.startswith("-"):
+                old -= 1
+                continue
+            if new and line.startswith("+"):
+                new -= 1
+                continue
+            if line.startswith("\\"):  # "\ No newline at end of file"
+                continue
+            # Not what git writes in a hunk. The hunk ends here.
+            old = new = 0
         if line.startswith("+++ "):
-            target = unquote_git_path(line[4:].rstrip("\n"))
-            current = None if target == "/dev/null" else target.removeprefix("b/")
+            current = _new_path(line)
             if current is not None:
                 changed.setdefault(current, set())
-        elif current is not None and (m := _HUNK.match(line)):
-            start = int(m.group(1))
-            count = int(m.group(2)) if m.group(2) is not None else 1
+        elif m := _HUNK.match(line):
+            old, start, new = (1 if count is None else int(count) for count in m.groups())
+            if current is None:
+                continue
             lines = changed[current]
             assert lines is not None
-            lines.update(range(start, start + count))
+            if new:
+                lines.update(range(start, start + new))
+            else:
+                lines.add(Removed(start))
     return changed
 
 
@@ -165,10 +220,20 @@ def changed_lines(root: Path, ref: str) -> ChangedLines:
 
 
 def touches(changed: ChangedLines, path: str, line: int, end_line: int | None) -> bool:
-    """Whether any line from ``line`` to ``end_line`` of ``path`` was changed."""
+    """Whether the diff changed what lies from ``line`` to ``end_line`` of ``path``.
+
+    That is so when one of these lines is new or changed. It is also so when lines
+    were removed between two of them: a function that lost a line is a changed
+    function, although none of the lines it has left is new. A finding on a single
+    line is never touched by a removal, and lines removed just above or below the
+    span don't count.
+    """
     if path not in changed:
         return False
     lines = changed[path]
     if lines is None:
         return True
-    return any(n in lines for n in range(line, (end_line or line) + 1))
+    last = end_line or line
+    return any(n in lines for n in range(line, last + 1)) or any(
+        Removed(n) in lines for n in range(line, last)
+    )
