@@ -176,7 +176,7 @@ def test_placeholders_still_flagged_in_similar_names(write, check):
     ],
 )
 def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
-    """ "As an AI" is chat text when the writer goes on about itself: "As an AI, I ..."."""
+    """The phrase is chat text when the writer goes on about itself in the first person."""
     write("src/app.py", f"x = 1\n{comment}\n")
     assert rule_lines(check("SLOP051"), "SLOP051") == [2]
 
