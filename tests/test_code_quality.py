@@ -230,3 +230,79 @@ def test_stub_function_skips_pyi_files(tmp_path):
     assert list(check_stub_functions(src)) == []
     # Discovery only picks up .py files, so a full run never sees it either.
     assert discover_all([tmp_path], tmp_path) == ([], [], [])
+
+
+# --- A fixed answer in a family of handler methods is no stub (#100). ---
+
+
+def _handlers(names, fixed, params="self, schema", real="        return build(schema, {name!r})"):
+    """A class with one method per name. The ones in ``fixed`` return a constant."""
+    lines = ["class Generator:"]
+    for name in names:
+        lines.append(f"    def {name}({params}):")
+        lines.append(f'        """Generates the schema for {name}."""')
+        lines.append("        return {'type': 'x'}" if name in fixed else real.format(name=name))
+        lines.append("")
+    return "\n".join(lines)
+
+
+KINDS = ["none", "bool", "int", "float", "str", "bytes", "list", "dict"]
+
+
+def test_fixed_answer_in_a_family_of_handlers_is_not_flagged(write, check):
+    """Eight ``*_schema(self, schema)`` methods, six of which build their answer: the
+    fixed answers of the two simplest ones are finished code. Seen in pydantic."""
+    names = [f"{kind}_schema" for kind in KINDS]
+    write("src/app.py", _handlers(names, fixed={"none_schema", "bool_schema"}))
+    assert check("SLOP011").findings == []
+
+
+def test_family_can_share_its_first_word(write, check):
+    """``visit_*``, ``handle_*``: the shared word may also come first."""
+    names = [f"visit_{kind}" for kind in KINDS]
+    code = _handlers(names, fixed={"visit_none"}, params="self, node").replace("schema", "node")
+    write("src/app.py", code)
+    assert check("SLOP011").findings == []
+
+
+def test_family_of_stubs_is_still_flagged(write, check):
+    """When most of the family returns a constant, nothing shows that it is on purpose."""
+    names = [f"{kind}_schema" for kind in KINDS]
+    write("src/app.py", _handlers(names, fixed=set(names[:3])))
+    assert len(check("SLOP011").findings) == 3
+    write("src/app.py", _handlers(names, fixed=set(names)))
+    assert len(check("SLOP011").findings) == 8
+
+
+def test_small_family_is_still_flagged(write, check):
+    """Four methods are no family: a stub among them is reported."""
+    names = [f"{kind}_schema" for kind in KINDS[:4]]
+    write("src/app.py", _handlers(names, fixed={"none_schema"}))
+    assert [f.subject for f in check("SLOP011").findings] == ["none_schema"]
+
+
+def test_methods_with_other_parameters_are_no_family(write, check):
+    """``get_user(self, user_id)`` and ``get_token(self, user)`` only share a word.
+    Handlers that a dispatcher calls take the same parameters."""
+    code = "class Service:\n"
+    for n, kind in enumerate(KINDS):
+        code += f"    def get_{kind}(self, {kind}_id):\n"
+        code += f'        """Fetch the {kind} from the database."""\n'
+        code += (
+            "        return {'id': 1}\n\n"
+            if n == 0
+            else f"        return self.db.get({kind}_id)\n\n"
+        )
+    write("src/app.py", code)
+    assert [f.subject for f in check("SLOP011").findings] == ["get_none"]
+
+
+def test_functions_of_a_module_are_no_family(write, check):
+    """The rule is about the methods of one class."""
+    code = ""
+    for n, kind in enumerate(KINDS):
+        code += f"def {kind}_schema(schema):\n"
+        code += f'    """Generates the schema for {kind}."""\n'
+        code += "    return {'type': 'x'}\n\n" if n == 0 else "    return build(schema)\n\n"
+    write("src/app.py", code)
+    assert [f.subject for f in check("SLOP011").findings] == ["none_schema"]
