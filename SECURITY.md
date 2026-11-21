@@ -54,6 +54,7 @@ slopfence reads the files it checks. It never runs them. Python itself can still
 - The `slopfence` command, the pre-commit hook and the GitHub Action don't have the checked folder on that path. Use one of them.
 - `python -m slopfence` starts with the folder on the path. slopfence removes it before it imports its own modules, but Python has already imported a few of its own by then. Use `python -I -m slopfence` if you need the module form.
 - Don't set `PYTHONPATH` to the project when you run slopfence on it. The Action ignores `PYTHONPATH`.
+- git is the only program slopfence starts: once in every run, to find the repository, and for `--diff`. It looks for git in the folders of `PATH` that are named by their full path, and starts it by that full path. A program named `git` in the folder you check is never started, also when `PATH` holds `.` or an empty entry, and also on Windows, which looks in the current folder first.
 
 ## What slopfence sends over the network
 
