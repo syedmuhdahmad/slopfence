@@ -105,15 +105,37 @@ def _statement_count(func: FunctionNode) -> int:
     return count
 
 
+def _outer_names(func: FunctionNode) -> set[str]:
+    """The names a function declares ``global`` or ``nonlocal``.
+
+    Only its own declarations: a function inside it has names of its own.
+    """
+    names: set[str] = set()
+    todo = child_statements(func)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            todo.extend(child_statements(node))
+    return names
+
+
 def _local_names(func: FunctionNode) -> set[str]:
-    """Parameters and every name the function assigns or deletes."""
+    """Parameters and every name the function assigns or deletes, as far as they are
+    its own.
+
+    A name it declares ``global`` or ``nonlocal`` is assigned too, but it is shared
+    state, like an attribute: two functions that set different globals do different
+    things. Such a name keeps its name when functions are compared.
+    """
     args = func.args
     params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
     names = {a.arg for a in params if a}
     for node in walk(func):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             names.add(node.id)
-    return names
+    return names - _outer_names(func)
 
 
 def _body_without_docstring(func: FunctionNode) -> list[ast.stmt]:

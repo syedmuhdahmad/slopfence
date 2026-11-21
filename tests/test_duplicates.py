@@ -499,3 +499,59 @@ def test_edited_first_copy_names_the_copy_it_was_identical_to(write, tmp_path):
     write("src/a.py", BUILD_QUERY)
     write("src/b.py", edited)
     assert peers() == [("src/b.py", None)]
+
+
+# --- Names that a function declares global or nonlocal are not local names (#99). ---
+
+SETTER = '''
+def {name}({param}):
+    """Set {var}."""
+    global {var}
+    {var} = {param}
+    return {var}
+'''
+
+COUNTER = '''
+def {name}():
+    count = 0
+
+    def bump(step):
+        """Add to {var}."""
+        nonlocal {var}
+        {var} = {var} + step
+        return {var}
+
+    return bump
+'''
+
+
+def test_functions_that_assign_different_globals_are_not_identical(write, check):
+    """Each one sets another variable of its module: neither can stand in for the
+    other. Seen in celery (``set_in_sighandler`` and ``set_default_app``)."""
+    write("app/log.py", SETTER.format(name="set_in_sighandler", param="value", var="_in_handler"))
+    write("app/state.py", SETTER.format(name="set_default_app", param="app", var="default_app"))
+    assert check("SLOP030").findings == []
+
+
+def test_functions_that_assign_the_same_global_are_still_identical(write, check):
+    """The same global, set the same way under another parameter name, is a copy."""
+    write("app/a.py", SETTER.format(name="set_app", param="value", var="default_app"))
+    write("app/b.py", SETTER.format(name="use_app", param="app", var="default_app"))
+    [finding] = check("SLOP030").findings
+    assert finding.path == "app/b.py" and "'use_app' is identical to 'set_app'" in finding.message
+
+
+def test_nonlocal_names_count_like_global_ones(write, check):
+    """A name declared ``nonlocal`` belongs to the function around: it keeps its name."""
+    write("app/a.py", COUNTER.format(name="make_counter", var="count"))
+    write("app/b.py", COUNTER.format(name="make_total", var="count").replace("count", "total"))
+    findings = check("SLOP030").findings
+    assert [f for f in findings if f.subject == "bump"] == []
+
+
+def test_local_names_still_do_not_matter(write, check):
+    """Renaming a plain local variable changes nothing: the two are still identical."""
+    body = "    {a} = len(items)\n    {b} = {a} * 2\n    print({b})\n    return {b}\n"
+    write("app/a.py", "def first(items):\n" + body.format(a="size", b="twice"))
+    write("app/b.py", "def second(rows):\n" + body.format(a="n", b="m").replace("items", "rows"))
+    assert len(check("SLOP030").findings) == 1
