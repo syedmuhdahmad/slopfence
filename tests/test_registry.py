@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import stat
 import threading
 import time
 import urllib.error
@@ -406,3 +407,37 @@ def test_save_leaves_no_temporary_file_when_it_fails(pypi, monkeypatch):
     monkeypatch.setattr(os, "replace", fail)
     registry.save()  # must not raise
     assert list(registry.cache_file.parent.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
+def test_cache_file_keeps_its_permissions(pypi):
+    """A cache file that was made private stays private when a later run rewrites it (#70)."""
+    registry, _ = pypi
+    registry.prefetch(["pkg-1"])
+    registry.save()
+    registry.cache_file.chmod(0o600)
+    registry.prefetch(["pkg-2"])
+    registry.save()
+    assert stat.S_IMODE(registry.cache_file.stat().st_mode) == 0o600
+    assert set(json.loads(registry.cache_file.read_text(encoding="utf-8"))) == {"pkg-1", "pkg-2"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows folders have no POSIX permissions")
+def test_new_cache_folder_is_for_its_owner_only(pypi):
+    """The cache holds the names of a project's packages: other users can't list or read it."""
+    registry, _ = pypi
+    registry.prefetch(["pkg-1"])
+    registry.save()
+    assert stat.S_IMODE(registry.cache_file.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows folders have no POSIX permissions")
+def test_cache_folder_that_exists_keeps_its_permissions(pypi):
+    """A folder that was there before is the user's: its permissions are not changed."""
+    registry, _ = pypi
+    registry.cache_file.parent.mkdir(parents=True)
+    registry.cache_file.parent.chmod(0o755)
+    registry.prefetch(["pkg-1"])
+    registry.save()
+    assert stat.S_IMODE(registry.cache_file.parent.stat().st_mode) == 0o755
+    assert registry.cache_file.is_file()

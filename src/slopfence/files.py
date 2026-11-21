@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import stat
 from pathlib import Path
 
@@ -23,15 +24,23 @@ def replace_text(path: Path, text: str, mode: int | None = None) -> None:
     one. A write that fails or is interrupted leaves the old file as it was. ``mode``,
     when given, is the permissions the new file gets. Raises OSError when the file
     can't be written.
+
+    The temporary file is always a new file with a name nobody can know in advance.
+    The folder can be one that others put files in: the project that is checked, or a
+    shared cache folder. A file or a symbolic link that was put there under a name
+    that could be guessed would otherwise be written through.
     """
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    # "x": the file must not exist yet, and a link of that name is not followed. Opened
+    # before the ``try``, so that a file that was already there is not removed below.
+    stream = open(tmp, "x", encoding="utf-8", newline="\n")  # noqa: SIM115 (see above)
     try:
-        if mode is not None:
-            # Permissions first, text second: a file that only its owner may read is
-            # never readable by others, not even while it is written.
-            tmp.touch()
-            os.chmod(tmp, mode)
-        _write(tmp, text)
+        with stream:
+            if mode is not None:
+                # Permissions first, text second: a file that only its owner may read
+                # is never readable by others while it holds the text.
+                os.chmod(tmp, mode)
+            stream.write(text)
         os.replace(tmp, path)
     finally:
         # Gone already when the write worked. Left behind when it failed.

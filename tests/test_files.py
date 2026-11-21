@@ -45,18 +45,58 @@ def test_failed_replace_keeps_the_old_file_and_leaves_no_temporary_file(tmp_path
 @pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
 def test_replace_text_sets_the_mode_before_the_text_goes_in(tmp_path, monkeypatch):
     """A file that only its owner may read never holds the text with wider permissions."""
-    modes = []
-    write = filesmod._write
+    sizes = []
+    chmod = os.chmod
 
-    def write_and_record(path, text):
-        """Note the permissions the file has at the moment the text goes in."""
-        modes.append(stat.S_IMODE(os.stat(path).st_mode) if path.exists() else None)
-        write(path, text)
+    def chmod_and_record(path, mode):
+        """Note how much text the file holds at the moment its permissions are set."""
+        sizes.append(os.stat(path).st_size)
+        chmod(path, mode)
 
-    monkeypatch.setattr(filesmod, "_write", write_and_record)
+    monkeypatch.setattr(os, "chmod", chmod_and_record)
     replace_text(tmp_path / "report.json", "secret", 0o600)
-    assert modes == [0o600]
+    assert sizes == [0]
     assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o600
+
+
+def _fixed_temporary_name(monkeypatch, token="0123456789abcdef"):
+    """Make the name of the temporary file known, as if somebody had guessed it."""
+    monkeypatch.setattr(filesmod.secrets, "token_hex", lambda size: token)
+    return f"data.json.{token}.tmp"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
+def test_replace_text_never_writes_through_a_link_that_was_put_in_its_way(tmp_path, monkeypatch):
+    """A link with the temporary file's name is not followed: the file it names is untouched."""
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("mine", encoding="utf-8")
+    planted = tmp_path / _fixed_temporary_name(monkeypatch)
+    planted.symlink_to(elsewhere)
+    with pytest.raises(FileExistsError):
+        replace_text(tmp_path / "data.json", "report")
+    assert elsewhere.read_text(encoding="utf-8") == "mine"
+    assert not (tmp_path / "data.json").exists()
+    assert planted.is_symlink(), "a file that replace_text did not make is not its to remove"
+
+
+def test_replace_text_never_overwrites_a_file_with_the_temporary_name(tmp_path, monkeypatch):
+    """The temporary file is always a new one: a file of that name is left as it is."""
+    in_the_way = tmp_path / _fixed_temporary_name(monkeypatch)
+    in_the_way.write_text("not ours", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        replace_text(tmp_path / "data.json", "report")
+    assert in_the_way.read_text(encoding="utf-8") == "not ours"
+
+
+def test_temporary_file_name_is_new_every_time(tmp_path, monkeypatch):
+    """The name can't be worked out in advance, so nobody can put a file in its way."""
+    used = []
+    real = os.replace
+    monkeypatch.setattr(os, "replace", lambda src, dst: used.append(src.name) or real(src, dst))
+    for _ in range(3):
+        replace_text(tmp_path / "data.json", "text")
+    assert len(set(used)) == 3
+    assert all(name.startswith("data.json.") and name.endswith(".tmp") for name in used)
 
 
 def test_replace_text_in_a_missing_folder_is_an_error(tmp_path):
