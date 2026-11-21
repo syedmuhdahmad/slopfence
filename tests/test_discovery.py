@@ -241,3 +241,17 @@ def test_link_whose_target_is_gone_is_handled_as_before(tmp_path):
     assert discover_all([root], root)[0] == [root / "gone.py"]
     # Reported under the path the link names, as every linked file is.
     assert run([root], root, OfflineRegistry()).parse_errors == ["missing.py"]
+
+
+@needs_symlinks
+def test_link_that_leads_back_to_itself_is_passed_over(tmp_path):
+    """``loop.py -> loop.py`` names no file. Before Python 3.13 it ended the run with
+    an error when its path was resolved."""
+    root, _ = outside(tmp_path)
+    (root / "loop.py").symlink_to(root / "loop.py")
+    (root / "a.py").symlink_to(root / "b.py")
+    (root / "b.py").symlink_to(root / "a.py")
+    (root / "real.py").write_text("x = 1\n", encoding="utf-8")
+    assert discover_all([root], root)[0] == [root / "real.py"]
+    result = run([root], root, OfflineRegistry())
+    assert result.files_checked == 1 and result.parse_errors == []

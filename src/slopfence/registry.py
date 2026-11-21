@@ -289,7 +289,10 @@ class PyPIRegistry:
             # A relative XDG_CACHE_HOME is not valid, and the specification says to
             # ignore it. It would name a folder of the project that is checked, whose
             # own pypi.json would then answer in PyPI's place.
-            base = os.environ.get("SLOPFENCE_CACHE_DIR") or (xdg if os.path.isabs(xdg) else "")
+            # ``Path.is_absolute``: on Windows a full path has a drive, which
+            # ``os.path.isabs`` only asks for from Python 3.13 on.
+            is_full_path = Path(xdg).is_absolute()
+            base = os.environ.get("SLOPFENCE_CACHE_DIR") or (xdg if is_full_path else "")
             cache_dir = Path(base) / "slopfence" if base else Path.home() / ".cache" / "slopfence"
         self.cache_file = cache_dir / "pypi.json"
         self.timeout = timeout

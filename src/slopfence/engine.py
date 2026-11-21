@@ -87,7 +87,8 @@ def _is_read(found: Path, home: Path | None) -> bool:
     or a socket, directly or through a link: reading one may never end.
 
     A link whose target is gone, and a file that can't be looked at, are kept:
-    reading them says what is wrong, as it always did.
+    reading them says what is wrong, as it always did. A link that leads back to
+    itself is not: before Python 3.13, resolving its path raises.
     """
     try:
         mode = os.lstat(found).st_mode
@@ -100,7 +101,8 @@ def _is_read(found: Path, home: Path | None) -> bool:
     target = Path(os.path.realpath(found))
     if home is not None and not target.is_relative_to(home):
         return False
-    return os.path.isfile(target) or not os.path.exists(target)
+    # ``lexists``: a link in a loop is there, and names nothing.
+    return os.path.isfile(target) or not os.path.lexists(target)
 
 
 def discover_all(
