@@ -55,6 +55,7 @@ slopfence reads the files it checks. It never runs them. Python itself can still
 - `python -m slopfence` starts with the folder on the path. slopfence removes it before it imports its own modules, but Python has already imported a few of its own by then. Use `python -I -m slopfence` if you need the module form.
 - Don't set `PYTHONPATH` to the project when you run slopfence on it. The Action ignores `PYTHONPATH`.
 - git is the only program slopfence starts: once in every run, to find the repository, and for `--diff`. It looks for git in the folders of `PATH` that are named by their full path, and starts it by that full path. A program named `git` in the folder you check is never started, also when `PATH` holds `.` or an empty entry, and also on Windows, which looks in the current folder first.
+- git reads the config of the repository it runs in (`.git/config`), and a config can name programs for git to run. A clone never brings such a config with it, but an unpacked archive or a copied folder can. slopfence starts git read-only and with the file monitor (`core.fsmonitor`) switched off, and `--diff` uses no external diff tool and no `textconv` driver. Other settings, such as a `clean` filter, still apply. So don't use `--diff` on a repository whose `.git` folder came from someone you don't trust. A run without `--diff` only asks git where the repository starts.
 
 ## What slopfence sends over the network
 

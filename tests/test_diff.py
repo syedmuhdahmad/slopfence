@@ -169,3 +169,32 @@ def test_a_ref_that_looks_like_an_option_is_turned_down(tmp_path, monkeypatch, c
     assert main([".", "--offline", f"--diff={ref}"]) == 2
     assert "can't start with '-'" in capsys.readouterr().err
     assert not (tmp_path / "stolen.txt").exists()
+
+
+def test_diff_does_not_run_the_program_the_repository_names_as_file_monitor(tmp_path):
+    """``core.fsmonitor`` in a repository's own config can name a program, and git runs
+    it for a diff. slopfence switches that off: asking what changed runs nothing."""
+    git_init(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "init")
+    (tmp_path / "app.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    marker = tmp_path.parent / f"{tmp_path.name}-ran.txt"
+    git(tmp_path, "config", "core.fsmonitor", f"echo ran > '{marker.as_posix()}'; echo")
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2}}
+    assert not marker.exists()
+
+
+def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, monkeypatch):
+    """The options that keep git from running a program of the repository, or from
+    writing to it, are on every command."""
+    git_init(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "init")
+    commands = _started(monkeypatch)
+    diffmod.repo_root(tmp_path)
+    diffmod.changed_lines(tmp_path, "HEAD")
+    assert len(commands) == 4
+    for command in commands:
+        assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]

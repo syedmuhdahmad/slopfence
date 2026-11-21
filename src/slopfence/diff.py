@@ -31,6 +31,16 @@ ChangedLines = dict[str, "set[int] | None"]
 # by its name, and nothing else: a ``git.cmd`` or ``git.bat`` was never started.
 _GIT_PROGRAM = "git.exe" if os.name == "nt" else "git"
 _NO_GIT = "git is not installed"
+# How every git command is started. git reads the config of the repository it runs in,
+# and that repository is the project being checked.
+_GIT_OPTIONS = (
+    # Only read: don't refresh the index file on the side. That write would also run
+    # the repository's ``post-index-change`` hook.
+    "--no-optional-locks",
+    # ``core.fsmonitor`` can name a program, which git then runs to ask what changed.
+    "-c",
+    "core.fsmonitor=false",
+)
 
 
 class DiffError(RuntimeError):
@@ -69,7 +79,7 @@ def _git(root: Path, *args: str) -> str:
         raise DiffError(_NO_GIT)
     try:
         result = subprocess.run(
-            [program, *args],
+            [program, *_GIT_OPTIONS, *args],
             cwd=root,
             capture_output=True,
             check=True,
