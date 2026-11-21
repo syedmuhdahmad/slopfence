@@ -162,3 +162,99 @@ def test_placeholders_skipped_in_demo_and_example_code(write, check, rel):
 def test_placeholders_still_flagged_in_similar_names(write, check):
     write("src/democracy.py", "# In a real implementation, validate the token\n")
     assert rule_lines(check("SLOP010"), "SLOP010") == [1]
+
+
+# --- Descriptions of finished code, and notes in docstring examples (#101). ---
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        # AutoGPT and transformers: a class and a function that are finished.
+        "This is a simplified version compared to PostResponse, as the list endpoint",
+        "This is a simplified version that handles the conversion without loading the model.",
+        "This is a simplified implementation which skips the cache on purpose.",
+        "This is a simplified version compared with the one in the paper.",
+        "This is a simplified function than the general one above, for 2D inputs only.",
+    ],
+)
+def test_simplified_version_that_describes_real_code_is_not_flagged(write, check, sentence):
+    """A sentence that says how finished code relates to other code is no placeholder."""
+    write("src/app.py", f'class Item:\n    """An item.\n\n    {sentence}\n    """\n')
+    write("src/b.py", f"def f():\n    # {sentence}\n    return compute()\n")
+    assert check("SLOP010").findings == []
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "This is a simplified implementation.",
+        "This is a simplified version",
+        "This is just a simplified version, the real one needs a database",
+        "This is a simplified version of the real algorithm",
+        "This is a placeholder version that returns fixed data",
+        "This is a placeholder implementation which we replace later",
+    ],
+)
+def test_simplified_version_that_stands_in_for_real_code_is_still_flagged(write, check, sentence):
+    """Said of the code itself, or of a placeholder, the sentence is still reported."""
+    write("src/app.py", f"def f():\n    # {sentence}\n    return True\n")
+    assert rule_lines(check("SLOP010"), "SLOP010") == [2]
+
+
+DOCTEST = '''
+def load_video(path):
+    """Load a video.
+
+    Example:
+        >>> # replace this with your own video file
+        >>> video = load_video("spaghetti.mp4")
+        ... # add your logic here
+    """
+    return decode(path)
+'''
+
+CODE_BLOCK = '''
+def config_context(**settings):
+    """Change the settings for a block of code::
+
+        with config_context(dispatch=True):
+            # your code here
+
+    Otherwise the defaults apply.
+    """
+    return apply(settings)
+'''
+
+
+@pytest.mark.parametrize("code", [DOCTEST, CODE_BLOCK])
+def test_comment_inside_a_docstring_example_is_not_flagged(write, check, code):
+    """A comment in example code that a docstring shows speaks to whoever copies the
+    example, like code under examples/. Seen in transformers and scikit-learn."""
+    write("src/app.py", code)
+    assert check("SLOP010").findings == []
+
+
+def test_docstring_prose_and_real_comments_are_still_flagged(write, check):
+    """Only a line that is itself a code comment is example code. The prose of a
+    docstring is checked, and so is every real comment."""
+    write(
+        "src/app.py",
+        "def charge(card):\n"
+        '    """Charge a card.\n'
+        "\n"
+        "    In a real implementation, this calls the payment provider.\n"
+        '    """\n'
+        "    # Your code here\n"
+        "    return True\n",
+    )
+    assert rule_lines(check("SLOP010"), "SLOP010") == [4, 6]
+
+
+def test_chat_text_inside_a_docstring_example_is_still_flagged(write, check):
+    """The exemption is for placeholders only: chat text has no place in an example."""
+    write(
+        "src/app.py",
+        'def f():\n    """Run.\n\n    >>> # I hope this helps!\n    """\n    return g()\n',
+    )
+    assert rule_lines(check("SLOP051"), "SLOP051") == [4]

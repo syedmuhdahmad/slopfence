@@ -7,10 +7,10 @@ messages like "Sure!" in a UI string are not flagged.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from slopfence.models import Finding
-from slopfence.source import SourceFile
+from slopfence.source import SourceFile, TextSpan
 
 PLACEHOLDER_PATTERNS = [
     re.compile(p, re.I)
@@ -29,7 +29,12 @@ PLACEHOLDER_PATTERNS = [
         r"\b(replace|swap) (this|it) with (your|the|an?) (actual|real|own)\b",
         r"\byour (actual |own )?(logic|code|implementation|api[ _-]?key) (goes )?here\b",
         r"\.\.\.\s*(rest of|remaining|existing|other) (the )?(code|implementation|logic)\b",
-        r"\bthis is (just )?a (placeholder|simplified) (implementation|version|function)\b",
+        r"\bthis is (just )?a placeholder (implementation|version|function)\b",
+        # "Simplified" is also said of finished code. Not reported when the sentence
+        # goes on to say how the code relates to other code: "... compared to
+        # PostResponse", "... that handles the conversion".
+        r"\bthis is (just )?a simplified (implementation|version|function)\b"
+        r"(?! (compared|than|that|which)\b)",
         r"\badd (your|more|actual|real) (logic|implementation|validation|error handling) here\b",
     ]
 ]
@@ -56,18 +61,22 @@ CHAT_PATTERNS = [
 ]
 
 
+# A line of a docstring that is itself a code comment: it starts with "#", or with a
+# doctest prompt (">>>" or "...") and then "#".
+_EXAMPLE_COMMENT = re.compile(r"\s*(?:(?:>>>|\.\.\.)\s*)?#")
+
+
 def _scan(
-    src: SourceFile, rule: str, patterns: list[re.Pattern[str]], label: str
+    spans: Iterable[TextSpan], rel: str, rule: str, patterns: list[re.Pattern[str]], label: str
 ) -> Iterator[Finding]:
-    """Yield a finding for each comment or docstring line that matches one of ``patterns``."""
-    for span in src.text_spans():
+    """Yield a finding for each of ``spans``, comment or docstring lines of the file
+    ``rel``, that matches one of ``patterns``."""
+    for span in spans:
         text = span.text.lstrip("#").strip().strip("\"'").strip()
         for pattern in patterns:
             if pattern.search(text):
                 snippet = text if len(text) <= 80 else text[:77] + "..."
-                yield Finding(
-                    rule, src.rel, span.line, span.col, f'{label}: "{snippet}"', subject=text
-                )
+                yield Finding(rule, rel, span.line, span.col, f'{label}: "{snippet}"', subject=text)
                 break
 
 
@@ -77,9 +86,13 @@ def check_placeholders(src: SourceFile) -> Iterator[Finding]:
     # code is meant to be illustrative; only check application code.
     if src.is_test_file or src.is_example_file:
         return
-    yield from _scan(src, "SLOP010", PLACEHOLDER_PATTERNS, "Placeholder left in code")
+    # The same goes for example code that a docstring shows: a comment in it speaks
+    # to whoever copies the example. The prose of the docstring is still checked.
+    prose = (line for line in src.docstring_lines if not _EXAMPLE_COMMENT.match(line.text))
+    spans = (*src.comments, *prose)
+    yield from _scan(spans, src.rel, "SLOP010", PLACEHOLDER_PATTERNS, "Placeholder left in code")
 
 
 def check_chat_leftovers(src: SourceFile) -> Iterator[Finding]:
     """SLOP051: text an AI chat left behind in a comment or docstring."""
-    yield from _scan(src, "SLOP051", CHAT_PATTERNS, "Leftover AI chat text")
+    yield from _scan(src.text_spans(), src.rel, "SLOP051", CHAT_PATTERNS, "Leftover AI chat text")
