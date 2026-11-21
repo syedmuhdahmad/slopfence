@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -76,6 +77,32 @@ def _is_pruned(folder: Path) -> bool:
     return name in EXCLUDED_DIRS or name.endswith(".egg-info") or _is_checkout(folder)
 
 
+def _is_read(found: Path, home: Path | None) -> bool:
+    """Whether a file that was found in the folder tree ``home`` is one to read.
+
+    Not a symbolic link that leads out of ``home``: what it names is a file of the
+    machine, not of the project, and a project that is checked must not choose which
+    of those files are read, quoted in a report or have their lines sent to PyPI as
+    package names. With ``home`` None any link is followed. And not a pipe, a device
+    or a socket, directly or through a link: reading one may never end.
+
+    A link whose target is gone, and a file that can't be looked at, are kept:
+    reading them says what is wrong, as it always did.
+    """
+    try:
+        mode = os.lstat(found).st_mode
+    except OSError:
+        return True
+    if stat.S_ISREG(mode):
+        return True
+    if not stat.S_ISLNK(mode):
+        return False
+    target = Path(os.path.realpath(found))
+    if home is not None and not target.is_relative_to(home):
+        return False
+    return os.path.isfile(target) or not os.path.exists(target)
+
+
 def discover_all(
     paths: Sequence[Path], root: Path, deep: bool = True
 ) -> tuple[list[Path], list[Path], list[Path]]:
@@ -86,32 +113,49 @@ def discover_all(
     project (``requirements/base.txt``, see ``dependency.kind_of``). With ``deep``
     False only the files that lie directly in a folder are taken, and none of the
     folders inside it is entered.
+
+    A link out of the project and a file that is no plain file are left out (see
+    ``_is_read``). For a folder outside the project, "the project" is that folder.
+    A file outside the project that is named itself is always taken: naming it is
+    the user's choice.
     """
     py_files: list[Path] = []
     dep_files: list[Path] = []
     lock_files: list[Path] = []
+    project = Path(os.path.realpath(root))
 
-    def add(path: Path) -> None:
-        """Put one file on the lists it belongs to."""
-        if path.suffix == ".py":
-            py_files.append(path)
+    def add(path: Path, found: Path, home: Path | None) -> None:
+        """Put one file on the lists it belongs to, when it is one to read.
+
+        ``found`` is the place it was found at: ``path`` itself, or a link to it.
+        """
+        lists = [py_files] if path.suffix == ".py" else []
         if kind_of(path, root) is not None:
-            dep_files.append(path)
+            lists.append(dep_files)
         elif path.name in LOCK_FILES:
-            lock_files.append(path)
+            lists.append(lock_files)
+        # Asked last: most files are of no kind, and need no look at the disk.
+        if lists and _is_read(found, home):
+            for files in lists:
+                files.append(path)
 
     for path in paths:
+        # Where the path lies, before a link in its last part is followed.
+        folder = Path(os.path.realpath(Path(path).parent))
+        found = folder / Path(path).name
         path = path.resolve()
         if path.is_file():
-            add(path)
+            add(path, found, project if folder.is_relative_to(project) else None)
             continue
+        home = project if path.is_relative_to(project) else path
         for dirpath, dirnames, filenames in os.walk(path):
             # Pruned before descending. The path passed on the command line is the
             # walk root and is never pruned, so an explicitly named checkout is still
             # checked.
             dirnames[:] = [d for d in dirnames if deep and not _is_pruned(Path(dirpath, d))]
             for filename in filenames:
-                add(Path(dirpath, filename))
+                file = Path(dirpath, filename)
+                add(file, file, home)
     return sorted(set(py_files)), sorted(set(dep_files)), sorted(set(lock_files))
 
 

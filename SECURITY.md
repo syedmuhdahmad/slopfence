@@ -54,6 +54,9 @@ slopfence reads the files it checks. It never runs them. Python itself can still
 - The `slopfence` command, the pre-commit hook and the GitHub Action don't have the checked folder on that path. Use one of them.
 - `python -m slopfence` starts with the folder on the path. slopfence removes it before it imports its own modules, but Python has already imported a few of its own by then. Use `python -I -m slopfence` if you need the module form.
 - Don't set `PYTHONPATH` to the project when you run slopfence on it. The Action ignores `PYTHONPATH`.
+- slopfence reads the files of the project and nothing else. A symbolic link in the project that points outside it is not followed, and a pipe or a device is not opened. A file outside the project is only read when you name it on the command line.
+- The text report shows control characters in file names and comments as `\x1b` or `\n`. They can't drive your terminal or add lines to a CI log.
+- Keep the PyPI cache (`~/.cache/slopfence`, or the folder that `SLOPFENCE_CACHE_DIR` names) outside the project you check. A `pypi.json` there is trusted like an answer from PyPI, so a project that could bring its own would decide which packages exist.
 
 ## What slopfence sends over the network
 

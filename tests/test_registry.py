@@ -406,3 +406,18 @@ def test_save_leaves_no_temporary_file_when_it_fails(pypi, monkeypatch):
     monkeypatch.setattr(os, "replace", fail)
     registry.save()  # must not raise
     assert list(registry.cache_file.parent.iterdir()) == []
+
+
+def test_relative_xdg_cache_home_is_not_used(tmp_path, monkeypatch):
+    """A relative ``XDG_CACHE_HOME`` is not valid, says the XDG specification. Used all
+    the same, it would name a folder of the project that is checked, and a ``pypi.json``
+    that the project brings along would answer for PyPI."""
+    monkeypatch.delenv("SLOPFENCE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CACHE_HOME", ".cache")
+    assert PyPIRegistry().cache_file == tmp_path / "home" / ".cache" / "slopfence" / "pypi.json"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert PyPIRegistry().cache_file == tmp_path / "xdg" / "slopfence" / "pypi.json"
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "own"))
+    assert PyPIRegistry().cache_file == tmp_path / "own" / "slopfence" / "pypi.json"
