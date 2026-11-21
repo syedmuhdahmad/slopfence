@@ -17,9 +17,10 @@ from __future__ import annotations
 import ast
 import json
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from itertools import accumulate
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
@@ -139,6 +140,9 @@ class Notebook:
     cells: list[Cell]
     # Offset of the start of every line of ``text``. Worked out when first asked for.
     _line_starts: list[int] = field(default_factory=list)
+    # What ``_escapes`` says about a source string, by the offset of the string in
+    # ``text``. Worked out when a position in the string is first asked for.
+    _escapes_of: dict[int, tuple[list[int], list[int]]] = field(default_factory=dict)
 
     def position(self, cell: Cell, offset: int) -> tuple[int, int]:
         """The 1-based (line, column) in the file of character ``offset`` of a cell."""
@@ -146,24 +150,43 @@ class Notebook:
             self._line_starts = [0] + [m.end() for m in re.finditer("\n", self.text)]
         piece = max(bisect_right(cell.starts, offset) - 1, 0)
         start, end = cell.spans[piece]
-        body = self.text[start + 1 : end - 1]
-        at = start + 1 + _raw_length(body, offset - cell.starts[piece])
+        if start not in self._escapes_of:
+            self._escapes_of[start] = _escapes(self.text[start + 1 : end - 1])
+        at = start + 1 + _raw_length(self._escapes_of[start], offset - cell.starts[piece])
         line = bisect_right(self._line_starts, at)
         return line, at - self._line_starts[line - 1] + 1
 
 
-def _raw_length(body: str, count: int) -> int:
-    """How many characters of a JSON string body encode its first ``count`` characters."""
+def _escapes(body: str) -> tuple[list[int], list[int]]:
+    """Where the escapes of a JSON string body are. For each one: how many characters
+    the body decodes to before it, and where it ends in the body.
+
+    Listed once per string. A cell can be one string of thousands of lines, and a
+    position is asked for every package and import in it.
+    """
+    before: list[int] = []
+    ends: list[int] = []
     if "\\" not in body:
-        return count
+        return before, ends
     pos = decoded = 0
     for m in _ESCAPE.finditer(body):
-        plain = m.start() - pos
-        if decoded + plain >= count:
-            break
-        decoded += plain + 1
+        decoded += m.start() - pos
+        before.append(decoded)
+        decoded += 1
         pos = m.end()
-    return pos + count - decoded
+        ends.append(pos)
+    return before, ends
+
+
+def _raw_length(escapes: tuple[list[int], list[int]], count: int) -> int:
+    """How many characters of a JSON string body encode its first ``count`` characters.
+
+    ``escapes`` is what ``_escapes`` says about the body.
+    """
+    before, ends = escapes
+    # The escapes that stand for one of those characters.
+    passed = bisect_left(before, count)
+    return ends[passed - 1] + count - before[passed - 1] - 1 if passed else count
 
 
 def _read_source(reader: _Reader) -> Cell | None:
@@ -453,11 +476,6 @@ def _brings_code(words: list[Word], magic: bool) -> bool:
     return names[0] in _FETCH_COMMANDS or tuple(names[:2]) in _FETCH_SUBCOMMANDS
 
 
-def _offset(lines: list[str], lineno: int, col: int) -> int:
-    """Offset in a cell's text of a 1-based line and 0-based character column."""
-    return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
-
-
 def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
     """Every ``pip install`` command of a cell, and every command that brings in code
     in another way (see ``_brings_code``): that one as an install that names nothing.
@@ -557,9 +575,10 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                             own_source=sourced,
                         )
                     )
-            lines = cell.text.split("\n")
+            # The offset in the cell's text of the start of each of its lines.
+            starts = [0, *accumulate(len(line) + 1 for line in cell.text.split("\n"))]
             for name, lineno, col in view.imports:
-                at = _offset(lines, lineno, col)
+                at = starts[lineno - 1] + col
                 off = view.ignores.get(lineno, frozenset())
                 # Unusual line breaks: never report at a wrong place.
                 if "SLOP001" not in off and cell.text.startswith(("import", "from"), at):
