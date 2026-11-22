@@ -243,11 +243,13 @@ def _crashed(err: Exception) -> int:
 
     One line: the kind of error, the file it came up in when that is known, and where
     to report it. The text of the error is left out of that line: it is not written
-    for a user, and it can quote whatever slopfence was reading. With the environment
-    variable in ``DEBUG_VARIABLE`` set, the traceback follows, for the bug report.
+    for a user, and it can quote whatever slopfence was reading. The file name is
+    shown with its control characters written out: a name can hold a line end, and
+    the message has to stay one line. With the environment variable in
+    ``DEBUG_VARIABLE`` set, the traceback follows, for the bug report.
     """
     file = failed_file(err)
-    where = f" while checking {file}" if file is not None else ""
+    where = f" while checking {reporters.printable(file)}" if file is not None else ""
     debug = os.environ.get(DEBUG_VARIABLE, "") not in ("", "0")
     hint = "" if debug else f" Run it again with {DEBUG_VARIABLE}=1 to get the traceback."
     print(

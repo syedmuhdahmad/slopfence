@@ -81,7 +81,13 @@ def count_pools(monkeypatch):
 
     A pool that gives up fails the test. Without that, a test would pass on a machine
     where no worker can start, because the files are then checked in this process.
+
+    One case is known and no failure: Python 3.10 with "spawn", the default on
+    Windows and macOS, starts no workers at all (``analysis._new_processes_are_safe``).
+    There the test is skipped from this call on. What it asserted before still counts.
     """
+    if not analysis._new_processes_are_safe(None):
+        pytest.skip("this Python starts no worker processes with its default start method")
     pools = []
     real = analysis._analyze_in_pool
 
@@ -795,10 +801,10 @@ def test_error_in_a_file_says_which_file_with_any_number_of_jobs(project, monkey
     tasks.append(("no\0such.py", True))  # no file name may hold a null character
     with pytest.raises(ValueError, match="null") as serial:
         analyze_files(tasks, options, 1)
+    assert analysis.failed_file(serial.value) == "no\0such.py"
     count_pools(monkeypatch)
     with pytest.raises(ValueError, match="null") as parallel:
         analyze_files(tasks, options, 2)
-    assert analysis.failed_file(serial.value) == "no\0such.py"
     assert analysis.failed_file(parallel.value) == "no\0such.py"
 
 

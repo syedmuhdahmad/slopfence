@@ -366,6 +366,20 @@ def test_crash_in_a_rule_exits_2_with_one_line(tmp_path, capsys, monkeypatch):
     assert "SLOPFENCE_DEBUG=1" in line
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows allows no line end in a file name")
+def test_crash_line_stays_one_line_for_a_file_name_with_a_line_end(tmp_path, capsys, monkeypatch):
+    """A file name can hold a line end. The crash line writes it out as ``\\n``, so it
+    is still one line (#67)."""
+    (tmp_path / "part\none.py").write_text(SLOPPY)
+    monkeypatch.delenv("SLOPFENCE_DEBUG", raising=False)
+    _crash_in_a_rule(monkeypatch)
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_ERROR
+    [line] = capsys.readouterr().err.splitlines()
+    assert line.startswith(
+        "slopfence: internal error (RuntimeError) while checking part\\none.py. This is a bug"
+    )
+
+
 def test_crash_outside_a_file_names_no_file(tmp_path, capsys, monkeypatch):
     """A crash that belongs to no single file still exits 2 with the one line (#67)."""
     (tmp_path / "clean.py").write_text("x = 1\n")
