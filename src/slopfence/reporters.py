@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from itertools import groupby
 from urllib.parse import quote
@@ -16,6 +17,20 @@ _SARIF_LEVEL = {Severity.HIGH: "error", Severity.MEDIUM: "warning", Severity.LOW
 _HELP_URI = "https://github.com/syedmuhdahmad/slopfence#detectors"
 _COLOR = {Severity.HIGH: "\033[31m", Severity.MEDIUM: "\033[33m", Severity.LOW: "\033[36m"}
 _RESET, _BOLD, _DIM, _GREEN = "\033[0m", "\033[1m", "\033[2m", "\033[32m"
+# What is never printed as it is: the control characters (an escape sequence drives
+# the terminal, a line end starts a new line of the log), the two Unicode line ends,
+# and the characters that change the direction of the text that follows them.
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def printable(text: str) -> str:
+    """``text`` with its control characters written out, as ``\\x1b`` or ``\\n``.
+
+    File names, comments and whatever else a report quotes come from the project
+    that is checked. Printed as they are, they could clear the screen, colour or
+    hide text, or start a line of their own in the log of a CI run.
+    """
+    return _UNPRINTABLE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
 
 
 def text(result: Result, color: bool = False, strict: bool = False) -> str:
