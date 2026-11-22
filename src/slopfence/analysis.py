@@ -86,14 +86,46 @@ class FileSummary:
         return self.ignore_file or rule in self.ignores.get(line, ())
 
 
+# The attribute that names the file on an error that came up while it was checked.
+_FILE_ATTRIBUTE = "slopfence_file"
+
+
+def failed_file(err: BaseException) -> str | None:
+    """The file that was being checked when ``err`` came up. None when no single file was.
+
+    It is the project-relative path, or the path as it was given when that can't be
+    made relative.
+    """
+    return getattr(err, _FILE_ATTRIBUTE, None)
+
+
 def analyze_file(options: Options, task: Task) -> FileSummary:
     """Parse one file and run everything that needs nothing but that file.
 
     Runs in a worker process or in the main one. So it is a module-level function,
     it takes and returns plain data that can be pickled, and it prints nothing.
+
+    An error it does not expect is a bug in slopfence. It is raised as it is, with
+    the file it came up in noted on it (see ``failed_file``). The note is part of
+    what an exception pickles, so it also arrives from a worker process.
     """
     path_text, check = task
     path, root = Path(path_text), Path(options.root)
+    try:
+        return _analyze(path, root, options, check)
+    except Exception as err:
+        try:
+            rel = relative_path(path, root)
+        # A path that no file can have, which is what went wrong in the first place.
+        except (OSError, ValueError):
+            rel = path_text
+        setattr(err, _FILE_ATTRIBUTE, rel)
+        raise
+
+
+def _analyze(path: Path, root: Path, options: Options, check: bool) -> FileSummary:
+    """What ``analyze_file`` returns for one file. With ``check`` False the file is
+    only fingerprinted, to be compared with."""
     if not check:
         # Only here to be compared with. Test code has no fingerprints, so it isn't read.
         rel = relative_path(path, root)
