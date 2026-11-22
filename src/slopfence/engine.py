@@ -122,13 +122,14 @@ def _home(path: Path, root: Path) -> tuple[Path, bool] | None:
     None for a path that the walk reaches: it belongs to the project. The walk never
     leaves ``root`` and never enters a pruned folder (see ``_is_pruned``). A file or
     folder that is named there is checked all the same. It belongs to its own
-    checkout: the nearest folder above it that holds a ``.git``. A file without one
-    belongs to its own folder. A folder without one is on its own, like a folder that
-    is a checkout itself, or the root, or a folder above the root: the walk of the
-    named folder reads all there is.
+    checkout: the nearest folder above it that holds a ``.git``. That goes for a
+    folder above the root too: it is no part of the project, so it has a checkout of
+    its own like any other folder outside. A file without one belongs to its own
+    folder. A folder without one is on its own, like a folder that is a checkout
+    itself, or the root: the walk of the named folder reads all there is.
     """
     is_folder = path.is_dir()
-    if is_folder and (path == root or path in root.parents or _is_checkout(path)):
+    if is_folder and (path == root or _is_checkout(path)):
         return None
     above = list(path.parents)
     if root in above:

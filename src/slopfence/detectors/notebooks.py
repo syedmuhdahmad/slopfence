@@ -257,7 +257,10 @@ def read_notebook(text: str) -> Notebook | None:
 # --- Cells as Python ---------------------------------------------------------------
 
 _SHELL_CELL = re.compile(r"\s*%%(?:bash|sh|shell)\b")
-_AUTOMAGIC = re.compile(r"pip\s+install\b")
+# A ``pip install`` line without the ``%``. IPython runs it as the magic all the same,
+# with words between the two too (``pip -q install x``), unless what follows ``pip``
+# starts like an assignment or a tuple (``pip = install = None``).
+_AUTOMAGIC = re.compile(r"pip\s+(?![=,])(?:\S+\s+)*?install\b")
 # A ``cd`` line without the ``%``. IPython runs it as the magic all the same, unless
 # what follows starts like an assignment or a tuple (``cd = 3``, ``cd, x = 1, 2``).
 _AUTOMAGIC_CD = re.compile(r"^[ \t]*cd[ \t]+[^=,\s]", re.M)
@@ -267,8 +270,8 @@ _CELL_MAGIC = re.compile(r"\s*%%(\w*)")
 # Cell magics that save the cell's body as a file.
 _FILE_CELL_MAGICS = {"writefile", "file"}
 _ASSIGNED_COMMAND = re.compile(r"\s*[A-Za-z_][\w.,\s\[\]]*=\s*[!%]")
-# A carriage return that no line feed follows. Python's parser ends a line there, and
-# nothing else that reads a cell does.
+# A carriage return that no line feed follows. Python's parser and IPython end a line
+# there, and the file of the notebook does not.
 _LONE_CARRIAGE_RETURN = re.compile(r"\r(?!\n)")
 # Expressions that hold string text over several lines (t-strings since Python 3.14).
 _STRINGS = tuple(
@@ -282,6 +285,10 @@ _STRINGS = tuple(
 class CellView:
     """What one cell contains, by offset into the cell's text."""
 
+    # The cell's text with the line ends that Python and IPython see: a line feed in
+    # place of each carriage return that no line feed follows. Every offset into it
+    # is the same offset into the text of the cell.
+    text: str = ""
     # (command start offset, 0-based line index) of each IPython or shell line.
     commands: list[tuple[int, int]] = field(default_factory=list)
     # Imports as (top-level module, line number in the cell, 0-based character column).
@@ -348,11 +355,15 @@ def view_cell(text: str, want_imports: bool) -> CellView:
     """Find the command lines of a cell and, if it parses as Python, its imports
     and the ignore comments on its lines. A cell that doesn't parse is not an error.
 
-    No import is taken from a cell with a carriage return inside a line. The parser
-    counts one more line there than the cell has, so an import could not be matched
-    to its line: to its place in the file, or to the ignore comment on it.
+    A carriage return that no line feed follows ends a line too, as it does for
+    Python and IPython: a command after one is a command, and the lines of a string
+    are the lines that the parser counts. No import is taken from a cell with one:
+    the file has no line break there, and the imports of such a cell were never
+    looked up.
     """
-    view = CellView()
+    lone_carriage_return = bool(_LONE_CARRIAGE_RETURN.search(text))
+    text = _LONE_CARRIAGE_RETURN.sub("\n", text)
+    view = CellView(text)
     lines = text.split("\n")
     magic = _CELL_MAGIC.match(lines[0])
     if magic and _SHELL_CELL.match(lines[0]):
@@ -389,7 +400,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
         }
         view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
     view.ignores = {c.line: off for c in src.comments if (off := line_ignores(c.text))}
-    if want_imports and not _LONE_CARRIAGE_RETURN.search(text):
+    if want_imports and not lone_carriage_return:
         for name, lineno, byte_col in top_level_imports(src):
             line = lines[lineno - 1] if lineno <= len(lines) else ""
             view.imports.append((name, lineno, char_column(line, byte_col - 1)))
@@ -458,7 +469,7 @@ def _offset(lines: list[str], lineno: int, col: int) -> int:
     return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
 
 
-def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
+def _installs(view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
     """Every ``pip install`` command of a cell, and every command that brings in code
     in another way (see ``_brings_code``): that one as an install that names nothing.
     So does a ``pip install`` in a form that is not read (``sudo pip install``), with
@@ -469,18 +480,21 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozense
     last line when it goes on over several. Or it is on a comment-only line right
     above the command: on Windows a shell line passes ``# ...`` on to pip, so there
     the comment can't share the line.
+
+    The commands are read from ``view.text``, the text whose lines the view counts.
     """
-    lines = cell.text.split("\n")
+    text = view.text
+    lines = text.split("\n")
     for offset, n in view.commands:
         if len(lines[n]) > MAX_COMMAND_LENGTH:
             continue
-        commands, end = shell_commands(cell.text, offset)
-        last_line = cell.text[cell.text.rfind("\n", 0, end) + 1 : end]
+        commands, end = shell_commands(text, offset)
+        last_line = text[text.rfind("\n", 0, end) + 1 : end]
         above = lines[n - 1].strip() if n else ""
         ignored = line_ignores(requirements_comment(last_line))
         if above.startswith("#"):
             ignored |= line_ignores(above)
-        magic = cell.text[offset - 1 : offset] == "%"
+        magic = text[offset - 1 : offset] == "%"
         for words in commands:
             arguments = pip_install_arguments(words)
             if arguments is not None:
@@ -538,7 +552,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
             view = view_cell(cell.text, want_imports)
             written |= view.written
             unnamed = unnamed or view.changes_folder
-            for install, ignored in _installs(cell, view):
+            for install, ignored in _installs(view):
                 understood += install.source_options
                 found.private_index = found.private_index or install.private_index
                 links = links or install.links

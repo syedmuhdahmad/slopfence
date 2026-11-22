@@ -97,14 +97,18 @@ _MARKUP_STARTS = ("-", ".", "=", "~", "*", "+", ">", "|", "`")
 # Of the lines that start like that, the ones that pip reads a requirement or an
 # option from: an option ("-r", "--hash=..."), the folder itself (".", "..") with or
 # without extras, a marker or an option of its own (".[dev]", ". ; python_version >=
-# '3.9'", ". --config-settings x=y"), and a path, whose first word holds a separator
-# ("./local", ".wheels/a.whl", ".\\local", "~/wheels/a.whl").
-_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[|\s*;|\s+--?[A-Za-z])|[.~]\S*[/\\]")
+# '3.9'", ". --config-settings x=y"), also when those follow on the next line (". \"),
+# and a path, whose first word holds a separator ("./local", ".wheels/a.whl",
+# ".\\local", "~/wheels/a.whl").
+_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[|\s*;|\s+--?[A-Za-z]|\s+\\$)|[.~]\S*[/\\]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
 _TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]\s](?:[^\]]*[^\]\s])?)\s*\]\]?\s*(#.*)?$")
 # What a table header may hold besides the names of its tables.
 _HEADER_NOISE = re.compile(r"""[\s"']""")
+# The name of no table: every name has its white space taken out. A search in the
+# table of this name is a search in the whole file (see ``_LineFinder._search``).
+_NO_TABLE = " "
 
 # A Pipfile declares dependencies itself, so it is a dependency file, not a lock file.
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock"}
@@ -573,20 +577,32 @@ def _requirements_sources(lines: Iterable[str]) -> tuple[bool, bool]:
     return index, links
 
 
-def _last_lines(lines: list[str]) -> list[str]:
-    """For each line of a requirements file, the last line of the requirement it is part of.
+def _last_lines(lines: list[str]) -> list[int]:
+    """For each line of a requirements file, the number (0-based) of the last line of
+    the requirement it is part of.
 
     A line that ends with a backslash goes on in the next one: a pin with its
     ``--hash`` options is written that way. A comment line never goes on. pip only
     takes a comment at the end of the last line: anywhere before it, the comment
     would swallow the rest of the requirement.
     """
-    last = list(lines)
+    last = list(range(len(lines)))
     # From the end, so that a file of nothing but lines that go on is walked once.
     for at in range(len(lines) - 2, -1, -1):
         if lines[at].endswith("\\") and not lines[at].lstrip().startswith("#"):
             last[at] = last[at + 1]
     return last
+
+
+def _requirements_ignores(lines: list[str]) -> list[frozenset[str]]:
+    """The rules that ignore comments switch off for each line of a requirements file.
+
+    An ignore comment covers the line of the file that it is on, all of it: also what
+    stands before it on a line that pip reads as several (see ``_pip_lines``). One at
+    the end of a requirement that goes on covers the lines before it too.
+    """
+    own = [line_ignores(requirements_comment(line)) for line in lines]
+    return [found | own[last] for found, last in zip(own, _last_lines(lines), strict=True)]
 
 
 def _parse_requirements(text: str, rel: str) -> DependencyFile:
@@ -618,13 +634,13 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     # Whether any line is the markup of a document. And whether the line before
     # ended with a backslash: pip then reads the two as one.
     pip_syntax = markup = continued = False
-    last_lines = _last_lines(lines)
+    ignores = _requirements_ignores(lines)
     for lineno, raw in pip_lines:
-        # An ignore comment covers the line of the file that it is on, all of it. One
-        # at the end of a requirement that goes on covers the lines before it too.
-        ignored = line_ignores(requirements_comment(lines[lineno - 1]))
-        if last_lines[lineno - 1] is not lines[lineno - 1]:
-            ignored |= line_ignores(requirements_comment(last_lines[lineno - 1]))
+        ignored = ignores[lineno - 1]
+        if len(raw) != len(lines[lineno - 1]):
+            # One of several lines that pip reads from this line of the file. Each can
+            # have a comment of its own, and only the first is the comment of the line.
+            ignored |= line_ignores(requirements_comment(raw))
         line = REQ_COMMENT.sub("", raw).strip()
         goes_on, continued = continued, line.endswith("\\")
         if not line:
@@ -689,6 +705,16 @@ def _table_ranges(lines: list[str]) -> dict[str, tuple[int, int]]:
     return ranges
 
 
+def _header_in_v02(line: str) -> str:
+    """The name v0.2 knew the table header on ``line`` by: its text without spaces.
+
+    Quotes and tabs stayed in the name, so v0.2 found no table whose header is
+    written with one: ``[tool.poetry."dependencies"]``.
+    """
+    # The line is one that ``_table_ranges`` took for a header, so there is a match.
+    return _TABLE_HEADER.match(line).group(1).replace(" ", "")
+
+
 class _LineFinder:
     """Find the physical line of each dependency entry within its own TOML table."""
 
@@ -703,6 +729,7 @@ class _LineFinder:
         # The same for the searches that ``key_in_v02`` and ``spec_in_v03`` make.
         self._used_by_v02: set[tuple[int, int]] = set()
         self._used_by_v03: set[tuple[int, int]] = set()
+        self._used_by_v02_file: set[tuple[int, int]] = set()
         # The code of each line (0-based), in which the brackets of an array are
         # counted. And the same as v0.3 saw it, for ``spec_in_v03``.
         self._code = [line.code for line in self.toml_lines]
@@ -830,6 +857,24 @@ class _LineFinder:
             table, lambda i: self._pattern_columns(pattern, i), used=self._used_by_v02
         )
 
+    def key_in_v02_file(self, table: str, name: str) -> int | None:
+        """The line (1-based) on which v0.2 reported the entry ``name`` of a table
+        whose header it did not know. None for a table whose header it knew, and for
+        one without a header.
+
+        v0.2 knew a header by its text without spaces (see ``_header_in_v02``). A table
+        under any other header it looked for in the whole file: it reported the entry
+        on the first ``name = ...`` line there, or on line 1. ``key_in_v02`` looks in
+        the table itself, as v0.3 did, so a comment in either place still counts.
+        """
+        own = self.ranges.get(table)
+        if own is None or _header_in_v02(self.lines[own[0]]) == table:
+            return None
+        pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
+        return self._search(
+            _NO_TABLE, lambda i: self._pattern_columns(pattern, i), used=self._used_by_v02_file
+        )
+
     def ignored(self, line: int) -> frozenset[str]:
         """The rules that an ignore comment on a line (1-based) switches off."""
         lines = self.toml_lines
@@ -942,6 +987,8 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
             ignored = finder.ignored(line)
             if "SLOP001" not in ignored:
                 ignored |= finder.ignored(finder.key_in_v02(table, name))
+                if (line_in_v02 := finder.key_in_v02_file(table, name)) is not None:
+                    ignored |= finder.ignored(line_in_v02)
             deps.append(Dependency(name, rel, line, validate, ignored, own_source=external))
     return found
 
