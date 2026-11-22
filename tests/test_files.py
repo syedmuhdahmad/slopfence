@@ -2,6 +2,7 @@
 
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -52,14 +53,14 @@ def test_failed_replace_keeps_the_old_file_and_leaves_no_temporary_file(tmp_path
 def test_replace_text_sets_the_mode_before_the_text_goes_in(tmp_path, monkeypatch):
     """A file that only its owner may read never holds the text with wider permissions."""
     sizes = []
-    chmod = os.chmod
+    fchmod = os.fchmod
 
-    def chmod_and_record(path, mode):
+    def fchmod_and_record(descriptor, mode):
         """Note how much text the file holds at the moment its permissions are set."""
-        sizes.append(os.stat(path).st_size)
-        chmod(path, mode)
+        sizes.append(os.fstat(descriptor).st_size)
+        fchmod(descriptor, mode)
 
-    monkeypatch.setattr(os, "chmod", chmod_and_record)
+    monkeypatch.setattr(os, "fchmod", fchmod_and_record)
     replace_text(tmp_path / "report.json", "secret", 0o600)
     assert sizes == [0]
     assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o600
@@ -117,14 +118,14 @@ def test_temporary_file_is_made_with_its_permissions(tmp_path, monkeypatch):
     """There is no moment in which another user could open the temporary file: it has
     its permissions from the start, not from a later step."""
     made_with = []
-    chmod = os.chmod
+    fchmod = os.fchmod
 
-    def record_then_chmod(path, mode):
+    def record_then_fchmod(descriptor, mode):
         """Note the permissions the file was made with, before they are set again."""
-        made_with.append(stat.S_IMODE(os.stat(path).st_mode))
-        chmod(path, mode)
+        made_with.append(stat.S_IMODE(os.fstat(descriptor).st_mode))
+        fchmod(descriptor, mode)
 
-    monkeypatch.setattr(os, "chmod", record_then_chmod)
+    monkeypatch.setattr(os, "fchmod", record_then_fchmod)
     before = os.umask(0o022)
     try:
         replace_text(tmp_path / "cache.json", "names", 0o600)
@@ -142,6 +143,31 @@ def test_replace_text_gives_the_mode_that_the_umask_would_cut(tmp_path):
     finally:
         os.umask(before)
     assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o644
+
+
+@posix
+def test_permissions_go_to_the_new_file_not_to_a_link_put_in_its_place(tmp_path, monkeypatch):
+    """In a folder that others can write to, the temporary file can be swapped for a
+    link right after it was made. The permissions are set on the file that was
+    opened: the file the link names keeps its own."""
+    private = tmp_path / "private.txt"
+    private.write_text("mine", encoding="utf-8")
+    private.chmod(0o600)
+    temporary = tmp_path / _fixed_temporary_name(monkeypatch)
+    real_open = os.open
+
+    def open_then_swap(path, flags, mode=0o777):
+        """Make the file, then put a link in its place, as another user could."""
+        descriptor = real_open(path, flags, mode)
+        if Path(path) == temporary:
+            temporary.unlink()
+            temporary.symlink_to(private)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_then_swap)
+    replace_text(tmp_path / "data.json", "cache", 0o644)
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert private.read_text(encoding="utf-8") == "mine"
 
 
 def test_rewrite_text_writes_a_new_file_and_replaces_an_old_one(tmp_path):

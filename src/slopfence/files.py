@@ -22,6 +22,20 @@ def _write(path: Path, text: str) -> None:
         stream.write(text)
 
 
+def _set_mode(descriptor: int, path: Path, mode: int) -> None:
+    """Give the open file ``descriptor``, made as ``path``, the permissions ``mode``.
+
+    Through the descriptor, not the name: in a folder that others can write to, the
+    name can stand for a symbolic link by now, and ``chmod`` on it would change the
+    file the link names. Windows has no such permissions, and no ``fchmod`` before
+    Python 3.13: there the name is used, and only the read-only flag changes.
+    """
+    if os.name == "posix":
+        os.fchmod(descriptor, mode)
+    else:
+        os.chmod(path, mode)
+
+
 def replace_text(path: Path, text: str, mode: int | None = None) -> None:
     """Put ``text`` in the file ``path`` in one step, as UTF-8.
 
@@ -47,7 +61,7 @@ def replace_text(path: Path, text: str, mode: int | None = None) -> None:
             if mode is not None:
                 # The umask can have taken permissions away from the new file. This
                 # gives it exactly ``mode``, and never more than was asked for.
-                os.chmod(tmp, mode)
+                _set_mode(descriptor, tmp, mode)
             stream.write(text)
         os.replace(tmp, path)
     finally:
