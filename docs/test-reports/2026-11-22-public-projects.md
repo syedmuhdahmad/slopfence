@@ -2,7 +2,7 @@
 
 Date: 2026-11-22. Machine: Linux 7.0, 8 CPUs, Python 3.14.4, git 2.53.
 
-This report says what happened when slopfence checked 18 well-known public projects, before and after a set of fixes. It also lists what the run found that is still open.
+This report says what happened when slopfence checked 18 well-known public projects, before and after a set of fixes. The work came in two rounds on the same day. The report ends with what is still open.
 
 ## Summary
 
@@ -12,6 +12,7 @@ This report says what happened when slopfence checked 18 well-known public proje
 - **`--diff` reads real history the same way as before.** 1,735 files and 177,734 changed lines from the last 25 commits of each project: the old and the new reader agree on every file.
 - **The run found two bugs that no issue named.** Both are fixed on branches of their own, with tests.
 - **Speed did not change:** 96.3 s on `main`, 95.7 s on the fixed build, for all 18 projects.
+- **A second round fixed what the first one left open.** Three false positives that the sample showed (`SLOP010`, `SLOP011`, `SLOP030`), the narrow `SLOP001` cases of #85, a slow `pyproject.toml` reader and a baseline that could be a device. With all fifteen branches, the 18 projects have 26 findings fewer than on `main`, all of them wrong ones, and no new finding. See [Second round](#second-round-the-open-items).
 - **Most findings on these projects are not junk.** These are mature, reviewed projects. Of 30 findings read by hand, 2 were useful, 17 were right but on purpose, and 11 were wrong. The numbers are in [Findings read by hand](#findings-read-by-hand).
 
 ## What was tested
@@ -235,18 +236,121 @@ What is behind the numbers:
 
 These projects are old and reviewed, so little junk is expected in them. The sample still shows where the rules misread correct code. That is the list in the next section.
 
-## Still open
+## Second round: the open items
 
-Found in this work and not fixed. Each one needs an issue and, for a rule, a corpus run of its own.
+After the first round, the items in its "Still open" list were worked on, on the same day. This section says what changed. The sections above are the record of the first round, and are left as they were.
+
+### What was added
+
+| Branch | Commit | Closes | What it fixes |
+|---|---|---|---|
+| `fix/slop030-global-names` | `5490d64` | #99 | `SLOP030` no longer calls two functions identical when they set different `global` or `nonlocal` variables |
+| `fix/slop011-handler-families` | `f5c7dc7` | #100 | `SLOP011` skips a fixed answer in a family of handler methods that mostly do real work |
+| `fix/slop010-descriptions-and-examples` | `1d21eb8` | #101 | `SLOP010` skips a comment inside a docstring example, and "a simplified version compared to ..." |
+| `fix/baseline-must-be-a-file` | `c3dffe0` | | A device or a pipe in place of the baseline is never opened |
+| `fix/slop001-narrow-cases` | `7597d41` | #85 | The narrow `SLOP001` cases: private names that were still looked up, and findings that were lost |
+| `fix/pyproject-line-finder-speed` | `c5c8f93` | | A `pyproject.toml` or `Pipfile` with thousands of dependencies is read in linear time |
+
+The three false positives got an issue each (#99, #100, #101) before they were fixed.
+
+### The 18 projects again
+
+The same 18 projects at the same commits were checked again with `main` (`da6cf3f`) and with the final build: `0ed1951`, which is `main` with all fifteen branches of both rounds merged.
+
+| | `main` | Final build |
+|---|---:|---:|
+| Files checked | 46,747 | 46,747 |
+| Findings, offline | 3,065 | 3,039 |
+| Findings that are gone | | 26 |
+| Findings that are new | | 0 |
+| Projects with exit code `1` / `0` | 14 / 4 | 14 / 4 |
+| Time for all 18 | 88.4 s | 90.9 s |
+| `SLOP001` findings, with PyPI | | 0 |
+| `SLOP002` findings, with PyPI | | 14 |
+| Notes about missing answers | | 0 |
+
+The 26 findings that are gone, by project:
+
+| Project | `SLOP010` | `SLOP011` | `SLOP030` | `SLOP051` |
+|---|---:|---:|---:|---:|
+| `celery/celery` | | | 1 | |
+| `home-assistant/core` | | | 2 | |
+| `huggingface/transformers` | 3 | | 1 | |
+| `langchain-ai/langchain` | | | 1 | |
+| `pydantic/pydantic` | | 4 | | |
+| `scikit-learn/scikit-learn` | 1 | | | |
+| `Significant-Gravitas/AutoGPT` | 1 | | 3 | 9 |
+| **Total** | **5** | **4** | **8** | **9** |
+
+Each of the 26 was read. None is a finding that a reviewer would want: they are the cases of the first round's sample and the same kinds elsewhere.
+
+What is left: 2,952 `SLOP030`, 64 `SLOP040`, 11 `SLOP011`, 11 `SLOP021` and 1 `SLOP051`. `SLOP002` reports 14 dependencies where the first round had 15: one package is no longer new.
+
+The final build passes the preflight, and its test suite passes on three Python versions:
+
+| Python | Result |
+|---|---|
+| 3.14.4 | 1,984 passed, 1 skipped |
+| 3.12.3 | 1,984 passed, 1 skipped |
+| 3.10.12 | 1,973 passed, 6 skipped |
+
+### Each rule, before and after
+
+"Standard corpus" is the Python standard library and the system packages of this machine, 22,971 files.
+
+| Rule | Standard corpus | 18 public projects | What is gone |
+|---|---|---|---|
+| `SLOP030` | 4,163 → 4,159 | 2,960 → 2,952 | 12 pairs of functions that set different variables, such as `set_debug` and `set_verbose` in `langchain-ai/langchain` |
+| `SLOP011` | 3 → 3 | 15 → 11 | The four `*_schema` methods of `pydantic/pydantic` |
+| `SLOP010` | 2 → 2 | 5 → 0 | All five findings of the first round |
+| `SLOP051` (first round) | 0 → 0 | 10 → 1 | The nine "as an AI SDK" docstrings |
+
+No rule reports anything that it did not report before.
+
+### The narrow `SLOP001` cases (#85)
+
+Seven cases are fixed with tests, and two are named in the README as limits (a one-file run reads every notebook; an extras group written as `pkg[${A}${B}]` without a comma). Checked in two ways:
+
+- **On 17 of the 18 projects** (`home-assistant/core` left out), with PyPI: the findings and notes are the same before and after, and the cache holds the same 545 names. No name is sent that `main` kept on the machine.
+- **On four small projects, with a registry that records what it is asked.** On `main` each one sends a private name. With the fix none does:
+
+| Layout | Asked on `main` | Asked with the fix |
+|---|---|---|
+| A notebook with the bare line `pip -q install -i <index> corp-auth` and `%pip install corp-tools` | `corp-tools` | nothing |
+| `flask  # slopfence: ignore[SLOP030]`, a form feed, `corp-auth  # slopfence: ignore` on one line of a requirements file | `corp-auth`, `flask`, `requests` | `flask`, `requests` |
+| `setup.cfg` with `Corp.Utils [platform:dpkg]`, and `import corp_utils`, with `--check-imports` | `corp-utils`, `corp_utils` | nothing |
+| A named folder above the project root, whose checkout sets a private index in `requirements.txt` | `corp-lib` | nothing |
+
+### More before and after
+
+| Case | On `main` | With the fix |
+|---|---|---|
+| `baseline = "/dev/zero"` in `[tool.slopfence]` | The run reads without end. It reached 27 GB of memory before the system stopped it | Exit code `2`: "baseline /dev/zero is not a file" |
+| A `pyproject.toml` with 4,000 dependencies in `[project]` | 12.2 s | 0.11 s. 20,000 take 0.56 s |
+| The same as a Poetry table, and as a `Pipfile` | 11.4 s, 5.7 s | 0.11 s, 0.08 s |
+
+### The faster reader for `pyproject.toml` and `Pipfile`
+
+This change must not move any finding to another line, because the line decides which ignore comment counts. Checked in three ways:
+
+- **Every real file.** All 57 `pyproject.toml` and `Pipfile` files of the 18 projects, with 1,139 dependencies: what the reader says about each one is the same on `main`, on the branch and on the final build, byte for byte.
+- **Generated files.** 6,000 files made with a fixed seed (20261122), with 56,884 dependencies, 13,821 of them under an ignore comment: the same answers on both, also on Python 3.10.
+- **Does the comparison see a mistake?** The new code was broken in 15 different ways, one at a time. The comparison caught all 15.
+
+Two shapes that no real project has are still slow: 20,000 different requirement strings that hold a quote character and start alike (about a minute), and 20,000 arrays whose brackets don't pair up (45 s). Both are faster than before and give the same result.
+
+### The outside pull request for `[build-system] requires` (#95)
+
+Pull request #95 was checked in the same way, and is not part of the fixed build. On the 18 projects it adds no finding and no note, and it sends four more names to pypi.org, all build backends that exist: `flit-core`, `pdm-backend`, `poetry-core` and `uv-build`. Its own preflight passes. A review found nothing that blocks it under the rules its maintainer review named, and two rare layouts where a build requirement is still sent although the project uses a private index: an index named in a `setup.cfg`, `setup.py` or notebook that slopfence can't read, and an ignore comment on a `build-system.requires = [...]` line written without a table header.
+
+## Still open
 
 | What | Detail |
 |---|---|
-| `SLOP011` reports a function that correctly returns a fixed value | 4 of 5 sampled findings. See `pydantic/json_schema.py` |
-| `SLOP030` treats two setters of different global variables as identical | `set_in_sighandler` and `set_default_app` in `celery/celery`. The docstring counts toward the three-statement minimum, and names declared `global` are treated like local names |
-| `SLOP010` reports "This is a simplified version" where it describes real code, and reader notes inside docstring examples | All 5 findings in the 18 projects are one of the two |
+| `SLOP011` reports a module-level hook that a framework calls by name | `async_remove_config_entry_device` in Home Assistant integrations answers `True` to allow a removal: 8 of the 11 findings that are left. Named in the README as a limit |
 | `SLOP051` reports model output that a docstring quotes as an example | 1 finding in `langchain-ai/langchain` |
-| A `pyproject.toml` with thousands of dependencies is slow | The time grows with the square of the number of entries: 0.9 s for 1,000, 3.3 s for 2,000, 12 s for 4,000. No real project is near that, but a crafted file is |
-| The `baseline` key of a config can name any file, also a device | A config from someone else can make the run read a file outside the project |
+| An ignore comment on a dotted key without a table header can be lost | `project.dependencies = [...]  # slopfence: ignore` next to another table with a `dependencies` key: the line of the other table is taken. Found in the review of #95; `main` has it too |
+| `SLOP030` counts a docstring as one of the three statements a function needs | A design question, left out of #99 |
 | `-o` and `--write-baseline` write through a symbolic link | On purpose since #68. A link in a checked project can point the report somewhere else |
 | A config in a pull request can switch rules off | `per-file-ignores = {"*" = [...]}` gives exit code `0` and no note. Other linters behave the same |
 | The workflows use actions by tag, not by commit | Among them the PyPI publish action |
