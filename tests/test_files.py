@@ -6,7 +6,13 @@ import stat
 import pytest
 
 from slopfence import files as filesmod
-from slopfence.files import replace_text
+from slopfence.files import replace_text, rewrite_text
+
+posix = pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
+# root may write whatever the permissions say, so a test of a refused write proves nothing.
+not_root = pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a user that can be refused"
+)
 
 
 def test_replace_text_writes_a_new_file_and_replaces_an_old_one(tmp_path):
@@ -104,3 +110,101 @@ def test_replace_text_in_a_missing_folder_is_an_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         replace_text(tmp_path / "missing" / "data.json", "text")
     assert list(tmp_path.iterdir()) == []
+
+
+@posix
+def test_temporary_file_is_made_with_its_permissions(tmp_path, monkeypatch):
+    """There is no moment in which another user could open the temporary file: it has
+    its permissions from the start, not from a later step."""
+    made_with = []
+    chmod = os.chmod
+
+    def record_then_chmod(path, mode):
+        """Note the permissions the file was made with, before they are set again."""
+        made_with.append(stat.S_IMODE(os.stat(path).st_mode))
+        chmod(path, mode)
+
+    monkeypatch.setattr(os, "chmod", record_then_chmod)
+    before = os.umask(0o022)
+    try:
+        replace_text(tmp_path / "cache.json", "names", 0o600)
+    finally:
+        os.umask(before)
+    assert made_with == [0o600]
+
+
+@posix
+def test_replace_text_gives_the_mode_that_the_umask_would_cut(tmp_path):
+    """``mode`` is what the file gets, also when the umask allows less for a new file."""
+    before = os.umask(0o077)
+    try:
+        replace_text(tmp_path / "report.json", "text", 0o644)
+    finally:
+        os.umask(before)
+    assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o644
+
+
+def test_rewrite_text_writes_a_new_file_and_replaces_an_old_one(tmp_path):
+    """Like ``replace_text``: the file holds the new text, and no temporary file is left."""
+    path = tmp_path / "pypi.json"
+    rewrite_text(path, "one")
+    rewrite_text(path, "two")
+    assert path.read_text(encoding="utf-8") == "two"
+    assert [p.name for p in tmp_path.iterdir()] == ["pypi.json"]
+
+
+@posix
+def test_rewrite_text_keeps_the_permissions_of_the_file(tmp_path):
+    """A file that was made private is still private after it was rewritten."""
+    path = tmp_path / "pypi.json"
+    path.write_text("old", encoding="utf-8")
+    path.chmod(0o600)
+    rewrite_text(path, "new")
+    assert path.read_text(encoding="utf-8") == "new"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
+def test_rewrite_text_replaces_a_link_and_leaves_the_file_it_names(tmp_path):
+    """A link in the file's place can be somebody else's: the file it names is not
+    written. The link makes way for the new file."""
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("mine", encoding="utf-8")
+    path = tmp_path / "pypi.json"
+    path.symlink_to(elsewhere)
+    rewrite_text(path, "cache")
+    assert elsewhere.read_text(encoding="utf-8") == "mine"
+    assert not path.is_symlink()
+    assert path.read_text(encoding="utf-8") == "cache"
+
+
+@posix
+@not_root
+def test_rewrite_text_leaves_a_file_that_may_not_be_written(tmp_path):
+    """A read-only file keeps its protection: an error, the old text, the old permissions."""
+    path = tmp_path / "pypi.json"
+    path.write_text("old", encoding="utf-8")
+    path.chmod(0o444)
+    with pytest.raises(PermissionError):
+        rewrite_text(path, "new")
+    assert path.read_text(encoding="utf-8") == "old"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o444
+    assert [p.name for p in tmp_path.iterdir()] == ["pypi.json"]
+
+
+@posix
+@not_root
+def test_rewrite_text_never_writes_in_place(tmp_path):
+    """In a folder that takes no temporary file the write fails, and the old file is
+    whole: it was not emptied first."""
+    folder = tmp_path / "locked"
+    folder.mkdir()
+    path = folder / "pypi.json"
+    path.write_text("old", encoding="utf-8")
+    folder.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError):
+            rewrite_text(path, "new")
+        assert path.read_text(encoding="utf-8") == "old"
+    finally:
+        folder.chmod(0o755)

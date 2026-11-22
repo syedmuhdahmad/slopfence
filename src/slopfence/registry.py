@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from slopfence import __version__
-from slopfence.files import write_text
+from slopfence.files import rewrite_text
 from slopfence.listing import PackageInfo, is_young, oldest_seen_upload, parse_listing
 
 EXISTS_TTL = 7 * 24 * 3600
@@ -326,7 +326,9 @@ class PyPIRegistry:
             self.cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             # In one step, so that another slopfence process never reads half a file,
             # and with the permissions the file has: one made private stays private.
-            write_text(self.cache_file, json.dumps(data))
+            # The folder can be a shared one: a link that somebody put in the file's
+            # place is replaced, not followed.
+            rewrite_text(self.cache_file, json.dumps(data))
             self._dirty = False
 
     def exists(self, name: str) -> bool | None:

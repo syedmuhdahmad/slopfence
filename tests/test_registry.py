@@ -441,3 +441,41 @@ def test_cache_folder_that_exists_keeps_its_permissions(pypi):
     registry.save()
     assert stat.S_IMODE(registry.cache_file.parent.stat().st_mode) == 0o755
     assert registry.cache_file.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
+def test_link_in_place_of_the_cache_file_is_not_followed(pypi, tmp_path):
+    """In a shared cache folder somebody else can put a link where the cache file goes.
+    The file it names is left alone, and the link makes way for the cache."""
+    registry, _ = pypi
+    elsewhere = tmp_path / "notes.txt"
+    elsewhere.write_text("mine", encoding="utf-8")
+    registry.cache_file.parent.mkdir(parents=True)
+    registry.cache_file.symlink_to(elsewhere)
+    registry.prefetch(["pkg-1"])
+    registry.save()
+    assert elsewhere.read_text(encoding="utf-8") == "mine"
+    assert not registry.cache_file.is_symlink()
+    assert set(json.loads(registry.cache_file.read_text(encoding="utf-8"))) == {"pkg-1"}
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a user that can be refused"
+)
+@pytest.mark.parametrize("locked", ["file", "folder"])
+def test_cache_that_may_not_be_replaced_stays_whole(pypi, locked):
+    """A read-only cache file, or one in a folder that takes no new file, is not written
+    in place: the run goes on, and the cache holds what it held."""
+    registry, _ = pypi
+    registry.prefetch(["pkg-1"])
+    registry.save()
+    before = registry.cache_file.read_text(encoding="utf-8")
+    target = registry.cache_file if locked == "file" else registry.cache_file.parent
+    was = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(0o444 if locked == "file" else 0o555)
+    try:
+        registry.prefetch(["pkg-2"])
+        registry.save()
+        assert registry.cache_file.read_text(encoding="utf-8") == before
+    finally:
+        target.chmod(was)
