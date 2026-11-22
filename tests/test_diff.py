@@ -190,7 +190,8 @@ def test_diff_does_not_run_the_program_the_repository_names_as_file_monitor(tmp_
 
 def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, monkeypatch):
     """The options that keep git from running a program of the repository, or from
-    writing to it, are on every command."""
+    writing to it, are on every command. The file monitor is switched off with an empty
+    value: a git before 2.36 takes ``false`` for the name of a program to run."""
     git_init(tmp_path)
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     git(tmp_path, "add", ".")
@@ -201,7 +202,7 @@ def test_every_git_command_is_read_only_and_ignores_the_file_monitor(tmp_path, m
     diffmod.changed_lines(tmp_path, "HEAD")
     assert len(commands) == 4
     for command, environment in zip(commands, environments, strict=True):
-        assert command[1:3] == ["-c", "core.fsmonitor=false"]
+        assert command[1:3] == ["-c", "core.fsmonitor="]
         assert environment["GIT_OPTIONAL_LOCKS"] == "0"
         assert environment["PATH"] == os.environ["PATH"], "the rest of the environment stays"
 
