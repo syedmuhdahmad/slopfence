@@ -16,6 +16,7 @@ import hashlib
 import json
 import ntpath
 import os
+import stat
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -179,12 +180,29 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
 
 
+def _is_special(path: Path) -> bool:
+    """Whether ``path`` is a device, a pipe or a socket, directly or through a link.
+
+    Such a file is never opened as a baseline: reading ``/dev/zero`` never ends, and
+    opening a pipe that nobody writes to never returns. The path can come from the
+    config of a project that somebody else wrote. A folder is not special: opening it
+    fails at once, with the system's own reason.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False  # missing, or not to be looked at: reading it says so
+    return not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
+
+
 def load(path: Path) -> Baseline:
     """Read a baseline file. Raises BaselineError if it is missing or not a baseline.
 
     A row for a rule this version doesn't know is kept. It matches nothing, so a
     baseline written by a newer slopfence doesn't break an older one.
     """
+    if _is_special(path):
+        raise BaselineError(f"baseline {path} is not a file")
     try:
         data = json.loads(_read_text(path))
     except FileNotFoundError as err:

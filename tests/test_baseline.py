@@ -22,7 +22,7 @@ from slopfence.engine import run
 from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Finding, plural
 from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry
-from tests.conftest import DAY, FakeRegistry, git, git_init
+from tests.conftest import DAY, FakeRegistry, git, git_init, pyproject
 
 APP = '''\
 import os
@@ -1899,3 +1899,42 @@ def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):
     assert stale(".") == 0
     assert stale(".", checked=("a.py", "skipped.py")) == 7
     assert baselinemod.count_stale({}, {"SLOP010"}, {"a.py"}, Scope(["."]), tmp_path) == 0
+
+
+# --- Only a plain file is read as a baseline. The config can name the path. ---
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="this system has no /dev/zero")
+@pytest.mark.parametrize("how", ["option", "config"])
+def test_device_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys, how):
+    """``baseline = "/dev/zero"`` in a config from someone else must not make the run
+    read without end: a device is no baseline, and is never opened."""
+    write("app.py", "x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    if how == "config":
+        pyproject(tmp_path, '[tool.slopfence]\nbaseline = "/dev/zero"\n')
+        argv = ["--offline", "."]
+    else:
+        argv = ["--offline", "--baseline", "/dev/zero", "."]
+    assert main(argv) == 2
+    assert "baseline /dev/zero is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
+def test_named_pipe_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys):
+    """Opening a pipe that nobody writes to never returns. It is not opened."""
+    write("app.py", "x = 1\n")
+    os.mkfifo(tmp_path / "accepted.json")
+    monkeypatch.chdir(tmp_path)
+    assert main(["--offline", "--baseline", "accepted.json", "."]) == 2
+    assert "accepted.json is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
+def test_baseline_behind_a_link_is_still_read(project, monkeypatch, capsys):
+    """A link to a plain file is a plain file to read: a shared baseline may be linked."""
+    assert main(["--offline", "--write-baseline", "real.json", "."]) == 0
+    (project / "linked.json").symlink_to(project / "real.json")
+    capsys.readouterr()
+    assert main(["--offline", "--baseline", "linked.json", "."]) == 0
+    assert "hidden by the baseline" in capsys.readouterr().out
