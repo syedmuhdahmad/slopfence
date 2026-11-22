@@ -48,8 +48,10 @@ _NO_GIT = "git is not installed"
 # and that repository is the project being checked.
 _GIT_OPTIONS = (
     # ``core.fsmonitor`` can name a program, which git then runs to ask what changed.
+    # The empty value switches it off in every git. ``false`` does not: a git before
+    # 2.36 reads the value as the name of a program, and would start one named "false".
     "-c",
-    "core.fsmonitor=false",
+    "core.fsmonitor=",
 )
 # Only read: don't refresh the index file on the side. That write would also run the
 # repository's ``post-index-change`` hook. Set in the environment, not with
@@ -69,7 +71,8 @@ def find_git(search_path: str) -> str | None:
     Only a folder that is named by its full path counts. An empty entry, ``.`` or
     ``bin`` stands for the current folder or a folder in it, and git runs in the
     project that is checked: a program named git that lies there is a file of that
-    project, and slopfence never runs one.
+    project, and slopfence does not start one through such an entry. A folder that is
+    named by its full path is trusted as it is, wherever it lies.
     """
     for entry in search_path.split(os.pathsep):
         # Windows takes a folder with quotes around it.
