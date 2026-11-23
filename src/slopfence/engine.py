@@ -63,6 +63,27 @@ def _is_checkout(folder: Path) -> bool:
     return os.path.exists(folder / ".git")
 
 
+# The reparse tag of a directory junction (``stat.IO_REPARSE_TAG_MOUNT_POINT``, a name
+# that ``stat`` only has on Windows).
+_JUNCTION_TAG = 0xA0000003
+
+
+def _is_junction(path: Path) -> bool:
+    """Whether ``path`` is a directory junction: the Windows link to a folder that
+    needs no privilege.
+
+    ``os.path.islink`` does not count one as a link, and before Python 3.12
+    ``os.walk`` enters one like a folder of its own. So it is asked for here
+    (``os.path.isjunction`` is new in Python 3.12).
+    """
+    if os.name != "nt":
+        return False
+    try:
+        return os.lstat(path).st_reparse_tag == _JUNCTION_TAG
+    except (OSError, ValueError):
+        return False
+
+
 def _is_pruned(folder: Path) -> bool:
     """Whether the walk of a project never enters ``folder``.
 
@@ -72,9 +93,15 @@ def _is_pruned(folder: Path) -> bool:
     must not count as this project's code (SLOP030 would double-report; SLOP001
     would treat its modules as local and its dependency files as this project's,
     see #58).
+
+    It is also so for a directory junction. ``os.walk`` never enters a folder that
+    is a symbolic link, and from Python 3.12 on no junction either. The walk is the
+    same on every Python: a linked folder is not entered, wherever it leads.
     """
     name = folder.name
-    return name in EXCLUDED_DIRS or name.endswith(".egg-info") or _is_checkout(folder)
+    if name in EXCLUDED_DIRS or name.endswith(".egg-info"):
+        return True
+    return _is_checkout(folder) or _is_junction(folder)
 
 
 def _is_read(found: Path, home: Path | None) -> bool:
@@ -106,7 +133,8 @@ def _is_read(found: Path, home: Path | None) -> bool:
 
 
 def _is_refused_link(path: Path, project: Path) -> bool:
-    """Whether a named path is a symbolic link that is not followed.
+    """Whether a named path is a link that is not followed. A link is a symbolic
+    link or, on Windows, a directory junction.
 
     Two kinds are not. A link that lies in the project and leads out of it, to a file
     or to a folder: pre-commit names every changed file of a commit, links among
@@ -119,7 +147,7 @@ def _is_refused_link(path: Path, project: Path) -> bool:
     """
     folder = Path(os.path.realpath(path.parent))
     found = folder / path.name
-    if not os.path.islink(found):
+    if not (os.path.islink(found) or _is_junction(found)):
         return False
     target = Path(os.path.realpath(found))
     # There, but nothing to look at: the chain of links ends in a link again.

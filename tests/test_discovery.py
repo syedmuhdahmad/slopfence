@@ -325,3 +325,58 @@ def test_named_link_that_leads_back_to_itself_is_passed_over(tmp_path):
         result = run([named, root / "real.py"], root, OfflineRegistry())
         assert result.files_checked == 1
         assert result.parse_errors == []
+
+
+needs_junctions = pytest.mark.skipif(os.name != "nt", reason="a junction is a Windows link")
+
+
+def junction(link: Path, target: Path) -> None:
+    """Make ``link`` a directory junction to the folder ``target``. Needs no privilege."""
+    import _winapi  # Windows only, so not imported at the top of the file
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+@needs_junctions
+def test_junction_out_of_the_project_is_not_entered(tmp_path):
+    """A junction links a folder like a symbolic link does, and ``os.path.islink``
+    does not see it. Walked or named, it is no way out of the project."""
+    root, other = outside(tmp_path)
+    (other / "private.py").write_text(CHAT, encoding="utf-8")
+    (other / "requirements.txt").write_text("internal-corp-token-abc123\n", encoding="utf-8")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    junction(root / "vendor", other)
+    walked = discover_all([root], root)
+    assert [[file.name for file in files] for files in walked] == [["app.py"], [], []]
+    assert discover_all([root / "vendor"], root) == ([], [], [])
+    registry = RecordingRegistry()
+    result = run([root / "vendor"], root, registry)
+    assert result.findings == []
+    assert result.files_checked == 0
+    assert registry.queries == []
+
+
+@needs_junctions
+def test_named_junction_inside_the_project_is_followed(tmp_path):
+    """A junction to a folder of the same project is followed when it is named, like
+    a symbolic link to one."""
+    root, _ = outside(tmp_path)
+    (root / "pkg").mkdir()
+    (root / "pkg" / "app.py").write_text(CHAT, encoding="utf-8")
+    junction(root / "alias", root / "pkg")
+    assert [file.name for file in discover_all([root / "alias"], root)[0]] == ["app.py"]
+    # The walk reads the file once, in its own folder: the junction is not entered.
+    assert [file.name for file in discover_all([root], root)[0]] == ["app.py"]
+
+
+def test_walk_does_not_enter_a_folder_that_is_a_junction(tmp_path, monkeypatch):
+    """Before Python 3.12 ``os.walk`` enters a junction. The walk leaves it out itself,
+    so every Python finds the same files. A folder stands in for the junction here,
+    so that this runs on every system."""
+    root, _ = outside(tmp_path)
+    (root / "vendor").mkdir()
+    (root / "vendor" / "linked.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    assert [file.name for file in discover_all([root], root)[0]] == ["app.py", "linked.py"]
+    monkeypatch.setattr(enginemod, "_is_junction", lambda path: Path(path).name == "vendor")
+    assert [file.name for file in discover_all([root], root)[0]] == ["app.py"]
