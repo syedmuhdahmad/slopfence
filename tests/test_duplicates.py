@@ -360,7 +360,7 @@ def test_fingerprint_is_the_token_sequence(write, tmp_path):
     assert original.fingerprint == copy.fingerprint
     assert TOKEN_SEP.join(original.tokens) == original.fingerprint
     assert original.size == len(original.tokens) > 10
-    assert original.tokens[:3] == ["arguments", "arg", "v0"]
+    assert original.tokens[:3] == ["arguments", "arg", "#0"]
 
 
 def test_separator_in_a_constant_cannot_fake_a_token_boundary(write, tmp_path, check):
@@ -547,6 +547,50 @@ def test_nonlocal_names_count_like_global_ones(write, check):
     write("app/b.py", COUNTER.format(name="make_total", var="count").replace("count", "total"))
     findings = check("SLOP030").findings
     assert [f for f in findings if f.subject == "bump"] == []
+
+
+FACTORY = '''
+def {name}():
+    """Make a setter of {var} that keeps what it was given."""
+    seen = []
+
+    def set_it(value):
+        """Set the variable and keep the value."""
+        global {var}
+        {var} = value
+        seen.append(value)
+        return value
+
+    return set_it
+'''
+
+
+def test_factories_whose_inner_functions_set_different_globals_are_not_identical(write, check):
+    """The global is declared one function further in. The two factories still set
+    different variables, and neither can stand in for the other."""
+    write("app/log.py", FACTORY.format(name="make_handler_flag", var="_in_handler"))
+    write("app/state.py", FACTORY.format(name="make_default_app", var="default_app"))
+    assert check("SLOP030").findings == []
+
+
+def test_factories_whose_inner_functions_set_the_same_global_are_identical(write, check):
+    """The same global one function further in: the second factory is a copy, and so
+    is the function inside it."""
+    write("app/a.py", FACTORY.format(name="make_setter", var="default_app"))
+    write("app/b.py", FACTORY.format(name="build_setter", var="default_app"))
+    findings = check("SLOP030").findings
+    assert [(f.path, f.subject) for f in findings] == [
+        ("app/b.py", "build_setter"),
+        ("app/b.py", "set_it"),
+    ]
+
+
+def test_global_named_like_a_placeholder_is_not_taken_for_a_local(write, check):
+    """Locals are numbered when functions are compared. A global that happens to be
+    named ``v0`` is not local number 0: only the first function sets the global."""
+    write("app/a.py", "def first(x):\n    global v0\n    v0 = transform(x)\n    return v0\n")
+    write("app/b.py", "def second(y):\n    global v0\n    y = transform(y)\n    return v0\n")
+    assert check("SLOP030").findings == []
 
 
 def test_local_names_still_do_not_matter(write, check):

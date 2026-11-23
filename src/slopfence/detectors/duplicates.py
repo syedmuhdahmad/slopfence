@@ -127,15 +127,20 @@ def _local_names(func: FunctionNode) -> set[str]:
 
     A name it declares ``global`` or ``nonlocal`` is assigned too, but it is shared
     state, like an attribute: two functions that set different globals do different
-    things. Such a name keeps its name when functions are compared.
+    things. Such a name keeps its name when functions are compared. So does a name
+    that a function inside it declares ``global``: two factories whose inner
+    functions set different globals do different things as well.
     """
     args = func.args
     params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
     names = {a.arg for a in params if a}
+    shared = _outer_names(func)
     for node in walk(func):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             names.add(node.id)
-    return names - _outer_names(func)
+        elif isinstance(node, ast.Global):
+            shared.update(node.names)
+    return names - shared
 
 
 def _body_without_docstring(func: FunctionNode) -> list[ast.stmt]:
@@ -155,8 +160,10 @@ def _tokens(node: ast.AST, rename: dict[str, str], local: set[str], out: list[st
     """Append a flat token sequence of node types and the values that matter to ``out``.
 
     Depth-first, so each statement's tokens stay together and an edit changes one
-    stretch only. Parameters and locals become v0, v1... in order of appearance,
-    so renaming them doesn't change the sequence.
+    stretch only. Parameters and locals become #0, #1... in order of appearance,
+    so renaming them doesn't change the sequence. No name can be spelled that way,
+    so a local never looks like a global, a called function or a module that
+    keeps its name.
     """
     # A stack instead of recursion: an expression can be thousands of levels deep.
     todo = [node]
@@ -167,7 +174,7 @@ def _tokens(node: ast.AST, rename: dict[str, str], local: set[str], out: list[st
         out.append(type(node).__name__)
         if isinstance(node, (ast.Name, ast.arg)):
             name = node.id if isinstance(node, ast.Name) else node.arg
-            out.append(rename.setdefault(name, f"v{len(rename)}") if name in local else name)
+            out.append(rename.setdefault(name, f"#{len(rename)}") if name in local else name)
         elif isinstance(node, ast.Attribute):
             out.append(node.attr)
         elif isinstance(node, ast.Constant):
