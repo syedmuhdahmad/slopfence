@@ -49,7 +49,10 @@ CHAT_PATTERNS = [
         # in the first person. Everything else with these words is prose about
         # software: "an AI SDK data part", "an AI language model for classification",
         # and without the comma "an AI model I trained", where "I" is the writer.
-        r"\bas an ai( language model| assistant| model)?, (i(?=[\s'\u2019])|my\s)",
+        # A quotation mark right before the phrase makes it an example that a comment
+        # talks about: 'Reject the phrase "As an AI, I cannot help"'.
+        r"(?<![\"'`\u201c\u2018])\bas an ai( language model| assistant| model)?,\s+"
+        r"(i(?=[\s'\u2019])|my\s)",
         r"\bi hope (this|that) helps\b",
         r"\blet me know if (you('d| would) like|you need|you have any (other |more |further )?"
         r"questions|there('s| is) anything else|you want)\b",

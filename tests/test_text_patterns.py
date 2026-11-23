@@ -174,6 +174,7 @@ def test_placeholders_still_flagged_in_similar_names(write, check):
         "# Note: as an AI model, I'm unable to verify the output",
         "# As an AI, my knowledge is limited to what I was trained on",
         "# As an AI language model, my training data ends before this release",
+        "# As an AI,  I cannot run this",
     ],
 )
 def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
@@ -206,6 +207,11 @@ def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
         # A comma, and then no first person.
         "# Treat it as an AI, i.e. as a black box",
         "# Served as an AI, in the same process as the tools",
+        # The phrase as a quoted example inside a comment about something else.
+        '# Reject the phrase "As an AI, I cannot help" in generated output.',
+        "# Strip a leading 'As an AI, I am unable to' from the answer",
+        "# Answers that start with `As an AI, my` are sent back to the model",
+        "# The filter drops \u201cAs an AI, I can\u2019t help\u201d and the line after it",
     ],
 )
 def test_ai_as_a_plain_word_is_not_flagged(write, check, comment):
