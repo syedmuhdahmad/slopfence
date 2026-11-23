@@ -232,6 +232,9 @@ def test_ai_as_a_plain_word_is_not_flagged(write, check, comment):
         "This is a simplified implementation which skips the cache on purpose.",
         "This is a simplified version compared with the one in the paper.",
         "This is a simplified function than the general one above, for 2D inputs only.",
+        # More than one space, or a tab, before the word that compares.
+        "This is a simplified version  compared to PostResponse.",
+        "This is a simplified version\tthat handles the conversion.",
     ],
 )
 def test_simplified_version_that_describes_real_code_is_not_flagged(write, check, sentence):
@@ -266,6 +269,9 @@ def load_video(path):
         >>> # replace this with your own video file
         >>> video = load_video("spaghetti.mp4")
         ... # add your logic here
+        >>> clip = load_video("clip.mp4")  # Replace this with your own file
+        >>> for frame in clip:
+        ...     show(frame)  # your code here
     """
     return decode(path)
 '''
@@ -292,19 +298,21 @@ def test_comment_inside_a_docstring_example_is_not_flagged(write, check, code):
 
 
 def test_docstring_prose_and_real_comments_are_still_flagged(write, check):
-    """Only a line that is itself a code comment is example code. The prose of a
-    docstring is checked, and so is every real comment."""
+    """Only a line that is itself a code comment, or a doctest line, is example code.
+    The prose of a docstring is checked, also a line that starts with "...", and so
+    is every real comment."""
     write(
         "src/app.py",
         "def charge(card):\n"
         '    """Charge a card.\n'
         "\n"
         "    In a real implementation, this calls the payment provider.\n"
+        "    ... rest of the implementation\n"
         '    """\n'
         "    # Your code here\n"
         "    return True\n",
     )
-    assert rule_lines(check("SLOP010"), "SLOP010") == [4, 6]
+    assert rule_lines(check("SLOP010"), "SLOP010") == [4, 5, 7]
 
 
 def test_chat_text_inside_a_docstring_example_is_still_flagged(write, check):

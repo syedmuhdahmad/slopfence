@@ -34,7 +34,7 @@ PLACEHOLDER_PATTERNS = [
         # goes on to say how the code relates to other code: "... compared to
         # PostResponse", "... that handles the conversion".
         r"\bthis is (just )?a simplified (implementation|version|function)\b"
-        r"(?! (compared|than|that|which)\b)",
+        r"(?![ \t]+(compared|than|that|which)\b)",
         r"\badd (your|more|actual|real) (logic|implementation|validation|error handling) here\b",
     ]
 ]
@@ -68,9 +68,10 @@ CHAT_PATTERNS = [
 ]
 
 
-# A line of a docstring that is itself a code comment: it starts with "#", or with a
-# doctest prompt (">>>" or "...") and then "#".
-_EXAMPLE_COMMENT = re.compile(r"\s*(?:(?:>>>|\.\.\.)\s*)?#")
+# A line of a docstring that is example code: it starts with "#", it starts with the
+# doctest prompt ">>>", or it starts with "..." and holds a comment. Three dots alone
+# can also start a line of prose about code that was left out, which is still checked.
+_EXAMPLE_CODE = re.compile(r"\s*(?:#|>>>|\.\.\.[^#]*#)")
 
 
 def _scan(
@@ -93,9 +94,10 @@ def check_placeholders(src: SourceFile) -> Iterator[Finding]:
     # code is meant to be illustrative; only check application code.
     if src.is_test_file or src.is_example_file:
         return
-    # The same goes for example code that a docstring shows: a comment in it speaks
-    # to whoever copies the example. The prose of the docstring is still checked.
-    prose = (line for line in src.docstring_lines if not _EXAMPLE_COMMENT.match(line.text))
+    # The same goes for example code that a docstring shows: a comment in it, on a
+    # line of its own or after the code, speaks to whoever copies the example. The
+    # prose of the docstring is still checked.
+    prose = (line for line in src.docstring_lines if not _EXAMPLE_CODE.match(line.text))
     spans = (*src.comments, *prose)
     yield from _scan(spans, src.rel, "SLOP010", PLACEHOLDER_PATTERNS, "Placeholder left in code")
 
