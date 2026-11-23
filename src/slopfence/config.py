@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover
     import tomli as tomllib
 
+# The file that holds the config, and that marks the top folder of a project.
+CONFIG_FILE = "pyproject.toml"
 KNOWN_KEYS = {
     "select",
     "ignore",
@@ -141,19 +144,54 @@ def _severities(table: dict, where: str) -> dict[str, Severity]:
     return severities
 
 
-def load_config(root: Path) -> Config:
-    """Read [tool.slopfence] from root/pyproject.toml. Missing file or table -> defaults."""
-    path = root / "pyproject.toml"
-    if not path.is_file():
-        return Config()
+def _table(path: Path) -> object:
+    """What a ``pyproject.toml`` holds as ``[tool.slopfence]``. None when it has no such table.
+
+    Raises ConfigError when the file can't be read or is not valid TOML.
+    """
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as err:
         raise ConfigError(f"{path}: {err}") from err
     except tomllib.TOMLDecodeError as err:
         raise ConfigError(f"{path}: invalid TOML: {err}") from err
+    tool = data.get("tool")
+    # ``tool = 1`` is valid TOML, and no config.
+    return tool.get("slopfence") if isinstance(tool, dict) else None
 
-    table = data.get("tool", {}).get("slopfence")
+
+def find_root(start: Path) -> Path | None:
+    """The project that the folder ``start`` belongs to, told by its ``pyproject.toml``.
+    None when no folder at or above ``start`` has one.
+
+    It is the nearest folder whose ``pyproject.toml`` has a ``[tool.slopfence]`` table,
+    the way ruff, pytest and mypy find their config. A file that can't be read counts
+    as one: it may hold the table, and ``load_config`` then says what is wrong with
+    it. When no file has the table, the nearest ``pyproject.toml`` marks the project.
+    """
+    nearest = None
+    for folder in (start, *start.parents):
+        path = folder / CONFIG_FILE
+        # ``os.path.isfile`` has no answer but yes or no. Before Python 3.12
+        # ``Path.is_file`` raises for a folder that may not be entered.
+        if not os.path.isfile(path):
+            continue
+        try:
+            configured = _table(path) is not None
+        except ConfigError:
+            configured = True
+        if configured:
+            return folder
+        nearest = nearest or folder
+    return nearest
+
+
+def load_config(root: Path) -> Config:
+    """Read [tool.slopfence] from root/pyproject.toml. Missing file or table -> defaults."""
+    path = root / CONFIG_FILE
+    if not path.is_file():
+        return Config()
+    table = _table(path)
     if table is None:
         return Config()
     where = f"{path} [tool.slopfence]"
