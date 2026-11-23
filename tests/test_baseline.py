@@ -1917,8 +1917,16 @@ def test_device_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, c
         argv = ["--offline", "."]
     else:
         argv = ["--offline", "--baseline", "/dev/zero", "."]
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(
+        baselinemod.os,
+        "open",
+        lambda path, *rest: opened.append(str(path)) or real_open(path, *rest),
+    )
     assert main(argv) == 2
     assert "baseline /dev/zero is not a file" in capsys.readouterr().err
+    assert "/dev/zero" not in opened
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
@@ -1944,22 +1952,35 @@ def test_socket_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, c
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
-def test_pipe_that_takes_the_place_of_a_baseline_is_not_read(write, tmp_path, monkeypatch, capsys):
-    """What a path names can change between a look at it and the reading. The file is
-    asked what it is once it is open: a pipe put in the place of a baseline in that
-    moment is refused, and the run does not wait on it."""
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ("--baseline", "baseline accepted.json is not a file"),
+        ("--write-baseline", "can't write baseline accepted.json: it is not a regular file"),
+    ],
+)
+def test_pipe_that_takes_the_place_of_a_baseline_is_not_read(
+    write, tmp_path, monkeypatch, capsys, option, message
+):
+    """What a path names can change between a look at it and the reading. The open
+    file is asked what it is too: a pipe put in the place of a baseline in that moment
+    is refused, and the run does not wait on it."""
     write("app.py", "x = 1\n")
     os.mkfifo(tmp_path / "accepted.json")
     monkeypatch.chdir(tmp_path)
-    # As if the name had still been a plain file when it was looked at.
-    isfile = os.path.isfile
-    monkeypatch.setattr(
-        baselinemod.os.path,
-        "isfile",
-        lambda path: Path(path).name == "accepted.json" or isfile(path),
-    )
-    assert main(["--offline", "--write-baseline", "accepted.json", "."]) == 2
-    assert "can't write baseline accepted.json: it is not a regular file" in capsys.readouterr().err
+    # As if the name had still been a plain file at every look before the opening.
+    real_stat = os.stat
+    plain = real_stat(tmp_path / "app.py")
+
+    def stat_before_the_swap(path, *args, **kwargs):
+        """Answer for the baseline as for a plain file, and for all else as it is."""
+        if isinstance(path, (str, os.PathLike)) and Path(path).name == "accepted.json":
+            return plain
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(baselinemod.os, "stat", stat_before_the_swap)
+    assert main(["--offline", option, "accepted.json", "."]) == 2
+    assert message in capsys.readouterr().err
 
 
 @pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")

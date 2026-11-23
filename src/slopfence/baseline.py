@@ -181,17 +181,23 @@ class _NotAFile(OSError):
 
 
 # How a baseline is opened. ``O_NONBLOCK``: opening a pipe that nobody writes to
-# returns at once, where it would otherwise never return. ``O_BINARY`` is there on
-# Windows only, where a file opened without it is changed on the way in.
-_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+# returns at once, where it would otherwise never return. ``O_NOCTTY``: a terminal
+# that is opened does not become the terminal of this process. ``O_BINARY`` is there
+# on Windows only, where a file opened without it is changed on the way in.
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_NOCTTY", 0)
+    | getattr(os, "O_BINARY", 0)
+)
 
 
-def _is_socket(path: Path) -> bool:
-    """Whether ``path`` is a socket, directly or through a link."""
-    try:
-        return stat.S_ISSOCK(os.stat(path).st_mode)
-    except OSError:
-        return False
+def _is_special(mode: int) -> bool:
+    """Whether a file mode is that of a device, a pipe or a socket.
+
+    A folder is not special: reading it fails at once, with the system's own reason.
+    """
+    return not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
 
 
 def _read_text(path: Path) -> str:
@@ -199,20 +205,22 @@ def _read_text(path: Path) -> str:
 
     Only a plain file is read, also through a link. A device, a pipe or a socket is
     ``_NotAFile``: reading ``/dev/zero`` never ends, and the path can come from the
-    config of a project that somebody else wrote. The file is opened once, and what
-    it is is asked of the open file. So what was checked is what is read, whatever
-    becomes of the name in between. A folder fails with the system's own reason.
+    config of a project that somebody else wrote.
+
+    What the path names is asked twice. Before it is opened, so that a device or a
+    pipe is not opened at all: opening one can do something by itself. And of the
+    open file, so that what was checked is what is read, whatever became of the name
+    in between.
     """
     try:
-        descriptor = os.open(path, _READ_FLAGS)
-    except OSError as err:
-        # A socket can't be opened at all, and every system says so in its own way.
-        if _is_socket(path):
-            raise _NotAFile(err.errno, err.strerror, str(path)) from err
-        raise
+        special = _is_special(os.stat(path).st_mode)
+    except OSError:
+        special = False  # missing, or not to be looked at: opening it says so
+    if special:
+        raise _NotAFile(errno.EINVAL, "not a regular file", str(path))
+    descriptor = os.open(path, _READ_FLAGS)
     try:
-        mode = os.fstat(descriptor).st_mode
-        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        if _is_special(os.fstat(descriptor).st_mode):
             raise _NotAFile(errno.EINVAL, "not a regular file", str(path))
         # utf-8-sig: an editor may have put a byte order mark in front.
         stream = os.fdopen(descriptor, encoding="utf-8-sig")
