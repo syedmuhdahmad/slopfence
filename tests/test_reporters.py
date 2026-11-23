@@ -194,3 +194,89 @@ def test_every_help_uri_points_to_a_readme_heading():
         fragment = rule["helpUri"].partition("#")[2]
         assert fragment, f"{rule['id']}: helpUri has no fragment: {rule['helpUri']}"
         assert fragment in anchors, f"{rule['id']}: {rule['helpUri']} matches no README heading"
+
+
+# --- Text from the checked project never drives the terminal or the CI log. ---
+
+
+def _hostile():
+    """Findings whose path and message hold what a file name and a comment can hold."""
+    return Result(
+        findings=[
+            Finding("SLOP051", "::error file=README.md::pwned.py", 1, 1, "Leftover AI chat text"),
+            Finding("SLOP051", "esc\x1b[2J\x1b[31m.py", 1, 1, 'Leftover: "clear\x1b[2J \x9b31m"'),
+            Finding("SLOP051", "sub/a\n::error file=x::y.py", 1, 1, "two\r\nlines \u202egnp.exe"),
+        ],
+        files_checked=3,
+        parse_errors=["bad\n::warning::x.py"],
+        notes=["see\n::notice::note \x07"],
+    )
+
+
+def test_control_characters_are_written_out_in_the_text_report():
+    """An escape sequence in a file name or a comment is shown, not obeyed: the only
+    control characters in a report are its own line ends."""
+    report = reporters.text(_hostile())
+    assert not re.search(
+        r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]", report
+    )
+    assert "esc\\x1b[2J\\x1b[31m.py" in report
+    assert 'Leftover: "clear\\x1b[2J \\x9b31m"' in report
+    assert "two\\r\\nlines \\u202egnp.exe" in report
+    assert "could not parse bad\\n::warning::x.py" in report
+    assert "note: see\\n::notice::note \\x07" in report
+
+
+def test_no_line_of_the_text_report_is_a_workflow_command():
+    """GitHub Actions reads a line of a log as a command when it starts with ``::``,
+    after any white space, or when it holds ``##[`` anywhere. No file name, message or
+    note of the project makes such a line."""
+    result = _hostile()
+    result.findings.append(Finding("SLOP051", "##[error]x.py", 1, 1, "see ##[warning]here"))
+    result.findings.append(
+        Finding("SLOP051", "  ::stop-commands::token.py", 1, 1, "Leftover AI chat text")
+    )
+    result.parse_errors.append("sub/##[error]z.py")
+    result.notes.append("x ##[add-mask]y")
+    for color in (False, True):
+        lines = ANSI.sub("", reporters.text(result, color=color)).splitlines()
+        assert not [line for line in lines if line.lstrip().startswith("::") or "##[" in line]
+        assert "./::error file=README.md::pwned.py" in lines
+        assert "./  ::stop-commands::token.py" in lines
+        assert "#\\x23[error]x.py" in lines
+        assert any("see #\\x23[warning]here" in line for line in lines)
+        assert "note: x #\\x23[add-mask]y" in lines
+        assert "sub/a\\n::error file=x::y.py" in lines
+
+
+def test_printable_breaks_every_legacy_command_marker():
+    """``##[`` is broken wherever it stands, and as often as it stands there. Other
+    text with ``#`` in it is left alone."""
+    assert reporters.printable("a##[b]##[c]") == "a#\\x23[b]#\\x23[c]"
+    assert "##[" not in reporters.printable("###[error]x")
+    assert reporters.printable("# a comment, #[x], ## heading") == "# a comment, #[x], ## heading"
+
+
+def test_colours_are_still_real_escape_sequences():
+    """Only the text of the project is written out. The report's own colours work."""
+    report = reporters.text(_hostile(), color=True)
+    assert f"{BOLD}esc\\x1b[2J\\x1b[31m.py{RESET}" in report
+
+
+def test_ordinary_text_is_left_alone():
+    """Letters of any language, emoji and a tab-free path look as they did."""
+    result = Result(
+        findings=[Finding("SLOP051", "src/café/naïve.py", 2, 3, "Leftover: “Sure ✅ 日本語”")],
+        files_checked=1,
+    )
+    report = reporters.text(result)
+    assert "src/café/naïve.py" in report and "Leftover: “Sure ✅ 日本語”" in report
+
+
+def test_json_and_sarif_keep_the_real_text():
+    """The machine-readable reports are JSON: a control character is data there, kept
+    as it is and escaped by JSON itself."""
+    result = _hostile()
+    data = json.loads(reporters.as_json(result))
+    assert data["findings"][1]["path"] == "esc\x1b[2J\x1b[31m.py"
+    assert "\x1b" not in reporters.as_json(result) and "\x1b" not in reporters.sarif(result)
