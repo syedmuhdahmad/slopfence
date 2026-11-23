@@ -6,17 +6,19 @@ import os
 import signal
 import sys
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from slopfence import __version__, reporters
 from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
-from slopfence.analysis import default_jobs
+from slopfence.analysis import default_jobs, failed_file
 from slopfence.config import (
     FAIL_ON,
     PACKAGE_AGE,
     ConfigError,
+    find_root,
     is_package_age,
     load_config,
     selected_rules,
@@ -30,6 +32,10 @@ from slopfence.registry import OfflineRegistry, PyPIRegistry
 EXIT_OK, EXIT_FINDINGS, EXIT_ERROR = 0, 1, 2
 # What a shell reports for a program stopped with Ctrl-C (128 + SIGINT).
 EXIT_INTERRUPTED = 130
+# Where a bug in slopfence is reported.
+ISSUES_URL = "https://github.com/syedmuhdahmad/slopfence/issues"
+# The environment variable that adds the traceback to the message about such a bug.
+DEBUG_VARIABLE = "SLOPFENCE_DEBUG"
 
 
 def _rule_list(value: str) -> list[str]:
@@ -200,15 +206,18 @@ def _end_like_an_interrupted_program() -> None:
 def _project_root(first_path: Path) -> Path:
     """The project a run belongs to, found from the first path it was given.
 
-    That is the git repository the path is in. Without one, it is the current folder
-    when the path is inside it, and else the path's own folder.
+    That is the git repository the path is in. Without one, it is the project that
+    the path's ``pyproject.toml`` marks (see ``config.find_root``), so the config and
+    the paths in a report or a baseline don't depend on the folder slopfence is
+    started in. Without that too, it is the current folder when the path is inside
+    it, and else the path's own folder.
     """
     start = first_path.resolve()
     folder = start if start.is_dir() else start.parent
     # --list-rules takes a path that doesn't exist: the nearest folder that does stands in.
     while not folder.is_dir() and folder != folder.parent:
         folder = folder.parent
-    root = diffmod.repo_root(folder)
+    root = diffmod.repo_root(folder) or find_root(folder)
     if root is None:
         cwd = Path.cwd().resolve()
         root = cwd if folder == cwd or cwd in folder.parents else folder
@@ -231,6 +240,30 @@ def _error(message: str) -> int:
     """Say on stderr why the run can't go on, and return the exit code for an error."""
     # A message can name a file of the project, or quote git.
     print(f"slopfence: error: {reporters.printable(message)}", file=sys.stderr)
+    return EXIT_ERROR
+
+
+def _crashed(err: Exception) -> int:
+    """Say on stderr that slopfence itself failed, and return the exit code for an error.
+
+    One line: the kind of error, the file it came up in when that is known, and where
+    to report it. The text of the error is left out of that line: it is not written
+    for a user, and it can quote whatever slopfence was reading. The file name is
+    shown with its control characters written out: a name can hold a line end, and
+    the message has to stay one line. With the environment variable in
+    ``DEBUG_VARIABLE`` set, the traceback follows, for the bug report.
+    """
+    file = failed_file(err)
+    where = f" while checking {reporters.printable(file)}" if file is not None else ""
+    debug = os.environ.get(DEBUG_VARIABLE, "") not in ("", "0")
+    hint = "" if debug else f" Run it again with {DEBUG_VARIABLE}=1 to get the traceback."
+    print(
+        f"slopfence: internal error ({type(err).__name__}){where}. This is a bug in "
+        f"slopfence, not in the code it checked: please report it at {ISSUES_URL}.{hint}",
+        file=sys.stderr,
+    )
+    if debug:
+        traceback.print_exception(err)
     return EXIT_ERROR
 
 
@@ -406,7 +439,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run slopfence from the command line and return the exit code.
 
-    0 ok, 1 issues, 2 error, 130 stopped with Ctrl-C.
+    0 ok, 1 issues, 2 error (also a bug in slopfence itself), 130 stopped with Ctrl-C.
     """
     _use_utf8_output()
     parser = build_parser()
@@ -423,3 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("slopfence: interrupted", file=sys.stderr)
         _end_like_an_interrupted_program()
         return EXIT_INTERRUPTED
+    except Exception as err:
+        # Whatever nothing below expected: a bug in slopfence. Python would end with
+        # status 1 and a traceback, and 1 means "issues found".
+        return _crashed(err)
