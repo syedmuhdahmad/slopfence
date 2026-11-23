@@ -7,6 +7,7 @@ import stat
 import threading
 import time
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -409,6 +410,27 @@ def test_save_leaves_no_temporary_file_when_it_fails(pypi, monkeypatch):
     assert list(registry.cache_file.parent.iterdir()) == []
 
 
+def test_no_home_folder_means_no_cache_on_disk(tmp_path, monkeypatch):
+    """A user without a home folder, and with no valid cache folder set, still gets
+    answers: the run goes on without a cache on disk, and writes nothing."""
+
+    def no_home(cls):
+        """Fail like ``Path.home`` does when Python finds no home folder."""
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.delenv("SLOPFENCE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", ".cache")
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    monkeypatch.setattr(PyPIRegistry, "_query", lambda self, key: Lookup("ghost" not in key))
+    monkeypatch.chdir(tmp_path)
+    registry = PyPIRegistry()
+    assert registry.cache_file is None
+    assert registry.exists("requests") is True
+    assert registry.exists("ghost-pkg") is False
+    registry.save()
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
 def test_cache_file_keeps_its_permissions(pypi):
     """A cache file that was made private stays private when a later run rewrites it (#70)."""
@@ -479,3 +501,18 @@ def test_cache_that_may_not_be_replaced_stays_whole(pypi, locked):
         assert registry.cache_file.read_text(encoding="utf-8") == before
     finally:
         target.chmod(was)
+
+
+def test_relative_xdg_cache_home_is_not_used(tmp_path, monkeypatch):
+    """A relative ``XDG_CACHE_HOME`` is not valid, says the XDG specification. Used all
+    the same, it would name a folder of the project that is checked, and a ``pypi.json``
+    that the project brings along would answer for PyPI."""
+    monkeypatch.delenv("SLOPFENCE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CACHE_HOME", ".cache")
+    assert PyPIRegistry().cache_file == tmp_path / "home" / ".cache" / "slopfence" / "pypi.json"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert PyPIRegistry().cache_file == tmp_path / "xdg" / "slopfence" / "pypi.json"
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "own"))
+    assert PyPIRegistry().cache_file == tmp_path / "own" / "slopfence" / "pypi.json"

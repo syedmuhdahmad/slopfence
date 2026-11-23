@@ -21,6 +21,10 @@ _RESET, _BOLD, _DIM, _GREEN = "\033[0m", "\033[1m", "\033[2m", "\033[32m"
 # the terminal, a line end starts a new line of the log), the two Unicode line ends,
 # and the characters that change the direction of the text that follows them.
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+# The two ways to write a command that GitHub Actions reads from a log. The runner
+# takes ``::`` at the start of a line, after any white space. It takes ``##[``, the
+# older form, anywhere in a line.
+_COMMAND_AT_START, _COMMAND_ANYWHERE = "::", "##["
 
 
 def printable(text: str) -> str:
@@ -28,26 +32,43 @@ def printable(text: str) -> str:
 
     File names, comments and whatever else a report quotes come from the project
     that is checked. Printed as they are, they could clear the screen, colour or
-    hide text, or start a line of their own in the log of a CI run.
+    hide text, or start a line of their own in the log of a CI run. ``##[`` is
+    written as ``#\\x23[``: GitHub Actions reads it as a command wherever it stands.
     """
-    return _UNPRINTABLE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+    shown = _UNPRINTABLE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+    return shown.replace(_COMMAND_ANYWHERE, "#\\x23[")
+
+
+def _heading(path: str) -> str:
+    """The line of a text report that names a file. It never reads as a workflow command.
+
+    A path stands at the start of its line. ``./`` in front of a name that starts
+    like a command names the same file. The runner drops the white space in front
+    of a line before it looks, so a name that starts with spaces counts as well.
+    """
+    shown = printable(path)
+    return f"./{shown}" if shown.lstrip().startswith(_COMMAND_AT_START) else shown
 
 
 def text(result: Result, color: bool = False, strict: bool = False) -> str:
-    """Human-readable report: findings grouped by file, a summary, then warnings and notes."""
+    """Human-readable report: findings grouped by file, a summary, then warnings and notes.
+
+    Paths, messages and notes go through ``printable``: the only control characters
+    in the report are its own line ends and, with ``color``, its own colours.
+    """
 
     def paint(s: str, *codes: str) -> str:
         return f"{''.join(codes)}{s}{_RESET}" if color else s
 
     out: list[str] = []
     for path, group in groupby(result.findings, key=lambda f: f.path):
-        out.append(paint(path, _BOLD))
+        out.append(paint(_heading(path), _BOLD))
         for f in group:
             tint = _COLOR[f.severity]
             loc = paint(f"{f.line}:{f.col}".ljust(8), _DIM)
             rule = paint(f.rule, _BOLD, tint)
             sev = paint(f.severity.value, tint)
-            out.append(f"  {loc} {rule}  {f.message}  [{sev}]")
+            out.append(f"  {loc} {rule}  {printable(f.message)}  [{sev}]")
         out.append("")
 
     counts = Counter(f.severity for f in result.findings)
@@ -69,8 +90,10 @@ def text(result: Result, color: bool = False, strict: bool = False) -> str:
         out.append(paint(f"No issues found in {result.files_checked} files.", _GREEN))
     label = "error" if strict else "warning"
     for path in result.parse_errors:
-        out.append(f"{label}: could not parse {path} (not valid Python), so it was not checked")
-    out.extend(f"note: {note}" for note in result.notes)
+        out.append(
+            f"{label}: could not parse {printable(path)} (not valid Python), so it was not checked"
+        )
+    out.extend(f"note: {printable(note)}" for note in result.notes)
     return "\n".join(out)
 
 

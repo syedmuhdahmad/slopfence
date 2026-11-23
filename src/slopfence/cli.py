@@ -238,7 +238,8 @@ def _print_rules(severity: Mapping[str, Severity]) -> None:
 
 def _error(message: str) -> int:
     """Say on stderr why the run can't go on, and return the exit code for an error."""
-    print(f"slopfence: error: {message}", file=sys.stderr)
+    # A message can name a file of the project, or quote git.
+    print(f"slopfence: error: {reporters.printable(message)}", file=sys.stderr)
     return EXIT_ERROR
 
 
