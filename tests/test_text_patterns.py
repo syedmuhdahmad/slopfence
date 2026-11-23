@@ -276,6 +276,14 @@ def load_video(path):
     return decode(path)
 '''
 
+FIRST_LINE = '''
+def load(path):
+    """>>> clip = load("clip.mp4")  # Replace this with your own file
+    ... # add your logic here
+    """
+    return decode(path)
+'''
+
 CODE_BLOCK = '''
 def config_context(**settings):
     """Change the settings for a block of code::
@@ -289,7 +297,7 @@ def config_context(**settings):
 '''
 
 
-@pytest.mark.parametrize("code", [DOCTEST, CODE_BLOCK])
+@pytest.mark.parametrize("code", [DOCTEST, FIRST_LINE, CODE_BLOCK])
 def test_comment_inside_a_docstring_example_is_not_flagged(write, check, code):
     """A comment in example code that a docstring shows speaks to whoever copies the
     example, like code under examples/. Seen in transformers and scikit-learn."""
@@ -299,8 +307,9 @@ def test_comment_inside_a_docstring_example_is_not_flagged(write, check, code):
 
 def test_docstring_prose_and_real_comments_are_still_flagged(write, check):
     """Only a line that is itself a code comment, or a doctest line, is example code.
-    The prose of a docstring is checked, also a line that starts with "...", and so
-    is every real comment."""
+    The prose of a docstring is checked, and so is every real comment. A line that
+    starts with "..." is prose when no doctest line stands right above it, also
+    when it names an issue with "#"."""
     write(
         "src/app.py",
         "def charge(card):\n"
@@ -308,11 +317,13 @@ def test_docstring_prose_and_real_comments_are_still_flagged(write, check):
         "\n"
         "    In a real implementation, this calls the payment provider.\n"
         "    ... rest of the implementation\n"
+        "\n"
+        "    ... rest of the implementation (issue #123)\n"
         '    """\n'
         "    # Your code here\n"
         "    return True\n",
     )
-    assert rule_lines(check("SLOP010"), "SLOP010") == [4, 5, 7]
+    assert rule_lines(check("SLOP010"), "SLOP010") == [4, 5, 7, 9]
 
 
 def test_chat_text_inside_a_docstring_example_is_still_flagged(write, check):

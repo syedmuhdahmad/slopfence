@@ -68,10 +68,29 @@ CHAT_PATTERNS = [
 ]
 
 
-# A line of a docstring that is example code: it starts with "#", it starts with the
-# doctest prompt ">>>", or it starts with "..." and holds a comment. Three dots alone
-# can also start a line of prose about code that was left out, which is still checked.
-_EXAMPLE_CODE = re.compile(r"\s*(?:#|>>>|\.\.\.[^#]*#)")
+# How a line of a docstring starts when it is example code. The quotation marks that
+# open the docstring can stand before it on the first line.
+_OPENING = r"\s*(?:[rRuU]?(?:\"{3}|'{3}|\"|'))?\s*"
+_COMMENT_LINE = re.compile(_OPENING + "#")
+_DOCTEST_LINE = re.compile(_OPENING + ">>>")
+_CONTINUATION_LINE = re.compile(r"\s*\.\.\.")
+
+
+def _docstring_prose(lines: Iterable[TextSpan]) -> Iterator[TextSpan]:
+    """The lines of docstrings that are prose: all but the lines of example code.
+
+    Example code is a line that is itself a comment, a doctest line (it starts with
+    the prompt ``>>>``), and the lines that go on with it right below (``...``).
+    Three dots anywhere else start a line of prose, whatever comes later in it.
+    """
+    doctest_line = 0  # the number of the last line that was doctest code
+    for span in lines:
+        text = span.text
+        goes_on = doctest_line == span.line - 1 and _CONTINUATION_LINE.match(text)
+        if _DOCTEST_LINE.match(text) or goes_on:
+            doctest_line = span.line
+        elif not _COMMENT_LINE.match(text):
+            yield span
 
 
 def _scan(
@@ -97,8 +116,7 @@ def check_placeholders(src: SourceFile) -> Iterator[Finding]:
     # The same goes for example code that a docstring shows: a comment in it, on a
     # line of its own or after the code, speaks to whoever copies the example. The
     # prose of the docstring is still checked.
-    prose = (line for line in src.docstring_lines if not _EXAMPLE_CODE.match(line.text))
-    spans = (*src.comments, *prose)
+    spans = (*src.comments, *_docstring_prose(src.docstring_lines))
     yield from _scan(spans, src.rel, "SLOP010", PLACEHOLDER_PATTERNS, "Placeholder left in code")
 
 
