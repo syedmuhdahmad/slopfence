@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Collection, Iterator
+from collections.abc import Iterator
 
 from slopfence.models import Finding
 from slopfence.source import SourceFile, child_statements, walk
@@ -368,7 +368,7 @@ def _name_ends(name: str) -> tuple[str, str] | None:
     return (words[0], words[-1]) if len(words) > 1 else None
 
 
-def _is_family_handler(func: _Function, owner: ast.ClassDef, stubs: Collection[str]) -> bool:
+def _is_family_handler(func: _Function, owner: ast.ClassDef, stubs: set[str]) -> bool:
     """Whether a method that looks like a stub is one of a family of handlers that
     mostly do real work.
 
@@ -378,24 +378,38 @@ def _is_family_handler(func: _Function, owner: ast.ClassDef, stubs: Collection[s
     simplest case needs a fixed answer. ``stubs`` are the methods of the class that
     look like stubs. When they are more than one in ``FAMILY_SHARE`` of the family,
     nothing shows that the fixed answers are on purpose.
+
+    Only implementations are members: an ``@overload`` declaration or an abstract
+    method is none, and a name that is defined more than once counts once. Only the
+    stubs among the members count, not a stub of the class that takes other
+    parameters.
     """
     ends = _name_ends(func.name)
     if ends is None:
         return False
     parameters = _parameters(func)
-    alike = [
-        _name_ends(method.name)
+    alike = {
+        method.name
         for method in owner.body
         if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not _exempt_function(method)
         and _parameters(method) == parameters
-    ]
-    stub_ends = [_name_ends(name) for name in stubs]
+    }
     for position in (0, 1):
-        size = sum(other is not None and other[position] == ends[position] for other in alike)
-        fixed = sum(other is not None and other[position] == ends[position] for other in stub_ends)
-        if size >= FAMILY_SIZE and fixed * FAMILY_SHARE <= size:
+        members = {
+            name
+            for name in alike
+            if (other := _name_ends(name)) is not None and other[position] == ends[position]
+        }
+        if len(members) >= FAMILY_SIZE and len(members & stubs) * FAMILY_SHARE <= len(members):
             return True
     return False
+
+
+def _returns_fixed_value(func: _Function) -> bool:
+    """Whether a function with a docstring does nothing but return a hardcoded value."""
+    body = func.body[1:]
+    return len(body) == 1 and isinstance(body[0], ast.Return) and _is_fake_value(body[0].value)
 
 
 def check_stub_functions(src: SourceFile) -> Iterator[Finding]:
@@ -409,12 +423,19 @@ def check_stub_functions(src: SourceFile) -> Iterator[Finding]:
         if (finding := _stub_finding(func, src.rel)) is not None
     ]
     # The methods of each class that look like stubs: a family is judged as a whole.
-    stubs: dict[ast.ClassDef, list[str]] = {}
+    stubs: dict[ast.ClassDef, set[str]] = {}
     for func, owner, _ in found:
         if owner is not None:
-            stubs.setdefault(owner, []).append(func.name)
+            stubs.setdefault(owner, set()).add(func.name)
     for func, owner, finding in found:
-        if owner is None or not _is_family_handler(func, owner, stubs[owner]):
+        # A family explains a fixed answer. It does not explain a method that does
+        # nothing where a value was promised: that one is reported as before.
+        in_family = (
+            owner is not None
+            and _returns_fixed_value(func)
+            and _is_family_handler(func, owner, stubs[owner])
+        )
+        if not in_family:
             yield finding
 
 
@@ -432,12 +453,7 @@ def _stub_finding(func: _Function, rel: str) -> Finding | None:
     promises = _first_word(doc) in ACTION_VERBS
     stmt = body[0]
     # Hardcoded result while ignoring every input: validate_token(token) -> True.
-    fake = (
-        len(body) == 1
-        and isinstance(stmt, ast.Return)
-        and _is_fake_value(stmt.value)
-        and (_ignores_its_inputs(func) or placeholder)
-    )
+    fake = _returns_fixed_value(func) and (_ignores_its_inputs(func) or placeholder)
     # Nothing returned although the signature promises a value.
     empty = _returns_nothing(body) and _promises_a_value(func)
     if not (

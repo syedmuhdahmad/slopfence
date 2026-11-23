@@ -297,6 +297,42 @@ def test_methods_with_other_parameters_are_no_family(write, check):
     assert [f.subject for f in check("SLOP011").findings] == ["get_none"]
 
 
+def test_overload_declarations_do_not_make_a_family(write, check):
+    """Four ``@overload`` declarations and one implementation are one method, not five
+    handlers: its fixed answer is reported."""
+    code = "from typing import overload\n\n\nclass Visitor:\n"
+    for kind in KINDS[:4]:
+        code += f"    @overload\n    def visit_node(self, node: {kind}) -> bool: ...\n\n"
+    code += (
+        '    def visit_node(self, node):\n        """Validates the node."""\n        return True\n'
+    )
+    write("src/app.py", code)
+    assert [f.subject for f in check("SLOP011").findings] == ["visit_node"]
+
+
+def test_stub_with_other_parameters_does_not_count_against_a_family(write, check):
+    """Five ``*_schema(self, schema)`` methods with one fixed answer are a family. A
+    stub of the same class that takes another parameter is no member: it is reported
+    itself, and it does not take the family's exemption away."""
+    names = [f"{kind}_schema" for kind in KINDS[:5]]
+    code = _handlers(names, fixed={"none_schema"})
+    code += '    def other_schema(self, extra):\n        """Generates the schema for other."""\n'
+    code += "        return {'type': 'x'}\n"
+    write("src/app.py", code)
+    assert [f.subject for f in check("SLOP011").findings] == ["other_schema"]
+
+
+def test_method_that_does_nothing_in_a_family_is_still_flagged(write, check):
+    """A family explains a fixed answer. A method that promises a value and only
+    says ``pass`` is a missing implementation, in a family as anywhere."""
+    names = [f"visit_{kind}" for kind in KINDS[:4]]
+    code = _handlers(names, fixed=set(), params="self, node").replace("schema", "node")
+    code += '    def visit_none(self, node) -> dict:\n        """Generates the node for none."""\n'
+    code += "        pass\n"
+    write("src/app.py", code)
+    assert [f.subject for f in check("SLOP011").findings] == ["visit_none"]
+
+
 def test_functions_of_a_module_are_no_family(write, check):
     """The rule is about the methods of one class."""
     code = ""
