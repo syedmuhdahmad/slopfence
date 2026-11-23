@@ -236,15 +236,22 @@ def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile 
     if not comments or "#" not in text:
         return src  # nothing to tokenize for
     try:
-        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-            if tok.type != tokenize.COMMENT:
-                continue
-            line, col = tok.start
-            src.comments.append(TextSpan(line, col + 1, tok.string))
-            if IGNORE_FILE_RE.search(tok.string):
-                src.ignore_file = True
-            elif rules := line_ignores(tok.string):
-                src.ignores[line] = rules
+        # The tokenizer warns too, from Python 3.12 on: about an invalid escape in an
+        # f-string, for one. With warnings as errors (``PYTHONWARNINGS=error``) that
+        # would end the loop, and every comment below would be lost, with its
+        # findings and its ignore directives. As above, the filters of the process
+        # must not decide what a file says.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+                if tok.type != tokenize.COMMENT:
+                    continue
+                line, col = tok.start
+                src.comments.append(TextSpan(line, col + 1, tok.string))
+                if IGNORE_FILE_RE.search(tok.string):
+                    src.ignore_file = True
+                elif rules := line_ignores(tok.string):
+                    src.ignores[line] = rules
     # The tokenizer turns down some text that the parser takes. The file keeps its
     # tree, and the comments up to that place. SyntaxError includes IndentationError.
     # ValueError: a carriage return before a character that is not ASCII ends with a

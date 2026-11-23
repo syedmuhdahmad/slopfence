@@ -9,7 +9,7 @@ import pytest
 
 import slopfence
 from slopfence.source import char_column, child_statements, children, load, parse, walk
-from tests.conftest import needs_parser_depth_limit
+from tests.conftest import needs_parser_depth_limit, rule_lines
 
 # Every place a statement can sit: bodies, ``else`` and ``finally`` blocks, ``except``
 # handlers and ``match`` cases. Lambdas and comprehensions hold expressions only.
@@ -201,3 +201,42 @@ def test_char_column_counts_characters_where_ast_counts_bytes():
     )  # one byte more for \u00e9, three for the emoji
     assert char_column(line, node.col_offset) == line.index("import")
     assert char_column("plain", 3) == 3 and char_column("", 0) == 0
+
+
+# An f-string with an escape that Python warns about, and comments on and below its line.
+WARNED = 'x = 1\nPAT = f"\\{x}"  # first\n# slopfence: ignore[SLOP051]\n# I hope this helps!\n'
+
+
+@pytest.mark.parametrize("action", ["error", "always", "ignore", "default"])
+def test_comments_are_read_whatever_the_warning_filters_are(tmp_path, action):
+    """From Python 3.12 on, reading the comments of such a file raises a warning.
+    With warnings as errors (``PYTHONWARNINGS=error``, as many CI runs set it), that
+    ended the reading: every comment below was lost, with its findings and its
+    ignore directives."""
+    with warnings.catch_warnings():
+        warnings.simplefilter(action)
+        src = parse(WARNED, tmp_path / "app.py", "app.py")
+    assert src is not None
+    assert [(c.line, c.text) for c in src.comments] == [
+        (2, "# first"),
+        (3, "# slopfence: ignore[SLOP051]"),
+        (4, "# I hope this helps!"),
+    ]
+    assert src.ignores == {3: frozenset({"SLOP051"})}
+
+
+def test_reading_comments_prints_no_warning(tmp_path):
+    """The warning is about the checked code, not about slopfence: it is not passed on."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        parse(WARNED, tmp_path / "app.py", "app.py")
+    assert caught == []
+
+
+def test_finding_below_a_warned_line_is_reported_with_warnings_as_errors(write, check):
+    """The same from a whole run: the chat text below the f-string is still found."""
+    write("src/app.py", 'x = 1\nPAT = f"\\{x}"\n# I hope this helps!\n')
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = check("SLOP051")
+    assert rule_lines(result, "SLOP051") == [3]

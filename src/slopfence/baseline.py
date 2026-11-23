@@ -41,7 +41,8 @@ _NOT_A_BASELINE = (
 # What to do about a baseline that ``names_no_file``. {} is the project root.
 _NO_FILE_HERE = (
     "no file that exists in {}. A baseline's paths are relative to the project root, and "
-    "without a git repository the root depends on where slopfence is run. Run slopfence "
+    "without a git repository or a pyproject.toml the root depends on where slopfence is "
+    "run. Run slopfence "
     "from the folder the baseline was written from"
 )
 
@@ -368,8 +369,9 @@ def names_no_file(entries: Mapping[Key, int], root: Path) -> bool:
     """Whether a baseline names files of the project and not one of them exists.
 
     Then it was most likely written for another folder: every path in the file is
-    relative to the project root, and without a git repository that is the folder
-    slopfence is run from (see ``cli._project_root``). Or the files are all gone.
+    relative to the project root, and without a git repository or a ``pyproject.toml``
+    that is the folder slopfence is run from (see ``cli._project_root``). Or the files
+    are all gone.
     Nobody can tell the two apart, so such a baseline is neither called out of date
     nor replaced.
     """
