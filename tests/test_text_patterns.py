@@ -168,15 +168,17 @@ def test_placeholders_still_flagged_in_similar_names(write, check):
     "comment",
     [
         "# As an AI language model, I cannot run this",
-        "# as an AI language model this is beyond what can be done",
         "# As an AI, I don't have access to your files",
-        "# As an AI I can't browse the web, so check the link yourself",
+        "# As an AI, I\u2019m not able to browse the web, so check the link yourself",
         "# As an AI assistant, I am not able to test this",
         "# Note: as an AI model, I'm unable to verify the output",
+        "# As an AI, my knowledge is limited to what I was trained on",
+        "# As an AI language model, my training data ends before this release",
     ],
 )
 def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
-    """The phrase is chat text when the writer goes on about itself in the first person."""
+    """The phrase is chat text when, after a comma, the writer goes on about itself in
+    the first person: "I" or "my"."""
     write("src/app.py", f"x = 1\n{comment}\n")
     assert rule_lines(check("SLOP051"), "SLOP051") == [2]
 
@@ -195,6 +197,15 @@ def test_an_assistant_that_speaks_of_itself_is_flagged(write, check, comment):
         "# Use it as an AI assistant for code review",
         "# Works as an AI I/O layer between the model and the tools",
         "# Counted as an aid allocation, so only the stored choice applies",
+        # A language model as a thing that is used, not as the one who speaks.
+        "# Use it as an AI language model for text classification",
+        # "I" and "my" without the comma: the writer, in a clause about the model.
+        "# Use it as an AI model I trained for classification",
+        "# Loaded as an AI model my team trained last year",
+        "# Wrap the client as an AI assistant I can swap out in tests",
+        # A comma, and then no first person.
+        "# Treat it as an AI, i.e. as a black box",
+        "# Served as an AI, in the same process as the tools",
     ],
 )
 def test_ai_as_a_plain_word_is_not_flagged(write, check, comment):
