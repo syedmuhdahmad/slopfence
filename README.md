@@ -111,6 +111,14 @@ SLOP040 = "medium"
 
 `baseline` is explained in [Baseline: start with the code you have](#baseline-start-with-the-code-you-have).
 
+**How the project root is found.** The config is read from the `pyproject.toml` at the project root. `exclude` patterns, `per-file-ignores`, the `baseline` key and the paths in a report are relative to that folder. slopfence finds it from the first path you give:
+
+1. The top folder of the git repository the path is in.
+2. Without git (a source archive, a Docker build context, a CI export without `.git`): the nearest folder at or above the path whose `pyproject.toml` has a `[tool.slopfence]` table. When no `pyproject.toml` has that table, the nearest folder with a `pyproject.toml`.
+3. Without that too: the folder you run slopfence from when the path is inside it, and else the path's own folder.
+
+So `slopfence src` in the project, `slopfence .` in `src`, and `slopfence proj/src` from the folder above all use the same config and report the same paths.
+
 Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--min-package-age`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`, `--baseline`) replace the matching config values. `per-file-ignores` and `severity` can only be set in the config. Unknown keys, rule IDs and severities are reported as errors (exit code `2`).
 
 ### Ignoring a finding
@@ -173,7 +181,7 @@ That is the file, the rule, what the finding is about, and how many there are. "
 - `--write-baseline` records every finding of that run and reports none. Use the options your normal runs use (`--select`, `--check-imports`…). Run it online: without answers from PyPI there are no `SLOP001` or `SLOP002` findings to record, and a note says so. It can't be combined with `--diff`.
 - `--write-baseline` only replaces a baseline. It stops if `FILE` is some other file. It also stops if `FILE` holds findings that this run does not check: for files outside the paths you give, for files you exclude, or for rules that are switched off. Check everything the baseline holds, or delete `FILE` first.
 - `baseline` in the config is relative to the project root. `--baseline FILE` is relative to the folder you are in, and it replaces the config value. `--no-baseline` shows everything again.
-- The paths inside the file are relative to the project root. That is the git repository the checked path is in. Without git, it is the folder you run slopfence from (or the checked folder, when that is somewhere else), so run slopfence the same way every time. If no file that the baseline names exists there, slopfence says so in a note, and `--write-baseline` does not replace the file.
+- The paths inside the file are relative to the project root. That is the git repository the checked path is in, and without git the folder of the project's `pyproject.toml` (see [how the project root is found](#configuration)). Without git and without a `pyproject.toml`, it is the folder you run slopfence from (or the checked folder, when that is somewhere else), so run slopfence the same way every time. If no file that the baseline names exists there, slopfence says so in a note, and `--write-baseline` does not replace the file.
 - A file outside the project (`slopfence . ../shared`) is recorded with its full path. That row only matches on a machine where the file has the same path. slopfence only looks at such a file when you give its path to the run.
 - A baseline file that is missing or can't be read is an error (exit code `2`), not an empty baseline.
 - Files that can't be parsed are not findings, so they can't be baselined. Use `exclude` for those.
