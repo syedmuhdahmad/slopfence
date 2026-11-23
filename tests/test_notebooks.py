@@ -1280,18 +1280,20 @@ def test_positions_in_a_cell_that_is_one_long_string(tmp_path):
         assert line == 1 and text[col - 1 :].startswith(f"import {name}")
 
 
-def test_a_long_string_is_gone_through_once_not_once_per_name(monkeypatch):
-    """The escapes of a source string are listed once, however many names the string
-    holds. Listed again for every name, a cell of 20,000 pip lines took a minute."""
-    listed = []
-    real = notebooks._escapes
+@pytest.mark.parametrize("step", ["_escapes", "_line_offsets"])
+def test_a_long_string_is_gone_through_once_not_once_per_name(monkeypatch, step):
+    """The escapes of a source string and the line starts of a cell are worked out
+    once, however many names the cell holds. Worked out again for every name, the
+    time grows with the square of the cell: 20,000 pip lines took a minute (#104)."""
+    calls = []
+    real = getattr(notebooks, step)
 
-    def counted(body):
-        """List the escapes, and note that it was done."""
-        listed.append(len(body))
-        return real(body)
+    def counted(text):
+        """Do the step, and note that it was done."""
+        calls.append(len(text))
+        return real(text)
 
-    monkeypatch.setattr(notebooks, "_escapes", counted)
+    monkeypatch.setattr(notebooks, step, counted)
     scanned = scan_notebook(_one_string_cell(300), "n.ipynb", True)
     assert len(scanned.dependencies) == 300 and len(scanned.imports) == 300
-    assert len(listed) == 1
+    assert len(calls) == 1

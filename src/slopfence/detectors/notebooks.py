@@ -476,6 +476,15 @@ def _brings_code(words: list[Word], magic: bool) -> bool:
     return names[0] in _FETCH_COMMANDS or tuple(names[:2]) in _FETCH_SUBCOMMANDS
 
 
+def _line_offsets(text: str) -> list[int]:
+    """The offset in ``text`` of the start of each of its lines.
+
+    Worked out once per cell. An import is then looked up by its line, instead of
+    counting to it from the start of the cell again for every import.
+    """
+    return [0, *accumulate(len(line) + 1 for line in text.split("\n"))]
+
+
 def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
     """Every ``pip install`` command of a cell, and every command that brings in code
     in another way (see ``_brings_code``): that one as an install that names nothing.
@@ -575,8 +584,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                             own_source=sourced,
                         )
                     )
-            # The offset in the cell's text of the start of each of its lines.
-            starts = [0, *accumulate(len(line) + 1 for line in cell.text.split("\n"))]
+            starts = _line_offsets(cell.text)
             for name, lineno, col in view.imports:
                 at = starts[lineno - 1] + col
                 off = view.ignores.get(lineno, frozenset())
