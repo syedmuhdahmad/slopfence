@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 import random
+import socket
 import time
 from collections import Counter
 from pathlib import Path
@@ -1928,6 +1929,37 @@ def test_named_pipe_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     assert main(["--offline", "--baseline", "accepted.json", "."]) == 2
     assert "accepted.json is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="this system has no socket files")
+def test_socket_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys):
+    """A socket can't be opened like a file. The message is the same as for a pipe,
+    whatever the system's own error for it is."""
+    write("app.py", "x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind("accepted.json")  # a short relative name: socket paths are limited
+        assert main(["--offline", "--baseline", "accepted.json", "."]) == 2
+    assert "accepted.json is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
+def test_pipe_that_takes_the_place_of_a_baseline_is_not_read(write, tmp_path, monkeypatch, capsys):
+    """What a path names can change between a look at it and the reading. The file is
+    asked what it is once it is open: a pipe put in the place of a baseline in that
+    moment is refused, and the run does not wait on it."""
+    write("app.py", "x = 1\n")
+    os.mkfifo(tmp_path / "accepted.json")
+    monkeypatch.chdir(tmp_path)
+    # As if the name had still been a plain file when it was looked at.
+    isfile = os.path.isfile
+    monkeypatch.setattr(
+        baselinemod.os.path,
+        "isfile",
+        lambda path: Path(path).name == "accepted.json" or isfile(path),
+    )
+    assert main(["--offline", "--write-baseline", "accepted.json", "."]) == 2
+    assert "can't write baseline accepted.json: it is not a regular file" in capsys.readouterr().err
 
 
 @pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
