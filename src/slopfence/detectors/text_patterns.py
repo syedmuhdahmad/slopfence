@@ -50,7 +50,14 @@ CHAT_PATTERNS = [
         r"file|class|method|snippet|module)\b",
         r"\bbelow is (the|an?) (updated|revised|complete|full|modified|corrected) "
         r"(version|code|function|implementation|script|file|class|method|snippet|module)\b",
-        r"\bas an ai( language model)?\b",
+        # An assistant that speaks of itself: after the phrase and a comma it goes on
+        # in the first person. Everything else with these words is prose about
+        # software: "an AI SDK data part", "an AI language model for classification",
+        # and without the comma "an AI model I trained", where "I" is the writer.
+        # A quotation mark right before the phrase makes it an example that a comment
+        # talks about: 'Reject the phrase "As an AI, I cannot help"'.
+        r"(?<![\"'`\u201c\u2018])\bas an ai( language model| assistant| model)?,\s+"
+        r"(i(?=[\s'\u2019])|my\s)",
         r"\bi hope (this|that) helps\b",
         r"\blet me know if (you('d| would) like|you need|you have any (other |more |further )?"
         r"questions|there('s| is) anything else|you want)\b",
