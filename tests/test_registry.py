@@ -7,6 +7,7 @@ import stat
 import threading
 import time
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -407,6 +408,27 @@ def test_save_leaves_no_temporary_file_when_it_fails(pypi, monkeypatch):
     monkeypatch.setattr(os, "replace", fail)
     registry.save()  # must not raise
     assert list(registry.cache_file.parent.iterdir()) == []
+
+
+def test_no_home_folder_means_no_cache_on_disk(tmp_path, monkeypatch):
+    """A user without a home folder, and with no valid cache folder set, still gets
+    answers: the run goes on without a cache on disk, and writes nothing."""
+
+    def no_home(cls):
+        """Fail like ``Path.home`` does when Python finds no home folder."""
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.delenv("SLOPFENCE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", ".cache")
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    monkeypatch.setattr(PyPIRegistry, "_query", lambda self, key: Lookup("ghost" not in key))
+    monkeypatch.chdir(tmp_path)
+    registry = PyPIRegistry()
+    assert registry.cache_file is None
+    assert registry.exists("requests") is True
+    assert registry.exists("ghost-pkg") is False
+    registry.save()
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")

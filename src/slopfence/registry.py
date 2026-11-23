@@ -261,6 +261,30 @@ def _read_listing(
     return _Listing(True, _unpacked(body, encoding, complete), complete)
 
 
+def _default_cache_folder() -> Path | None:
+    """The folder of the cache when the caller names none. None when there is no place
+    for one.
+
+    ``SLOPFENCE_CACHE_DIR`` first, then ``XDG_CACHE_HOME``, then ``~/.cache``. A user
+    without a home folder (a container that sets no ``HOME`` for a user that is in no
+    password file) gets no cache on disk, and the run goes on.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    # A relative XDG_CACHE_HOME is not valid, and the specification says to ignore
+    # it. It would name a folder of the project that is checked, whose own pypi.json
+    # would then answer in PyPI's place.
+    # ``Path.is_absolute``: on Windows a full path has a drive, which
+    # ``os.path.isabs`` only asks for from Python 3.13 on.
+    is_full_path = Path(xdg).is_absolute()
+    base = os.environ.get("SLOPFENCE_CACHE_DIR") or (xdg if is_full_path else "")
+    if base:
+        return Path(base) / "slopfence"
+    try:
+        return Path.home() / ".cache" / "slopfence"
+    except RuntimeError:
+        return None
+
+
 class PyPIRegistry:
     """PyPI over HTTPS, with the answers cached on disk between runs.
 
@@ -285,16 +309,9 @@ class PyPIRegistry:
         is young or not by it.
         """
         if cache_dir is None:
-            xdg = os.environ.get("XDG_CACHE_HOME", "")
-            # A relative XDG_CACHE_HOME is not valid, and the specification says to
-            # ignore it. It would name a folder of the project that is checked, whose
-            # own pypi.json would then answer in PyPI's place.
-            # ``Path.is_absolute``: on Windows a full path has a drive, which
-            # ``os.path.isabs`` only asks for from Python 3.13 on.
-            is_full_path = Path(xdg).is_absolute()
-            base = os.environ.get("SLOPFENCE_CACHE_DIR") or (xdg if is_full_path else "")
-            cache_dir = Path(base) / "slopfence" if base else Path.home() / ".cache" / "slopfence"
-        self.cache_file = cache_dir / "pypi.json"
+            cache_dir = _default_cache_folder()
+        # None: there is no place for a cache. Every answer is then asked for anew.
+        self.cache_file = None if cache_dir is None else cache_dir / "pypi.json"
         self.timeout = timeout
         self.workers = workers
         self._now = time.time() if now is None else now
@@ -312,6 +329,8 @@ class PyPIRegistry:
 
     def _load(self) -> dict[str, Any]:
         """The content of the cache file. Empty if it can't be read or is no JSON object."""
+        if self.cache_file is None:
+            return {}
         try:
             data = json.loads(self.cache_file.read_text(encoding="utf-8"))
         # RecursionError: a damaged file can be nested more deeply than the parser takes.
@@ -321,7 +340,7 @@ class PyPIRegistry:
 
     def save(self) -> None:
         """Write the cache file, if anything changed. Called once, at the end of a run."""
-        if not self._dirty:
+        if not self._dirty or self.cache_file is None:
             return
         data = dict(self._cache)
         if self._meta:

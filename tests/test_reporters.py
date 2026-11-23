@@ -228,16 +228,33 @@ def test_control_characters_are_written_out_in_the_text_report():
 
 
 def test_no_line_of_the_text_report_is_a_workflow_command():
-    """GitHub Actions reads a line of a log that starts with ``::`` or ``##[`` as a
-    command. No file name can start such a line, at the top of the project or below."""
+    """GitHub Actions reads a line of a log as a command when it starts with ``::``,
+    after any white space, or when it holds ``##[`` anywhere. No file name, message or
+    note of the project makes such a line."""
     result = _hostile()
-    result.findings.append(Finding("SLOP051", "##[error]x.py", 1, 1, "Leftover AI chat text"))
+    result.findings.append(Finding("SLOP051", "##[error]x.py", 1, 1, "see ##[warning]here"))
+    result.findings.append(
+        Finding("SLOP051", "  ::stop-commands::token.py", 1, 1, "Leftover AI chat text")
+    )
+    result.parse_errors.append("sub/##[error]z.py")
+    result.notes.append("x ##[add-mask]y")
     for color in (False, True):
         lines = ANSI.sub("", reporters.text(result, color=color)).splitlines()
-        assert not [line for line in lines if line.lstrip().startswith(("::", "##["))]
+        assert not [line for line in lines if line.lstrip().startswith("::") or "##[" in line]
         assert "./::error file=README.md::pwned.py" in lines
-        assert "./##[error]x.py" in lines
+        assert "./  ::stop-commands::token.py" in lines
+        assert "#\\x23[error]x.py" in lines
+        assert any("see #\\x23[warning]here" in line for line in lines)
+        assert "note: x #\\x23[add-mask]y" in lines
         assert "sub/a\\n::error file=x::y.py" in lines
+
+
+def test_printable_breaks_every_legacy_command_marker():
+    """``##[`` is broken wherever it stands, and as often as it stands there. Other
+    text with ``#`` in it is left alone."""
+    assert reporters.printable("a##[b]##[c]") == "a#\\x23[b]#\\x23[c]"
+    assert "##[" not in reporters.printable("###[error]x")
+    assert reporters.printable("# a comment, #[x], ## heading") == "# a comment, #[x], ## heading"
 
 
 def test_colours_are_still_real_escape_sequences():

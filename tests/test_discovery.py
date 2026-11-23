@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from slopfence import engine as enginemod
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry
 from tests.conftest import FakeRegistry, rule_lines
@@ -255,3 +256,72 @@ def test_link_that_leads_back_to_itself_is_passed_over(tmp_path):
     assert discover_all([root], root)[0] == [root / "real.py"]
     result = run([root], root, OfflineRegistry())
     assert result.files_checked == 1 and result.parse_errors == []
+
+
+@needs_symlinks
+def test_named_link_out_of_the_project_lends_no_dependency_files(tmp_path, monkeypatch):
+    """A named path brings the dependency files of its own folder along. A link that
+    is not followed brings none: the folder it leads to is not searched."""
+    root, other = outside(tmp_path)
+    (other / "private.py").write_text("x = 1\n", encoding="utf-8")
+    (other / "requirements.txt").write_text("internal-corp-token-abc123\n", encoding="utf-8")
+    (root / "innocent.py").symlink_to(other / "private.py")
+    read = []
+    real = enginemod.build_index
+
+    def recording(root, modules, dependency_files, lock_files, **options):
+        """Note which dependency and lock files the run reads."""
+        read.extend([*dependency_files, *lock_files])
+        return real(root, modules, dependency_files, lock_files, **options)
+
+    monkeypatch.setattr(enginemod, "build_index", recording)
+    registry = RecordingRegistry()
+    result = run([root / "innocent.py"], root, registry)
+    assert read == []
+    assert registry.queries == []
+    assert result.files_checked == 0
+
+
+@needs_symlinks
+def test_named_link_to_a_folder_outside_the_project_is_not_walked(tmp_path):
+    """A link in the project to a folder elsewhere, named on the command line, is not
+    a way into that folder: none of its files is read."""
+    root, other = outside(tmp_path)
+    (other / "private.py").write_text(CHAT, encoding="utf-8")
+    (other / "requirements.txt").write_text("internal-corp-token-abc123\n", encoding="utf-8")
+    (root / "vendor").symlink_to(other, target_is_directory=True)
+    assert discover_all([root / "vendor"], root) == ([], [], [])
+    registry = RecordingRegistry()
+    result = run([root / "vendor"], root, registry)
+    assert result.findings == []
+    assert result.files_checked == 0
+    assert registry.queries == []
+
+
+@needs_symlinks
+def test_named_folder_is_still_walked_through_a_link_inside_the_project(tmp_path):
+    """A link to a folder of the same project is followed, and a folder outside the
+    project that is named itself is still checked."""
+    root, other = outside(tmp_path)
+    (root / "pkg").mkdir()
+    (root / "pkg" / "app.py").write_text(CHAT, encoding="utf-8")
+    (root / "alias").symlink_to(root / "pkg", target_is_directory=True)
+    (other / "app.py").write_text(CHAT, encoding="utf-8")
+    assert discover_all([root / "alias"], root)[0] == [root / "pkg" / "app.py"]
+    assert discover_all([other], root)[0] == [other / "app.py"]
+
+
+@needs_symlinks
+def test_named_link_that_leads_back_to_itself_is_passed_over(tmp_path):
+    """A link in a loop names nothing, inside the project or outside it. Named itself,
+    it ended a run on Python 3.10 to 3.12 with an error when its path was resolved."""
+    root, other = outside(tmp_path)
+    (root / "loop.py").symlink_to(root / "loop.py")
+    (other / "a.py").symlink_to(other / "b.py")
+    (other / "b.py").symlink_to(other / "a.py")
+    (root / "real.py").write_text("x = 1\n", encoding="utf-8")
+    for named in (root / "loop.py", other / "a.py"):
+        assert discover_all([named], root) == ([], [], [])
+        result = run([named, root / "real.py"], root, OfflineRegistry())
+        assert result.files_checked == 1
+        assert result.parse_errors == []

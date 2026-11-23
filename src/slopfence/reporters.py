@@ -21,8 +21,10 @@ _RESET, _BOLD, _DIM, _GREEN = "\033[0m", "\033[1m", "\033[2m", "\033[32m"
 # the terminal, a line end starts a new line of the log), the two Unicode line ends,
 # and the characters that change the direction of the text that follows them.
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
-# How a line of a log starts that GitHub Actions reads as a command.
-_WORKFLOW_COMMANDS = ("::", "##[")
+# The two ways to write a command that GitHub Actions reads from a log. The runner
+# takes ``::`` at the start of a line, after any white space. It takes ``##[``, the
+# older form, anywhere in a line.
+_COMMAND_AT_START, _COMMAND_ANYWHERE = "::", "##["
 
 
 def printable(text: str) -> str:
@@ -30,19 +32,22 @@ def printable(text: str) -> str:
 
     File names, comments and whatever else a report quotes come from the project
     that is checked. Printed as they are, they could clear the screen, colour or
-    hide text, or start a line of their own in the log of a CI run.
+    hide text, or start a line of their own in the log of a CI run. ``##[`` is
+    written as ``#\\x23[``: GitHub Actions reads it as a command wherever it stands.
     """
-    return _UNPRINTABLE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+    shown = _UNPRINTABLE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+    return shown.replace(_COMMAND_ANYWHERE, "#\\x23[")
 
 
 def _heading(path: str) -> str:
     """The line of a text report that names a file. It never reads as a workflow command.
 
     A path stands at the start of its line. ``./`` in front of a name that starts
-    like a command names the same file.
+    like a command names the same file. The runner drops the white space in front
+    of a line before it looks, so a name that starts with spaces counts as well.
     """
     shown = printable(path)
-    return f"./{shown}" if shown.startswith(_WORKFLOW_COMMANDS) else shown
+    return f"./{shown}" if shown.lstrip().startswith(_COMMAND_AT_START) else shown
 
 
 def text(result: Result, color: bool = False, strict: bool = False) -> str:

@@ -105,6 +105,37 @@ def _is_read(found: Path, home: Path | None) -> bool:
     return os.path.isfile(target) or not os.path.lexists(target)
 
 
+def _is_refused_link(path: Path, project: Path) -> bool:
+    """Whether a named path is a symbolic link that is not followed.
+
+    Two kinds are not. A link that lies in the project and leads out of it, to a file
+    or to a folder: pre-commit names every changed file of a commit, links among
+    them, so such a name is the project's choice and not the user's. And a link that
+    leads back to itself, wherever it lies: it names nothing, and before Python 3.13
+    resolving its path raises.
+
+    Only the last part of the path is looked at. A path below a linked folder was
+    spelled out by whoever named it.
+    """
+    folder = Path(os.path.realpath(path.parent))
+    found = folder / path.name
+    if not os.path.islink(found):
+        return False
+    target = Path(os.path.realpath(found))
+    # There, but nothing to look at: the chain of links ends in a link again.
+    if os.path.lexists(target) and not os.path.exists(target):
+        return True
+    return folder.is_relative_to(project) and not target.is_relative_to(project)
+
+
+def _followed(paths: Sequence[Path], project: Path) -> list[Path]:
+    """The named ``paths`` that are read: all but the links that are not followed.
+
+    ``project`` is the project root with every link in it resolved.
+    """
+    return [path for path in paths if not _is_refused_link(Path(path), project)]
+
+
 def discover_all(
     paths: Sequence[Path], root: Path, deep: bool = True
 ) -> tuple[list[Path], list[Path], list[Path]]:
@@ -119,7 +150,8 @@ def discover_all(
     A link out of the project and a file that is no plain file are left out (see
     ``_is_read``). For a folder outside the project, "the project" is that folder.
     A file outside the project that is named itself is always taken: naming it is
-    the user's choice.
+    the user's choice. A named path that is itself a link out of the project, to a
+    file or to a folder, is passed over (see ``_is_refused_link``).
     """
     py_files: list[Path] = []
     dep_files: list[Path] = []
@@ -141,11 +173,13 @@ def discover_all(
             for files in lists:
                 files.append(path)
 
-    for path in paths:
+    for path in _followed(paths, project):
         # Where the path lies, before a link in its last part is followed.
         folder = Path(os.path.realpath(Path(path).parent))
         found = folder / Path(path).name
-        path = path.resolve()
+        # ``realpath``, not ``Path.resolve``: before Python 3.13 that one raises for
+        # a link in a loop anywhere in the path.
+        path = Path(os.path.realpath(path))
         if path.is_file():
             add(path, found, project if folder.is_relative_to(project) else None)
             continue
@@ -197,7 +231,7 @@ def _beside_named_paths(paths: Sequence[Path], root: Path) -> tuple[list[Path], 
     files that lie directly in it count: what lies below a folder that happens to
     hold a named file (a home folder, a shared drive) is nobody's project.
     """
-    homes = {home for path in paths if (home := _home(Path(path).resolve(), root))}
+    homes = {home for path in paths if (home := _home(Path(os.path.realpath(path)), root))}
     deps: list[Path] = []
     locks: list[Path] = []
     for deep in (True, False):
@@ -418,6 +452,9 @@ def run(
     ignore = set(ignore)  # read once: it may be an iterator, and it is needed twice
     rules = selected_rules(select, ignore)
     root = root.resolve()
+    # A link that is not followed is no path of this run: it is not read, it does
+    # not stand for the project, and the folder it leads to lends no dependency files.
+    paths = _followed(paths, root)
 
     found_py, found_deps, found_locks = discover_all(paths, root)
     # Excluded files are not checked, but still count as project modules below.
@@ -429,7 +466,7 @@ def run(
     # compared with the rest. And a private index, or the name of one of the project's
     # own packages, counts wherever in the project it is written.
     project = (found_py, found_deps, found_locks)
-    whole_project_given = any(Path(p).resolve() == root for p in paths)
+    whole_project_given = any(Path(os.path.realpath(p)) == root for p in paths)
     package_rules = rules & PACKAGE_RULES
     if (package_rules or "SLOP030" in rules) and not whole_project_given:
         project = discover_all([root], root)
