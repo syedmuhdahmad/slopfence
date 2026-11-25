@@ -373,6 +373,37 @@ def _open_quote(line: str, quote: str) -> str:
     return quote
 
 
+def _string_lines(lines: list[str], skip_first: bool) -> set[int]:
+    """The 0-based indexes of the lines that start inside a string that is closed
+    further down.
+
+    A string that is never closed is no string, and nothing below its opening is
+    counted: what follows a mark that nothing closes is a guess, and a command there
+    may be the one that sets a private index. Those lines are judged like any others.
+    """
+    inside: set[int] = set()
+    pending: list[int] = []
+    quote = ""
+    continued = False
+    for n, line in enumerate(lines):
+        if n == 0 and skip_first:
+            continue
+        stripped = line.strip()
+        if quote:
+            pending.append(n)
+            quote = _open_quote(line, quote)
+            if not quote:
+                inside.update(pending)
+                pending.clear()
+        elif continued or _is_magic_line(stripped):
+            # An IPython line: its quotation marks are the shell's, not Python's.
+            continued = stripped.endswith("\\")
+        else:
+            continued = False
+            quote = _open_quote(line, "")
+    return inside
+
+
 def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list[tuple[int, int]]]:
     """A cell's lines with every IPython line replaced by ``pass``, and the command
     lines among them as (command start offset, 0-based line index).
@@ -382,9 +413,9 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     Python around its magics. ``skip_first`` blanks the first line: a cell magic.
 
     A line that starts inside a string is text, whatever it looks like: it is kept
-    as it is and is no command. Replaced, the line that closes a string would take
-    the closing marks with it, the rest would be no Python, and nothing could tell
-    its text from a command any more.
+    as it is and is no command (see ``_string_lines``). Replaced, the line that closes
+    a string would take the closing marks with it, the rest would be no Python, and
+    nothing could tell its text from a command any more.
 
     A carriage return at the end of a line is no indentation. Kept in front of
     ``pass``, it would be one more line for Python's parser, and every import below
@@ -393,7 +424,7 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     python = list(lines)
     commands: list[tuple[int, int]] = []
     continued = False
-    quote = ""  # the quotation mark of the string that is open where the line starts
+    text = _string_lines(lines, skip_first)
     offset = 0
     for n, line in enumerate(lines):
         stripped = line.strip()
@@ -401,8 +432,8 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
         indent = len(body) - len(body.lstrip())
         if n == 0 and skip_first:
             python[n] = ""
-        elif quote:
-            quote = _open_quote(line, quote)
+        elif n in text:
+            continued = False
         elif continued or _is_magic_line(stripped):
             if not continued and (stripped.startswith(("!", "%")) or _AUTOMAGIC.match(stripped)):
                 marker = len(stripped) - len(stripped.lstrip("!%"))
@@ -414,7 +445,6 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
             continued = stripped.endswith("\\")
         else:
             continued = False
-            quote = _open_quote(line, "")
         offset += len(line) + 1
     return python, commands
 

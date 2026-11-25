@@ -1080,6 +1080,12 @@ PIP_LINES_NEAR_A_STRING = {
         'print "usage"\rhelp = """\ntext\n"""\n!pip install ghost-one\n',
         ["ghost-one", "ghost-pip"],
     ),
+    # Three marks that nothing closes are no string. The command below them is read,
+    # and its index covers the notebook.
+    "a command with an index below marks that are never closed": (
+        f'x = """never closed\r!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
     "a command below a string with an escaped mark in it": (
         'x = "say \\"hi\\""\r!pip install ghost-one\n',
         ["ghost-one", "ghost-pip"],
