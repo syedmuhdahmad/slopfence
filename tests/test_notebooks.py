@@ -1314,3 +1314,51 @@ def test_diff_counts_the_lines_of_the_file_under_a_textconv_driver(tmp_path):
     assert line in changed["nb.ipynb"]
     result = run([tmp_path], tmp_path, FakeRegistry({"requests"}), changed=changed)
     assert found(result) == [("nb.ipynb", line, text.split("\n")[line - 1].index("ghost-new") + 1)]
+
+
+# --- A cell saved as one long string: positions stay right, and cheap to find. ---
+
+
+def _one_string_cell(count):
+    """The text of a notebook whose one code cell is a single JSON string of ``count``
+    pip lines and imports, with every kind of escape between them."""
+    lines = []
+    for n in range(count):
+        lines.append(f'label = "q{n}"  # café \\ tab\there')
+        lines.append(f"%pip install one-string-{n}")
+        lines.append(f"import one_string_{n}")
+    cell = {"cell_type": "code", "metadata": {}, "outputs": [], "source": "\n".join(lines)}
+    return json.dumps({"cells": [cell], "metadata": {}, "nbformat": 4, "nbformat_minor": 5})
+
+
+def test_positions_in_a_cell_that_is_one_long_string(tmp_path):
+    """Every dependency and import of such a cell is found at its own place in the
+    file, whatever escapes come before it."""
+    text = _one_string_cell(40)
+    assert "\\n" in text and '\\"' in text and "\\\\" in text and "\\u00e9" in text
+    scanned = scan_notebook(text, "n.ipynb", True)
+    assert [dep.name for dep in scanned.dependencies] == [f"one-string-{n}" for n in range(40)]
+    for dep in scanned.dependencies:
+        assert dep.line == 1 and text[dep.col - 1 :].startswith(dep.name)
+    assert [name for name, _, _ in scanned.imports] == [f"one_string_{n}" for n in range(40)]
+    for name, line, col in scanned.imports:
+        assert line == 1 and text[col - 1 :].startswith(f"import {name}")
+
+
+@pytest.mark.parametrize("step", ["_escapes", "_line_offsets"])
+def test_a_long_string_is_gone_through_once_not_once_per_name(monkeypatch, step):
+    """The escapes of a source string and the line starts of a cell are worked out
+    once, however many names the cell holds. Worked out again for every name, the
+    time grows with the square of the cell: 20,000 pip lines took a minute (#104)."""
+    calls = []
+    real = getattr(notebooks, step)
+
+    def counted(text):
+        """Do the step, and note that it was done."""
+        calls.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(notebooks, step, counted)
+    scanned = scan_notebook(_one_string_cell(300), "n.ipynb", True)
+    assert len(scanned.dependencies) == 300 and len(scanned.imports) == 300
+    assert len(calls) == 1

@@ -232,6 +232,11 @@ EXEMPT_DECORATORS = {
     "fixture",
 }
 EXEMPT_BASES = {"Protocol", "ABC", "ABCMeta", "TypedDict", "NamedTuple", "Enum"}
+# A family of handler methods has at least this many members (see ``_is_family_handler``).
+FAMILY_SIZE = 5
+# At most one member in this many may look like a stub.
+FAMILY_SHARE = 4
+_Function = ast.FunctionDef | ast.AsyncFunctionDef
 NONE_ANNOTATIONS = {"None", "NoReturn", "Never", "Any", "object"}
 
 
@@ -327,14 +332,15 @@ def _exempt_function(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 
 def _candidate_functions(
     tree: ast.Module,
-) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
+) -> Iterator[tuple[_Function, ast.ClassDef | None]]:
     """Functions that are meant to be real implementations: not in Protocols, ABCs or
-    ``if TYPE_CHECKING`` blocks."""
+    ``if TYPE_CHECKING`` blocks. Each with the class it is a method of, if any."""
 
-    # Depth-first, in source order. Functions are only found through statements.
-    todo = child_statements(tree)[::-1]
+    # Depth-first, in source order. Functions are only found through statements. Each
+    # entry holds the statement that it lies directly in.
+    todo: list[tuple[ast.AST, ast.AST]] = [(child, tree) for child in child_statements(tree)[::-1]]
     while todo:
-        child = todo.pop()
+        child, parent = todo.pop()
         if isinstance(child, ast.If) and _mentions(child.test, "TYPE_CHECKING"):
             continue
         if isinstance(child, ast.ClassDef):
@@ -345,8 +351,65 @@ def _candidate_functions(
             if bases & EXEMPT_BASES or metaclass & EXEMPT_BASES:
                 continue
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child
-        todo.extend(child_statements(child)[::-1])
+            yield child, parent if isinstance(parent, ast.ClassDef) else None
+        todo.extend((below, child) for below in child_statements(child)[::-1])
+
+
+def _parameters(func: _Function) -> tuple[str | None, ...]:
+    """The names of a function's parameters, in order."""
+    args = func.args
+    named = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    return tuple(a.arg if a else None for a in named)
+
+
+def _name_ends(name: str) -> tuple[str, str] | None:
+    """The first and the last word of a name of several words. None for a single word."""
+    words = [word for word in name.split("_") if word]
+    return (words[0], words[-1]) if len(words) > 1 else None
+
+
+def _is_family_handler(func: _Function, owner: ast.ClassDef, stubs: set[str]) -> bool:
+    """Whether a method that looks like a stub is one of a family of handlers that
+    mostly do real work.
+
+    A family is at least ``FAMILY_SIZE`` methods of one class that take the same
+    parameters and share the first or the last word of their names: ``*_schema(self,
+    schema)``, ``visit_*(self, node)``. A dispatcher calls the one that fits, and the
+    simplest case needs a fixed answer. ``stubs`` are the methods of the class that
+    look like stubs. When they are more than one in ``FAMILY_SHARE`` of the family,
+    nothing shows that the fixed answers are on purpose.
+
+    Only implementations are members: an ``@overload`` declaration or an abstract
+    method is none, and a name that is defined more than once counts once. Only the
+    stubs among the members count, not a stub of the class that takes other
+    parameters.
+    """
+    ends = _name_ends(func.name)
+    if ends is None:
+        return False
+    parameters = _parameters(func)
+    alike = {
+        method.name
+        for method in owner.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not _exempt_function(method)
+        and _parameters(method) == parameters
+    }
+    for position in (0, 1):
+        members = {
+            name
+            for name in alike
+            if (other := _name_ends(name)) is not None and other[position] == ends[position]
+        }
+        if len(members) >= FAMILY_SIZE and len(members & stubs) * FAMILY_SHARE <= len(members):
+            return True
+    return False
+
+
+def _returns_fixed_value(func: _Function) -> bool:
+    """Whether a function with a docstring does nothing but return a hardcoded value."""
+    body = func.body[1:]
+    return len(body) == 1 and isinstance(body[0], ast.Return) and _is_fake_value(body[0].value)
 
 
 def check_stub_functions(src: SourceFile) -> Iterator[Finding]:
@@ -354,40 +417,57 @@ def check_stub_functions(src: SourceFile) -> Iterator[Finding]:
     # .pyi stubs are all stubs by design (discovery only picks .py files anyway).
     if src.is_test_file or src.is_example_file or src.path.suffix == ".pyi":
         return
-    for func in _candidate_functions(src.tree):
-        doc = ast.get_docstring(func)
-        if not doc or _exempt_function(func):
-            continue
-        body = func.body[1:]  # without the docstring
-        if not body:
-            continue
-        if HOOK_DOC.search(doc):
-            continue
-        placeholder = bool(PLACEHOLDER_DOC.search(doc))
-        promises = _first_word(doc) in ACTION_VERBS
-        stmt = body[0]
-        # Hardcoded result while ignoring every input: validate_token(token) -> True.
-        fake = (
-            len(body) == 1
-            and isinstance(stmt, ast.Return)
-            and _is_fake_value(stmt.value)
-            and (_ignores_its_inputs(func) or placeholder)
+    found = [
+        (func, owner, finding)
+        for func, owner in _candidate_functions(src.tree)
+        if (finding := _stub_finding(func, src.rel)) is not None
+    ]
+    # The methods of each class that look like stubs: a family is judged as a whole.
+    stubs: dict[ast.ClassDef, set[str]] = {}
+    for func, owner, _ in found:
+        if owner is not None:
+            stubs.setdefault(owner, set()).add(func.name)
+    for func, owner, finding in found:
+        # A family explains a fixed answer. It does not explain a method that does
+        # nothing where a value was promised: that one is reported as before.
+        in_family = (
+            owner is not None
+            and _returns_fixed_value(func)
+            and _is_family_handler(func, owner, stubs[owner])
         )
-        # Nothing returned although the signature promises a value.
-        empty = _returns_nothing(body) and _promises_a_value(func)
-        if not (
-            ((fake or empty) and (promises or placeholder))
-            or (placeholder and _returns_nothing(body))
-        ):
-            continue
-        what = "returns hardcoded data" if fake else "does nothing"
-        summary = doc.strip().splitlines()[0].strip().rstrip(".")[:60]
-        yield Finding(
-            "SLOP011",
-            src.rel,
-            stmt.lineno,
-            stmt.col_offset + 1,
-            f"Function '{func.name}' {what}, but its docstring says {summary!r}",
-            end_line=func.end_lineno,
-            subject=func.name,
-        )
+        if not in_family:
+            yield finding
+
+
+def _stub_finding(func: _Function, rel: str) -> Finding | None:
+    """The SLOP011 finding for one function of the file ``rel``. None when it is no stub."""
+    doc = ast.get_docstring(func)
+    if not doc or _exempt_function(func):
+        return None
+    body = func.body[1:]  # without the docstring
+    if not body:
+        return None
+    if HOOK_DOC.search(doc):
+        return None
+    placeholder = bool(PLACEHOLDER_DOC.search(doc))
+    promises = _first_word(doc) in ACTION_VERBS
+    stmt = body[0]
+    # Hardcoded result while ignoring every input: validate_token(token) -> True.
+    fake = _returns_fixed_value(func) and (_ignores_its_inputs(func) or placeholder)
+    # Nothing returned although the signature promises a value.
+    empty = _returns_nothing(body) and _promises_a_value(func)
+    if not (
+        ((fake or empty) and (promises or placeholder)) or (placeholder and _returns_nothing(body))
+    ):
+        return None
+    what = "returns hardcoded data" if fake else "does nothing"
+    summary = doc.strip().splitlines()[0].strip().rstrip(".")[:60]
+    return Finding(
+        "SLOP011",
+        rel,
+        stmt.lineno,
+        stmt.col_offset + 1,
+        f"Function '{func.name}' {what}, but its docstring says {summary!r}",
+        end_line=func.end_lineno,
+        subject=func.name,
+    )

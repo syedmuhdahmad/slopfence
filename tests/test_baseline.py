@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 import random
+import socket
 import time
 from collections import Counter
 from pathlib import Path
@@ -22,7 +23,7 @@ from slopfence.engine import run
 from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Finding, plural
 from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry
-from tests.conftest import DAY, FakeRegistry, git, git_init
+from tests.conftest import DAY, FakeRegistry, git, git_init, pyproject
 
 APP = '''\
 import os
@@ -1899,3 +1900,94 @@ def test_count_stale_counts_what_the_run_should_have_found(write, tmp_path):
     assert stale(".") == 0
     assert stale(".", checked=("a.py", "skipped.py")) == 7
     assert baselinemod.count_stale({}, {"SLOP010"}, {"a.py"}, Scope(["."]), tmp_path) == 0
+
+
+# --- Only a plain file is read as a baseline. The config can name the path. ---
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="this system has no /dev/zero")
+@pytest.mark.parametrize("how", ["option", "config"])
+def test_device_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys, how):
+    """``baseline = "/dev/zero"`` in a config from someone else must not make the run
+    read without end: a device is no baseline, and is never opened."""
+    write("app.py", "x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    if how == "config":
+        pyproject(tmp_path, '[tool.slopfence]\nbaseline = "/dev/zero"\n')
+        argv = ["--offline", "."]
+    else:
+        argv = ["--offline", "--baseline", "/dev/zero", "."]
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(
+        baselinemod.os,
+        "open",
+        lambda path, *rest: opened.append(str(path)) or real_open(path, *rest),
+    )
+    assert main(argv) == 2
+    assert "baseline /dev/zero is not a file" in capsys.readouterr().err
+    assert "/dev/zero" not in opened
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
+def test_named_pipe_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys):
+    """Opening a pipe that nobody writes to never returns. It is not opened."""
+    write("app.py", "x = 1\n")
+    os.mkfifo(tmp_path / "accepted.json")
+    monkeypatch.chdir(tmp_path)
+    assert main(["--offline", "--baseline", "accepted.json", "."]) == 2
+    assert "accepted.json is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="this system has no socket files")
+def test_socket_in_place_of_the_baseline_exits_2(write, tmp_path, monkeypatch, capsys):
+    """A socket can't be opened like a file. The message is the same as for a pipe,
+    whatever the system's own error for it is."""
+    write("app.py", "x = 1\n")
+    monkeypatch.chdir(tmp_path)
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind("accepted.json")  # a short relative name: socket paths are limited
+        assert main(["--offline", "--baseline", "accepted.json", "."]) == 2
+    assert "accepted.json is not a file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this system has no named pipes")
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ("--baseline", "baseline accepted.json is not a file"),
+        ("--write-baseline", "can't write baseline accepted.json: it is not a regular file"),
+    ],
+)
+def test_pipe_that_takes_the_place_of_a_baseline_is_not_read(
+    write, tmp_path, monkeypatch, capsys, option, message
+):
+    """What a path names can change between a look at it and the reading. The open
+    file is asked what it is too: a pipe put in the place of a baseline in that moment
+    is refused, and the run does not wait on it."""
+    write("app.py", "x = 1\n")
+    os.mkfifo(tmp_path / "accepted.json")
+    monkeypatch.chdir(tmp_path)
+    # As if the name had still been a plain file at every look before the opening.
+    real_stat = os.stat
+    plain = real_stat(tmp_path / "app.py")
+
+    def stat_before_the_swap(path, *args, **kwargs):
+        """Answer for the baseline as for a plain file, and for all else as it is."""
+        if isinstance(path, (str, os.PathLike)) and Path(path).name == "accepted.json":
+            return plain
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(baselinemod.os, "stat", stat_before_the_swap)
+    assert main(["--offline", option, "accepted.json", "."]) == 2
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symbolic link needs a privilege on Windows")
+def test_baseline_behind_a_link_is_still_read(project, monkeypatch, capsys):
+    """A link to a plain file is a plain file to read: a shared baseline may be linked."""
+    assert main(["--offline", "--write-baseline", "real.json", "."]) == 0
+    (project / "linked.json").symlink_to(project / "real.json")
+    capsys.readouterr()
+    assert main(["--offline", "--baseline", "linked.json", "."]) == 0
+    assert "hidden by the baseline" in capsys.readouterr().out
