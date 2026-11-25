@@ -48,6 +48,193 @@ def test_pyproject_dependencies(write, check, tmp_path):
     assert rule_lines(result, "SLOP001") == [3]
 
 
+def test_pyproject_build_system_requires(write, check, tmp_path):
+    """[build-system] requires is read like the other lists: an invented build
+    dependency is looked up, a known one is not, and the line is its entry (#73)."""
+    write(
+        "pyproject.toml",
+        """
+        [build-system]
+        requires = ["setuptools>=61", "ghost-build-zz>=1"]
+
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    assert [(d.name, d.line, d.validate) for d in declared.dependencies] == [
+        ("requests", 6, True),
+        ("setuptools", 2, True),
+        ("ghost-build-zz", 2, True),
+    ]
+    result = check("SLOP001", registry=FakeRegistry({"requests", "setuptools"}))
+    assert rule_lines(result, "SLOP001") == [2]
+    assert "ghost-build-zz" in result.findings[0].message
+
+
+def test_pyproject_build_system_requires_private_index(write, check):
+    """A project-wide private index covers build dependencies too: the names in
+    [build-system] requires stay on the machine, and nothing is looked up."""
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["corp-build-tool"]\n\n'
+        '[project]\nname = "demo"\ndependencies = ["corp-auth"]\n\n'
+        '[tool.uv]\nindex-url = "https://pkgs.corp.example/simple"\n',
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert result.findings == []
+
+
+def test_pyproject_build_system_requires_skipped_in_test_folder(write, check):
+    """A pyproject.toml under a test folder keeps [project] lists but skips
+    [build-system] requires, so fixture build backends are not flagged."""
+    write(
+        "tests/fixture/pyproject.toml",
+        """
+        [build-system]
+        requires = ["setuptools>=61", "ghost-build-zz>=1"]
+
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == []
+    assert registry.queries == ["requests"]
+
+
+def test_build_system_requires_with_own_source_not_flagged(write, check):
+    """A [tool.uv.sources] entry for a build name says where it comes from, so the
+    name is neither looked up nor reported, like in the other lists."""
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["corp-build-tool"]\n\n'
+        '[project]\nname = "demo"\n\n'
+        "[tool.uv.sources]\n"
+        'corp-build-tool = { git = "https://example.com/corp-build-tool.git" }\n',
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert result.findings == []
+
+
+def test_build_system_requires_ignore_comment_on_one_line(write, check):
+    """A # slopfence: ignore on one line of a multi-line requires keeps only that
+    name on the machine; the others are still looked up and reported."""
+    write(
+        "pyproject.toml",
+        """
+        [build-system]
+        requires = [
+            "setuptools>=61",
+            "ghost-build-zz>=1",  # slopfence: ignore
+            "ghost-build-yy>=1",
+        ]
+
+        [project]
+        name = "demo"
+        """,
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert rule_lines(result, "SLOP001") == [5]
+    assert "ghost-build-yy" in result.findings[0].message
+
+
+def test_build_system_requires_string_is_not_read(write, check, tmp_path):
+    """requires as a string is not a PEP 518 list: it is not read, and nothing of
+    the file changes compared to a pyproject.toml without [build-system]."""
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = "setuptools"\n\n[project]\nname = "demo"\n',
+    )
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    assert [d.name for d in declared.dependencies] == []
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert result.findings == []
+    assert result.notes == []
+
+
+def test_build_system_requires_without_private_index_get_no_note(write, check):
+    """A [build-system]-only project without a private index anywhere has its names
+    looked up, so the report needs no note."""
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\n',
+    )
+    registry = FakeRegistry({"setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert sorted(registry.queries) == ["corp-build-backend", "setuptools"]
+    assert result.notes == []
+
+
+def test_build_system_requires_looked_up_with_detect_private_index_off(write, check):
+    """detect-private-index = false also lifts the hold on [build-system] requires:
+    the build names are looked up again, like the dependencies of the other files."""
+    write(
+        "setup.cfg",
+        "[easy_install]\nindex_url = https://pkgs.corp.example/simple\n",
+    )
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\ndependencies = ["requests"]\n',
+    )
+    registry = FakeRegistry({"requests", "setuptools"})
+    result = check("SLOP001", registry=registry, inherit_index=False)
+    assert sorted(registry.queries) == ["corp-build-backend", "requests", "setuptools"]
+    assert rule_lines(result, "SLOP001") == [2]
+
+
+def test_build_system_requires_held_back_by_index_in_setup_cfg(write, check):
+    """A private index in a setup.cfg holds [build-system] requires back and says so
+    in a note of their own, while the [project] names are still looked up."""
+    write(
+        "setup.cfg",
+        "[metadata]\nname = demo\n\n[easy_install]\nindex_url = https://pkgs.corp.example/simple\n",
+    )
+    write(
+        "pyproject.toml",
+        '[build-system]\nrequires = ["setuptools", "corp-build-backend"]\n\n'
+        '[project]\nname = "demo"\ndependencies = ["requests"]\n',
+    )
+    registry = FakeRegistry({"requests", "setuptools"})
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == ["requests"]
+    assert result.findings == []
+    assert result.notes == [
+        "SLOP001 didn't look up the [build-system] requires in pyproject.toml: "
+        "a private package index is set in setup.cfg, so names missing from PyPI may "
+        "be private packages. If that index only mirrors PyPI, set detect-private-index "
+        "= false."
+    ]
+
+
+def test_pyproject_without_build_system(write, check, tmp_path):
+    """A pyproject.toml without a [build-system] table reads exactly as before."""
+    write(
+        "pyproject.toml",
+        """
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    assert [d.name for d in declared.dependencies] == ["requests"]
+    result = check("SLOP001", registry=FakeRegistry({"requests"}))
+    assert result.findings == []
+
+
 def test_poetry_dependencies(tmp_path, write):
     """Poetry tables are read. ``python`` is not a package, and a path dependency is
     declared but not looked up."""

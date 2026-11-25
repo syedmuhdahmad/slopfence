@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SLOP001` and `SLOP002` read `[build-system] requires`.** The packages a `pyproject.toml` names in `[build-system]` `requires` (PEP 518) are installed and run when pip builds the project from source — `pip install .`, or an sdist; installing a wheel runs no build backend — so an invented one there is now looked up and reported like a missing dependency anywhere else, and a brand-new one is reported by `SLOP002` like any other dependency. The `[build-system] requires` of a `pyproject.toml` under a test folder are not read: a fixture names its build backend on purpose. A private index in any project file keeps them on the machine, whatever kind of file names it, and the report says so in a note of their own ([#73](https://github.com/syedmuhdahmad/slopfence/issues/73)).
+
 ### Fixed
 
 - slopfence now starts git by its full path, which it finds in the folders of `PATH` that are named by their full path. Before, it started git by name. On Windows, and on other systems when `PATH` holds `.` or an empty entry, a program named `git` in the folder being checked could then run in its place. This happened in every run, not only with `--diff`. When git is not found, `--diff` still says "git is not installed" ([#92](https://github.com/syedmuhdahmad/slopfence/issues/92)).

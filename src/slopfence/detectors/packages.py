@@ -524,7 +524,11 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
         found = _parse_requirements(text, rel)
         comments = [requirements_comment(line) for line in text_lines(text)]
     else:
-        found = _parse_pyproject(text, rel) if kind is Kind.PYPROJECT else _parse_pipfile(text, rel)
+        found = (
+            _parse_pyproject(text, rel, _in_test_folder(path, root))
+            if kind is Kind.PYPROJECT
+            else _parse_pipfile(text, rel)
+        )
         comments = toml_comments(text)
     if any(IGNORE_FILE_RE.search(c) for c in comments):
         for dep in found.dependencies:
@@ -863,8 +867,9 @@ def _array(value: object) -> list:
     return value if isinstance(value, list) else []
 
 
-def _parse_pyproject(text: str, rel: str) -> DependencyFile:
-    """Dependencies in pyproject.toml: PEP 621, dependency groups and Poetry tables."""
+def _parse_pyproject(text: str, rel: str, in_test_folder: bool = False) -> DependencyFile:
+    """Dependencies in pyproject.toml: PEP 621, dependency groups, Poetry tables and,
+    outside a test folder, ``[build-system] requires`` (see ``_in_test_folder``)."""
     found = DependencyFile(rel, Kind.PYPROJECT)
     data = _load_toml(text)
     if data is None:
@@ -878,12 +883,14 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     uv_sources = {normalize(n) for n in _table(_table(tool.get("uv")).get("sources"))}
     private_index = found.private_index = uses_private_index(tool)
 
-    def add_spec(table: str, array: str, spec: object) -> None:
+    def add_spec(table: str, array: str, spec: object, inherits_index: bool = False) -> None:
         """Record one PEP 508 requirement string from ``table.array``.
 
         A string that is no requirement is never looked up. The name it starts with
         is declared all the same (see ``dependency.leading_name``), and a
-        ``[tool.uv.sources]`` entry for it still counts.
+        ``[tool.uv.sources]`` entry for it still counts. ``inherits_index`` marks the
+        lists that a private index in another project file covers as well (see
+        ``Dependency.inherits_index``): ``[build-system] requires`` is one of them.
         """
         if not isinstance(spec, str):
             return
@@ -899,10 +906,29 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         # A comment on the line where v0.3 reported the entry kept its name on the
         # machine. It still does, also where the entry is reported on another line.
         ignored = finder.ignored(line) | finder.ignored(finder.spec_in_v03(table, array, spec))
-        deps.append(Dependency(name, rel, line, validate, ignored, own_source=sourced))
+        deps.append(
+            Dependency(
+                name,
+                rel,
+                line,
+                validate,
+                ignored,
+                own_source=sourced,
+                inherits_index=inherits_index,
+            )
+        )
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
+    # [build-system] requires (PEP 518): pip installs and runs them when it builds
+    # the project from source (`pip install .` or an sdist); installing a wheel runs
+    # no build backend (#73). They are marked ``inherits_index``: the project's own
+    # index serves them like the rest of the build, so a private index in any other
+    # project file keeps them on the machine. Under a test folder they are not read
+    # at all: a fixture names its build backend on purpose.
+    if not in_test_folder:
+        for spec in _array(_table(data.get("build-system")).get("requires")):
+            add_spec("build-system", "requires", spec, inherits_index=True)
     optional_table = (
         "project.optional-dependencies"
         if "project.optional-dependencies" in finder.ranges
@@ -1047,6 +1073,7 @@ class PackageChecker:
         known_packages: Iterable[str] = (),
         private_index: str | None = None,
         inherited_from: Iterable[str] = (),
+        private_from: Iterable[str] = (),
         *,
         now: float,
         rules: Iterable[str] = PACKAGE_RULES,
@@ -1058,6 +1085,12 @@ class PackageChecker:
         dependency files that name no index themselves (see
         ``DependencyFile.inherits_index``). A file that could not be read is among
         them: it may set one. Empty when that is switched off.
+
+        ``private_from`` are the project files that name a private index, or may name
+        one (see ``ProjectIndex.private_index_files`` and
+        ``unreadable_index_files``), filtered the way ``inherited_from`` is. A name in
+        ``[build-system] requires`` is held back when any of them does (see
+        ``Dependency.inherits_index``), whatever kind of file it is.
 
         ``rules`` are the package rules that report. ``now`` (Unix seconds) is the
         time SLOP002 counts a package's age from, and ``min_package_age`` the days a
@@ -1073,6 +1106,7 @@ class PackageChecker:
         # Where the environment configures a non-PyPI index (pip.conf, PIP_INDEX_URL...).
         self.private_index = private_index
         self.inherited_from = list(inherited_from)
+        self.private_from = list(private_from)
         # Names that are never looked up, in whichever file they are declared.
         self._not_from_pypi = index.own_names | index.sourced_names
         self._installed = _installed_modules()
@@ -1108,7 +1142,7 @@ class PackageChecker:
             if not file.fixture and (only_paths is None or file.rel in only_paths)
         )
 
-    def _may_be_public(self, dep: Dependency) -> bool:
+    def _may_ask(self, dep: Dependency) -> bool:
         """Whether a declared dependency, by itself, is one PyPI can be asked about.
 
         Not one from a URL, a path or a private index, not one whose ignore comment
@@ -1124,8 +1158,19 @@ class PackageChecker:
         )
 
     def _inherits(self, file: DependencyFile) -> bool:
-        """Whether a private index in another project file covers this file."""
+        """Whether a private index in another project file covers this whole file."""
         return file.inherits_index and bool(self.inherited_from)
+
+    def _held_back(self, file: DependencyFile, dep: Dependency) -> bool:
+        """Whether a private index in another project file keeps ``dep`` off PyPI.
+
+        That covers the whole file when it inherits one (see ``_inherits``), and a
+        dependency alone when it is marked (see ``Dependency.inherits_index``): a
+        name in ``[build-system] requires``, which the project's own index serves
+        like the rest of the build, is held back by an index in any project file
+        (``private_from``), whatever kind of file names it.
+        """
+        return self._inherits(file) or (dep.inherits_index and bool(self.private_from))
 
     def _public_dependencies(self, only_paths: set[str] | None) -> Iterator[_FileDependencies]:
         """Each checked file with its dependencies that PyPI can be asked about.
@@ -1134,9 +1179,11 @@ class PackageChecker:
         the project covers.
         """
         for file in self._files(only_paths):
-            if self._inherits(file):
-                continue
-            public = [dep for dep in file.dependencies if self._may_be_public(dep)]
+            public = [
+                dep
+                for dep in file.dependencies
+                if self._may_ask(dep) and not self._held_back(file, dep)
+            ]
             if public:
                 yield file, public
 
@@ -1146,7 +1193,9 @@ class PackageChecker:
 
     def inherited_files(self, only_paths: set[str] | None = None) -> list[str]:
         """The checked files whose dependencies were not looked up, although nothing in
-        the file itself said so: a private index in another project file covers them.
+        the file itself said so: a private index in another project file covers the
+        whole file (see ``_inherits``). Files where only some names were held back
+        are ``build_system_files``.
 
         Empty in a run that asks PyPI about nothing anyway.
         """
@@ -1155,7 +1204,23 @@ class PackageChecker:
         return [
             file.rel
             for file in self._files(only_paths)
-            if self._inherits(file) and any(self._may_be_public(dep) for dep in file.dependencies)
+            if self._inherits(file) and any(self._may_ask(dep) for dep in file.dependencies)
+        ]
+
+    def build_system_files(self, only_paths: set[str] | None = None) -> list[str]:
+        """The checked files where only the ``[build-system] requires were held back
+        by a private index in another project file; the other dependencies of such
+        a file were looked up (see ``Dependency.inherits_index``).
+
+        Empty in a run that asks PyPI about nothing anyway.
+        """
+        if self._asks_nobody:
+            return []
+        return [
+            file.rel
+            for file in self._files(only_paths)
+            if not self._inherits(file)
+            and any(self._may_ask(dep) and self._held_back(file, dep) for dep in file.dependencies)
         ]
 
     def imports_in_files(self, only_paths: set[str]) -> dict[str, list[tuple[str, int, int]]]:
@@ -1218,7 +1283,12 @@ class PackageChecker:
         if skipped := self.inherited_files(only_paths):
             notes.append(
                 f"{named} didn't look up the dependencies in {_listed(sorted(skipped))}: "
-                f"{self._why_inherited()}"
+                f"{self._why_inherited(self.inherited_from)}"
+            )
+        if held_back := self.build_system_files(only_paths):
+            notes.append(
+                f"{named} didn't look up the [build-system] requires in "
+                f"{_listed(sorted(held_back))}: {self._why_inherited(self.private_from)}"
             )
         if too_large := sorted(file.rel for file in self._files(only_paths) if file.too_large):
             notes.append(
@@ -1227,21 +1297,22 @@ class PackageChecker:
             )
         return notes
 
-    def _why_inherited(self) -> str:
-        """The second half of the note about dependency files that were held back.
+    def _why_inherited(self, files: Sequence[str]) -> str:
+        """The second half of a note about names that were held back.
 
-        It names the files that set a private index. When there is none, the files
-        were held back for one that could not be read: it may set an index.
+        It names the files that set a private index, whatever kind of file they are.
+        When there is none, the names were held back for one that could not be read:
+        it may set an index.
         """
         unreadable = set(self.index.unreadable_index_files)
-        if named := [rel for rel in self.inherited_from if rel not in unreadable]:
+        if named := [rel for rel in files if rel not in unreadable]:
             return (
                 f"a private package index is set in {_listed(named)}, so names missing "
                 "from PyPI may be private packages. If that index only mirrors PyPI, set "
                 "detect-private-index = false."
             )
         return (
-            f"{_listed(self.inherited_from)} could not be read and may set a private package "
+            f"{_listed(files)} could not be read and may set a private package "
             "index, so names missing from PyPI may be private packages. Repair or exclude "
             "that file, or set detect-private-index = false."
         )
