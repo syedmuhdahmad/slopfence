@@ -2,6 +2,7 @@ import textwrap
 
 import pytest
 
+from slopfence.detectors import packages
 from slopfence.detectors.packages import parse_dependency_file
 from tests.conftest import DownRegistry, FakeRegistry, rule_lines
 
@@ -534,3 +535,261 @@ def test_toml_strings_are_read_as_toml_reads_them():
     values = [[_toml_string(source) for _, source in line.strings] for line in lines]
     assert values == [['x"]', "z"], ["one\ntwo"], []]
     assert _toml_string('"cut') is None
+
+
+# --- The line of each entry: the same answers for a file of any size. ---
+
+
+def _entries(path, root):
+    """(name, line, rules switched off) of each dependency of a file, in order."""
+    found = parse_dependency_file(path, root)
+    return [(dep.name, dep.line, sorted(dep.ignored)) for dep in found.dependencies]
+
+
+def test_a_repeated_entry_takes_the_next_place_in_its_own_array(write, tmp_path):
+    """Each copy of a requirement string is found at the next place that holds it, in
+    its own array: two on one line, however it is quoted, and never the commented-out
+    copy, the one in a description or the one in an array of the same name."""
+    path = write(
+        "pyproject.toml",
+        """
+        [tool.other]
+        dependencies = ["ghost-lib"]  # slopfence: ignore
+
+        [project]
+        name = "demo"
+        description = "ghost-lib"  # slopfence: ignore
+        dependencies = [
+            # "ghost-lib",  # slopfence: ignore
+            "ghost-lib", "ghost-lib",  # slopfence: ignore[SLOP002]
+            "ghost-lib",  # slopfence: ignore[SLOP001]
+            'ghost-lib',
+        ]
+
+        [project.optional-dependencies]
+        dev = ["ghost-lib"]  # slopfence: ignore[SLOP030]
+        test = ["ghost-lib"]
+
+        [dependency-groups]
+        dev = [
+            "ghost-lib"]
+        """,
+    )
+    assert _entries(path, tmp_path) == [
+        ("ghost-lib", 9, ["SLOP002"]),
+        ("ghost-lib", 9, ["SLOP002"]),
+        ("ghost-lib", 10, ["SLOP001"]),
+        ("ghost-lib", 11, []),
+        ("ghost-lib", 15, ["SLOP030"]),
+        ("ghost-lib", 16, []),
+        ("ghost-lib", 20, []),
+    ]
+
+
+def test_each_poetry_entry_is_found_on_the_line_of_its_own_key(write, tmp_path):
+    """A key is found whole, in any way of writing it: not where a longer or a shorter
+    name starts the line, not in a comment, and in its own table only. The comment on
+    the table header still covers the entries that v0.2 reported there."""
+    path = write(
+        "pyproject.toml",
+        """
+        [tool.poetry.dependencies]  # slopfence: ignore[SLOP002]
+        python = "^3.10"
+        # ghost = "1"  # slopfence: ignore
+        ghost-lib = "1"
+        ghost = "1"
+          "gho" = "1"  # slopfence: ignore[SLOP001]
+        'ghost.ext'="1"
+        ghost-dotted.version = "1"
+        " ghost" = "1"
+
+        [tool.poetry.dependencies.ghost-own]
+        version = "1"
+
+        [tool.poetry.group.dev.dependencies]
+        ghost = "2"  # slopfence: ignore[SLOP030]
+        """,
+    )
+    assert _entries(path, tmp_path) == [
+        ("ghost-lib", 4, []),
+        ("ghost", 5, []),
+        ("gho", 6, ["SLOP001"]),
+        ("ghost.ext", 7, []),
+        ("ghost-dotted", 8, ["SLOP002"]),
+        (" ghost", 9, []),
+        ("ghost-own", 11, ["SLOP002"]),
+        ("ghost", 15, ["SLOP030"]),
+    ]
+
+
+def test_each_pipfile_entry_is_found_on_the_line_of_its_own_key(write, tmp_path):
+    """The same in a Pipfile, whose two tables are read in a fixed order: a name that
+    both hold is found once in each, and a comment that looks like the entry is none."""
+    path = write(
+        "Pipfile",
+        """
+        [dev-packages]
+        ghost = "*"  # slopfence: ignore[SLOP002]
+        #hash = "*"
+
+        [packages]
+        #hash = "*"  # slopfence: ignore
+        "#hash" = "*"
+        ghost-lib = "*"
+        ghost = "*"  # slopfence: ignore[SLOP001]
+        [packages.ghost-own]
+        version = "*"
+        """,
+    )
+    assert _entries(path, tmp_path) == [
+        ("#hash", 7, []),
+        ("ghost-lib", 8, []),
+        ("ghost", 9, ["SLOP001"]),
+        ("ghost-own", 10, []),
+        ("ghost", 2, ["SLOP002"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        """
+        dependencies = [  # slopfence: ignore[SLOP001]
+            'ghost-lib; python_version < "3.12"',
+        ]
+        """,
+        """
+        dependencies = [  # "ghost-lib' slopfence: ignore[SLOP001]
+            "ghost-lib",
+        ]
+        """,
+        """
+        dependencies = [  # 'ghost-lib" slopfence: ignore[SLOP001]
+            "ghost-lib"]
+        """,
+    ],
+    ids=["quotes-in-the-entry", "quotes-that-differ", "quotes-that-differ-the-other-way"],
+)
+def test_ignore_comment_on_the_array_line_leaves_an_entry_v03_found_reported(write, check, array):
+    """v0.3 found these entries on their own line: one in single quotes with double
+    quotes inside, and one whose name the array line holds between quotes that do not
+    pair up. A comment on the array line never covered them, and still does not."""
+    write("pyproject.toml", '[project]\nname = "demo"\n' + textwrap.dedent(array))
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert rule_lines(result, "SLOP001") == [5]
+
+
+def test_ignore_comment_on_a_commented_out_line_that_opens_an_array_still_applies(write, check):
+    """An array starts at the first line that sets its key, also one that is commented
+    out. v0.3 reported an entry written with escapes there, so the ignore comment of
+    that line kept its name on the machine. It still does."""
+    write(
+        "pyproject.toml",
+        r"""
+        [project]
+        name = "demo"
+
+        [dependency-groups]
+        #x = []  # slopfence: ignore[SLOP001]
+        "#x" = [
+            "corp-lib; python_version<\"3.12\"",
+        ]
+        """,
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == []
+    assert rule_lines(result, "SLOP001") == []
+
+
+def test_a_match_inside_another_is_none_for_v03():
+    """v0.3 went on behind each match on a line. Of ``"a"a"a"`` in a comment it took
+    the first and the last ``"a"``, not the one between them that shares their quotes."""
+    finder = packages._LineFinder('[project]\ndependencies = [\n    "a",  # "a"a"a"\n]\n')
+    found = [finder.spec_in_v03("project", "dependencies", "a") for _ in range(4)]
+    # Three matches on line 3, and then none: the line that opens the array.
+    assert found == [3, 3, 3, 2]
+
+
+def test_white_space_in_front_of_a_key_can_be_the_indentation_of_its_line():
+    """A key that starts with a space is also found bare on an indented line, as the
+    pattern for it always was: the indentation stands for the space."""
+    finder = packages._LineFinder('[packages]\n  x = "*"\n" x" = "*"\n')
+    assert [finder.key("packages", " x") for _ in range(3)] == [2, 3, 1]
+    assert [finder.key_in_v02("packages", " x") for _ in range(3)] == [2, 3, 1]
+
+
+class _Counted(list):
+    """A list that notes each time one of its items is read."""
+
+    def __init__(self, items, reads):
+        """``reads`` gets one more item for each read."""
+        super().__init__(items)
+        self.reads = reads
+
+    def __getitem__(self, index):
+        """Read an item, and note that it was done."""
+        self.reads.append(index)
+        return super().__getitem__(index)
+
+
+class _CountedCells(set):
+    """A set of taken matches that notes each time it is asked about one."""
+
+    def __init__(self, reads):
+        """``reads`` gets one more item for each question."""
+        super().__init__()
+        self.reads = reads
+
+    def __contains__(self, cell):
+        """Whether a match is taken, and note that it was asked."""
+        self.reads.append(cell)
+        return super().__contains__(cell)
+
+
+def _reads_of_a_file_with(count, write, tmp_path, monkeypatch):
+    """How often a line, the code of a line or a taken match is read to find the lines
+    of a pyproject.toml and a Pipfile with ``count`` entries of each kind."""
+    reads = []
+
+    class Counting(packages._LineFinder):
+        """A finder that counts what it reads."""
+
+        def __init__(self, text):
+            """Read the text, then count every later read."""
+            super().__init__(text)
+            self.lines = _Counted(self.lines, reads)
+            self._code = _Counted(self._code, reads)
+            self._code_in_v03 = _Counted(self._code_in_v03, reads)
+            self.used = _CountedCells(reads)
+            self._used_by_v02 = _CountedCells(reads)
+            self._used_by_v03 = _CountedCells(reads)
+
+    monkeypatch.setattr(packages, "_LineFinder", Counting)
+    names = [f"pkg-{n:04d}" for n in range(count)]
+    lines = ["[project]", 'name = "demo"', "dependencies = ["]
+    lines += [f'    "{name}>=1.0",' for name in names]
+    lines += ["]", "[project.optional-dependencies]", "same = ["]
+    lines += ['    "same-lib",'] * count
+    lines += ["]", "one-line = [" + ", ".join(f'"{name}"' for name in names) + "]"]
+    lines += [f'group-{name} = ["{name}"]' for name in names]
+    lines += ["[tool.poetry.dependencies]"]
+    lines += [f'{name} = "^1.0"' for name in names]
+    for name in names:
+        lines += [f"[tool.poetry.group.{name}.dependencies]", 'same-lib = "^1.0"']
+    pyproject = write("pyproject.toml", "\n".join(lines) + "\n")
+    pipfile = write("Pipfile", "[packages]\n" + "".join(f'{name} = "*"\n' for name in names))
+    assert len(parse_dependency_file(pyproject, tmp_path).dependencies) == 6 * count
+    assert len(parse_dependency_file(pipfile, tmp_path).dependencies) == count
+    return len(reads)
+
+
+def test_a_long_file_is_gone_through_once_not_once_per_entry(write, tmp_path, monkeypatch):
+    """A file with twice the entries takes about twice the reads to find their lines,
+    whether the entries are requirement strings (each on its own line, all on one
+    line, or the same one again and again), arrays of their own, keys of one table, or
+    the same key in many tables. With every line read again for every entry it took
+    four times as many, and a ``pyproject.toml`` of 20,000 dependencies took minutes."""
+    small = _reads_of_a_file_with(100, write, tmp_path, monkeypatch)
+    large = _reads_of_a_file_with(200, write, tmp_path, monkeypatch)
+    assert 0 < small < large < 2.5 * small, (small, large)

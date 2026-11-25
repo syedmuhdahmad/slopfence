@@ -33,8 +33,10 @@ import importlib.util
 import json
 import re
 import sys
+from bisect import bisect_left
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
@@ -109,6 +111,14 @@ _HEADER_NOISE = re.compile(r"""[\s"']""")
 # The name of no table: every name has its white space taken out. A search in the
 # table of this name is a search in the whole file (see ``_LineFinder._search``).
 _NO_TABLE = " "
+# How a line goes on after its indentation when it sets the key that ``\1`` stands for
+# (see ``_LineFinder._key_cells``). An entry of a table: ``name = ...`` or
+# ``name.version = ...``. And what v0.2 took for one: ``name = ...`` only, in quotes
+# that need not pair up. The line that opens an array is known in that way too.
+_ENTRY = r"""(?:"\1"|'\1'|\1)\s*[=.]"""
+_ENTRY_IN_V02 = r"""["']?\1["']?\s*="""
+# What v0.3 took for the start and the end of a string, wherever it stands on a line.
+_QUOTE = re.compile(r"""["']""")
 
 # A Pipfile declares dependencies itself, so it is a dependency file, not a lock file.
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock"}
@@ -734,9 +744,14 @@ class _LineFinder:
         # counted. And the same as v0.3 saw it, for ``spec_in_v03``.
         self._code = [line.code for line in self.toml_lines]
         self._code_in_v03 = [_code_in_v03(line) for line in self.lines]
-        # (column, value) of the strings of a line (0-based), read when a search
-        # first gets to the line.
-        self._values: dict[int, list[tuple[int, str | None]]] = {}
+        # What a search found out that a later one asks for again, so that a file of
+        # thousands of entries is gone through once and not once for each entry: the
+        # lines of an array, the lines that set a key, the places where v0.3 saw a
+        # string, and how far the search for one thing in one span of lines has got.
+        self._arrays: dict[tuple[int, int, str, bool], tuple[int, int] | None] = {}
+        self._keys: dict[tuple[str, str, bool], list[tuple[int, int]]] = {}
+        self._seen_by_v03: dict[str, list[tuple[int, int]]] = {}
+        self._resume: dict[tuple[tuple[str, str], int, int], int] = {}
 
     def _array_range(
         self, start: int, end: int, key: str, code: Sequence[str]
@@ -745,23 +760,30 @@ class _LineFinder:
 
         The brackets are counted in ``code``, the code of each line of the file.
         """
-        key_re = re.compile(r"""^\s*["']?""" + re.escape(key) + r"""["']?\s*=""")
-        for i in range(start, end + 1):
-            if not key_re.match(self.lines[i]):
-                continue
+        asked = (start, end, key, code is self._code)
+        if asked in self._arrays:
+            return self._arrays[asked]
+        opened = self._key_cells(_ENTRY_IN_V02, key, commented=True)
+        at = bisect_left(opened, (start,))
+        span = None
+        if at < len(opened) and opened[at][0] <= end:
+            i = opened[at][0]
+            span = i, end
             depth, seen_open = 0, False
             for j in range(i, end + 1):
                 depth += code[j].count("[") - code[j].count("]")
                 seen_open = seen_open or "[" in code[j]
                 if seen_open and depth <= 0:
-                    return i, j
-            return i, end
-        return None
+                    span = i, j
+                    break
+        self._arrays[asked] = span
+        return span
 
     def _search(
         self,
         table: str,
-        columns: Callable[[int], Iterable[int]],
+        cells: Sequence[tuple[int, int]],
+        mark: tuple[str, str],
         array: str | None = None,
         used: set[tuple[int, int]] | None = None,
         code: Sequence[str] | None = None,
@@ -769,42 +791,145 @@ class _LineFinder:
         """The line (1-based) of the first match in a table that no earlier search
         took, or the first line of the table when there is none.
 
-        ``columns`` gives the columns of the matches on a line (0-based). A table
-        without a header of its own is searched for in the whole file. ``array``
-        narrows the search to that array of the table, which ends where the
-        brackets in ``code`` say (by default, the code outside strings and
-        comments). ``used`` holds the matches that are taken: the finder's own,
-        unless another set is given.
+        ``cells`` holds the (line, column) of every match in the file (0-based), in
+        the order of the file. A table without a header of its own is searched for
+        in the whole file. ``array`` narrows the search to that array of the table,
+        which ends where the brackets in ``code`` say (by default, the code outside
+        strings and comments). ``used`` holds the matches that are taken: the
+        finder's own, unless another set is given. ``mark`` says what kind of thing
+        is searched for, and which one: the next search for it in the same lines
+        goes on where this one stops, as every match before that is taken for good.
         """
         used = self.used if used is None else used
         code = self._code if code is None else code
         start, end = self.ranges.get(table, (0, len(self.lines) - 1))
         if array is not None and (span := self._array_range(start, end, array, code)):
             start, end = span
-        for i in range(start, end + 1):
-            for column in columns(i):
-                if (i, column) not in used:
-                    used.add((i, column))
-                    return i + 1
-        return start + 1
+        asked = (mark, start, end)
+        at = self._resume.get(asked)
+        if at is None:
+            at = bisect_left(cells, (start,))
+        line = start + 1
+        while at < len(cells) and cells[at][0] <= end:
+            cell = cells[at]
+            at += 1
+            if cell not in used:
+                used.add(cell)
+                line = cell[0] + 1
+                break
+        self._resume[asked] = at
+        return line
 
-    def _pattern_columns(self, pattern: re.Pattern[str], i: int) -> list[int]:
-        """Where ``pattern`` matches line ``i`` (0-based), unless it is commented out."""
-        line = self.lines[i]
-        if line.lstrip().startswith("#"):
-            return []
-        return [m.start() for m in pattern.finditer(line)]
+    def _is_commented_out(self, i: int) -> bool:
+        """Whether line ``i`` (0-based) holds a comment and nothing else."""
+        return self.lines[i].lstrip().startswith("#")
 
-    def _string_columns(self, value: str, i: int) -> list[int]:
-        """Where a string that reads as ``value`` starts on line ``i`` (0-based).
+    @cached_property
+    def _starts(self) -> list[tuple[str, int]]:
+        """(text, line) of what each line (0-based) starts with, sorted: the lines
+        that start with a given text stand together.
 
-        A string is compared by what it says, not how it is written. Text in a
-        comment is no string, so a commented-out entry never matches.
+        A line starts with what follows its indentation, and a line with a quote
+        there also with what follows that quote: a key can be written in quotes.
         """
-        if i not in self._values:
-            strings = self.toml_lines[i].strings
-            self._values[i] = [(column, _toml_string(source)) for column, source in strings]
-        return [column for column, read in self._values[i] if read == value]
+        starts = []
+        for i, line in enumerate(self.lines):
+            text = line.lstrip()
+            starts.append((text, i))
+            if text.startswith(('"', "'")):
+                starts.append((text[1:], i))
+        return sorted(starts)
+
+    def _key_cells(self, rest: str, name: str, commented: bool = False) -> list[tuple[int, int]]:
+        """(line, 0) of each line (0-based) that sets the key ``name``, in order.
+
+        ``rest`` is the pattern for such a line after its indentation, with ``\\1``
+        for the name: ``_ENTRY`` or ``_ENTRY_IN_V02``. A line that is commented out
+        only counts with ``commented``.
+
+        The name is read from the front of the text, as a group of its own length,
+        and the line follows it. So one compiled pattern serves every name of that
+        length: compiling one for each name took longer than the search itself.
+        Only the lines that can match are tried. They start with the name, or with
+        the name without the white space in front of it, which the indentation of
+        the line can stand for.
+        """
+        asked = (rest, name, commented)
+        if asked not in self._keys:
+            pattern = re.compile(rf"(?s)(.{{{len(name)}}})\s*{rest}")
+            lines: set[int] = set()
+            for start in {name, name.lstrip()}:
+                at = bisect_left(self._starts, (start,))
+                while at < len(self._starts) and self._starts[at][0].startswith(start):
+                    lines.add(self._starts[at][1])
+                    at += 1
+            self._keys[asked] = [
+                (i, 0)
+                for i in sorted(lines)
+                if (commented or not self._is_commented_out(i))
+                and pattern.match(name + self.lines[i])
+            ]
+        return self._keys[asked]
+
+    @cached_property
+    def _strings(self) -> dict[str, list[tuple[int, int]]]:
+        """(line, column) of each string of the file (0-based), in order, by the
+        value that the string reads as.
+
+        A string is known by what it says, not how it is written. Text in a comment
+        is no string, so a commented-out entry is not among them.
+        """
+        found: dict[str, list[tuple[int, int]]] = {}
+        for i, line in enumerate(self.toml_lines):
+            for column, source in line.strings:
+                value = _toml_string(source)
+                if value is not None:
+                    found.setdefault(value, []).append((i, column))
+        return found
+
+    @cached_property
+    def _quotes(self) -> dict[str, list[tuple[int, int]]]:
+        """(line, column) of each quote character of the file (0-based), in order, by
+        the text between it and the next quote character or the end of its line.
+
+        A line that is commented out has none: v0.3 did not look at it.
+        """
+        found: dict[str, list[tuple[int, int]]] = {}
+        for i, line in enumerate(self.lines):
+            if self._is_commented_out(i):
+                continue
+            before, *parts = _QUOTE.split(line)
+            column = len(before)
+            for part in parts:
+                found.setdefault(part, []).append((i, column))
+                column += len(part) + 1
+        return found
+
+    def _cells_in_v03(self, spec: str) -> list[tuple[int, int]]:
+        """(line, column) of each place (0-based) where v0.3 saw the string ``spec``,
+        in order: a quote character, the text of ``spec``, the same quote character.
+
+        Looked up once for each string, among the quote characters that the first
+        part of ``spec`` follows, up to its own first quote character.
+        """
+        if spec not in self._seen_by_v03:
+            size = len(spec) + 2
+            cells: list[tuple[int, int]] = []
+            free = (0, 0)
+            for cell in self._quotes.get(_QUOTE.split(spec, maxsplit=1)[0], ()):
+                i, column = cell
+                line = self.lines[i]
+                # v0.3 went on behind a match, so it never saw one that starts inside
+                # another: of '"a"a"a"' it took the first "a" and the last.
+                if (
+                    cell >= free
+                    and line.startswith(spec, column + 1)
+                    and line[column + size - 1 : column + size] == line[column]
+                ):
+                    cells.append(cell)
+                    free = (i, column + size)
+            self._seen_by_v03[spec] = cells
+        return self._seen_by_v03[spec]
 
     def spec(self, table: str, array: str, spec: str) -> int:
         """The line (1-based) of the requirement string ``spec`` in ``table.array``.
@@ -812,7 +937,7 @@ class _LineFinder:
         An entry written with escapes (``"pkg; python_version<\\"3.12\\""``) is found
         on its own line too, so the ignore comment there applies to it.
         """
-        return self._search(table, lambda i: self._string_columns(spec, i), array)
+        return self._search(table, self._strings.get(spec, ()), ("spec", spec), array)
 
     def spec_in_v03(self, table: str, array: str, spec: str) -> int:
         """The line (1-based) on which v0.3 reported the requirement string ``spec``.
@@ -822,10 +947,10 @@ class _LineFinder:
         An entry written with escapes it reported on the line that opens its array.
         That is where a user of v0.3 put the ignore comment for it.
         """
-        pattern = re.compile(r"""(["'])""" + re.escape(spec) + r"\1")
         return self._search(
             table,
-            lambda i: self._pattern_columns(pattern, i),
+            self._cells_in_v03(spec),
+            ("v03", spec),
             array,
             used=self._used_by_v03,
             code=self._code_in_v03,
@@ -840,9 +965,7 @@ class _LineFinder:
         """
         if own := self.ranges.get(f"{table}.{name}"):
             return own[0] + 1
-        key = re.escape(name)
-        pattern = re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]""")
-        return self._search(table, lambda i: self._pattern_columns(pattern, i))
+        return self._search(table, self._key_cells(_ENTRY, name), ("key", name))
 
     def key_in_v02(self, table: str, name: str) -> int:
         """The line (1-based) on which v0.2 reported the entry ``name`` of a table.
@@ -852,10 +975,8 @@ class _LineFinder:
         such a header on the first ``name = ...`` line of the file, or on line 1.
         That is where a user of v0.2 put the ignore comment for it.
         """
-        pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
-        return self._search(
-            table, lambda i: self._pattern_columns(pattern, i), used=self._used_by_v02
-        )
+        cells = self._key_cells(_ENTRY_IN_V02, name)
+        return self._search(table, cells, ("v02", name), used=self._used_by_v02)
 
     def key_in_v02_file(self, table: str, name: str) -> int | None:
         """The line (1-based) on which v0.2 reported the entry ``name`` of a table
@@ -870,9 +991,11 @@ class _LineFinder:
         own = self.ranges.get(table)
         if own is None or _header_in_v02(self.lines[own[0]]) == table:
             return None
-        pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
+        # The same lines as ``key_in_v02`` takes, looked for in the whole file. A mark
+        # of its own: this search has its own set of taken matches.
+        cells = self._key_cells(_ENTRY_IN_V02, name)
         return self._search(
-            _NO_TABLE, lambda i: self._pattern_columns(pattern, i), used=self._used_by_v02_file
+            _NO_TABLE, cells, ("v02 in the file", name), used=self._used_by_v02_file
         )
 
     def ignored(self, line: int) -> frozenset[str]:
