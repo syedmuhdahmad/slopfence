@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -62,6 +63,27 @@ def _is_checkout(folder: Path) -> bool:
     return os.path.exists(folder / ".git")
 
 
+# The reparse tag of a directory junction (``stat.IO_REPARSE_TAG_MOUNT_POINT``, a name
+# that ``stat`` only has on Windows).
+_JUNCTION_TAG = 0xA0000003
+
+
+def _is_junction(path: Path) -> bool:
+    """Whether ``path`` is a directory junction: the Windows link to a folder that
+    needs no privilege.
+
+    ``os.path.islink`` does not count one as a link, and before Python 3.12
+    ``os.walk`` enters one like a folder of its own. So it is asked for here
+    (``os.path.isjunction`` is new in Python 3.12).
+    """
+    if os.name != "nt":
+        return False
+    try:
+        return os.lstat(path).st_reparse_tag == _JUNCTION_TAG
+    except (OSError, ValueError):
+        return False
+
+
 def _is_pruned(folder: Path) -> bool:
     """Whether the walk of a project never enters ``folder``.
 
@@ -71,9 +93,75 @@ def _is_pruned(folder: Path) -> bool:
     must not count as this project's code (SLOP030 would double-report; SLOP001
     would treat its modules as local and its dependency files as this project's,
     see #58).
+
+    It is also so for a directory junction. ``os.walk`` never enters a folder that
+    is a symbolic link, and from Python 3.12 on no junction either. The walk is the
+    same on every Python: a linked folder is not entered, wherever it leads.
     """
     name = folder.name
-    return name in EXCLUDED_DIRS or name.endswith(".egg-info") or _is_checkout(folder)
+    if name in EXCLUDED_DIRS or name.endswith(".egg-info"):
+        return True
+    return _is_checkout(folder) or _is_junction(folder)
+
+
+def _is_read(found: Path, home: Path | None) -> bool:
+    """Whether a file that was found in the folder tree ``home`` is one to read.
+
+    Not a symbolic link that leads out of ``home``: what it names is a file of the
+    machine, not of the project, and a project that is checked must not choose which
+    of those files are read, quoted in a report or have their lines sent to PyPI as
+    package names. With ``home`` None any link is followed. And not a pipe, a device
+    or a socket, directly or through a link: reading one may never end.
+
+    A link whose target is gone, and a file that can't be looked at, are kept:
+    reading them says what is wrong, as it always did. A link that leads back to
+    itself is not: before Python 3.13, resolving its path raises.
+    """
+    try:
+        mode = os.lstat(found).st_mode
+    except OSError:
+        return True
+    if stat.S_ISREG(mode):
+        return True
+    if not stat.S_ISLNK(mode):
+        return False
+    target = Path(os.path.realpath(found))
+    if home is not None and not target.is_relative_to(home):
+        return False
+    # ``lexists``: a link in a loop is there, and names nothing.
+    return os.path.isfile(target) or not os.path.lexists(target)
+
+
+def _is_refused_link(path: Path, project: Path) -> bool:
+    """Whether a named path is a link that is not followed. A link is a symbolic
+    link or, on Windows, a directory junction.
+
+    Two kinds are not. A link that lies in the project and leads out of it, to a file
+    or to a folder: pre-commit names every changed file of a commit, links among
+    them, so such a name is the project's choice and not the user's. And a link that
+    leads back to itself, wherever it lies: it names nothing, and before Python 3.13
+    resolving its path raises.
+
+    Only the last part of the path is looked at. A path below a linked folder was
+    spelled out by whoever named it.
+    """
+    folder = Path(os.path.realpath(path.parent))
+    found = folder / path.name
+    if not (os.path.islink(found) or _is_junction(found)):
+        return False
+    target = Path(os.path.realpath(found))
+    # There, but nothing to look at: the chain of links ends in a link again.
+    if os.path.lexists(target) and not os.path.exists(target):
+        return True
+    return folder.is_relative_to(project) and not target.is_relative_to(project)
+
+
+def _followed(paths: Sequence[Path], project: Path) -> list[Path]:
+    """The named ``paths`` that are read: all but the links that are not followed.
+
+    ``project`` is the project root with every link in it resolved.
+    """
+    return [path for path in paths if not _is_refused_link(Path(path), project)]
 
 
 def discover_all(
@@ -86,32 +174,52 @@ def discover_all(
     project (``requirements/base.txt``, see ``dependency.kind_of``). With ``deep``
     False only the files that lie directly in a folder are taken, and none of the
     folders inside it is entered.
+
+    A link out of the project and a file that is no plain file are left out (see
+    ``_is_read``). For a folder outside the project, "the project" is that folder.
+    A file outside the project that is named itself is always taken: naming it is
+    the user's choice. A named path that is itself a link out of the project, to a
+    file or to a folder, is passed over (see ``_is_refused_link``).
     """
     py_files: list[Path] = []
     dep_files: list[Path] = []
     lock_files: list[Path] = []
+    project = Path(os.path.realpath(root))
 
-    def add(path: Path) -> None:
-        """Put one file on the lists it belongs to."""
-        if path.suffix == ".py":
-            py_files.append(path)
+    def add(path: Path, found: Path, home: Path | None) -> None:
+        """Put one file on the lists it belongs to, when it is one to read.
+
+        ``found`` is the place it was found at: ``path`` itself, or a link to it.
+        """
+        lists = [py_files] if path.suffix == ".py" else []
         if kind_of(path, root) is not None:
-            dep_files.append(path)
+            lists.append(dep_files)
         elif path.name in LOCK_FILES:
-            lock_files.append(path)
+            lists.append(lock_files)
+        # Asked last: most files are of no kind, and need no look at the disk.
+        if lists and _is_read(found, home):
+            for files in lists:
+                files.append(path)
 
-    for path in paths:
-        path = path.resolve()
+    for path in _followed(paths, project):
+        # Where the path lies, before a link in its last part is followed.
+        folder = Path(os.path.realpath(Path(path).parent))
+        found = folder / Path(path).name
+        # ``realpath``, not ``Path.resolve``: before Python 3.13 that one raises for
+        # a link in a loop anywhere in the path.
+        path = Path(os.path.realpath(path))
         if path.is_file():
-            add(path)
+            add(path, found, project if folder.is_relative_to(project) else None)
             continue
+        home = project if path.is_relative_to(project) else path
         for dirpath, dirnames, filenames in os.walk(path):
             # Pruned before descending. The path passed on the command line is the
             # walk root and is never pruned, so an explicitly named checkout is still
             # checked.
             dirnames[:] = [d for d in dirnames if deep and not _is_pruned(Path(dirpath, d))]
             for filename in filenames:
-                add(Path(dirpath, filename))
+                file = Path(dirpath, filename)
+                add(file, file, home)
     return sorted(set(py_files)), sorted(set(dep_files)), sorted(set(lock_files))
 
 
@@ -122,13 +230,14 @@ def _home(path: Path, root: Path) -> tuple[Path, bool] | None:
     None for a path that the walk reaches: it belongs to the project. The walk never
     leaves ``root`` and never enters a pruned folder (see ``_is_pruned``). A file or
     folder that is named there is checked all the same. It belongs to its own
-    checkout: the nearest folder above it that holds a ``.git``. A file without one
-    belongs to its own folder. A folder without one is on its own, like a folder that
-    is a checkout itself, or the root, or a folder above the root: the walk of the
-    named folder reads all there is.
+    checkout: the nearest folder above it that holds a ``.git``. That goes for a
+    folder above the root too: it is no part of the project, so it has a checkout of
+    its own like any other folder outside. A file without one belongs to its own
+    folder. A folder without one is on its own, like a folder that is a checkout
+    itself, or the root: the walk of the named folder reads all there is.
     """
     is_folder = path.is_dir()
-    if is_folder and (path == root or path in root.parents or _is_checkout(path)):
+    if is_folder and (path == root or _is_checkout(path)):
         return None
     above = list(path.parents)
     if root in above:
@@ -150,16 +259,19 @@ def _beside_named_paths(paths: Sequence[Path], root: Path) -> tuple[list[Path], 
     A checkout is walked like a project. Of a folder that is no checkout, only the
     files that lie directly in it count: what lies below a folder that happens to
     hold a named file (a home folder, a shared drive) is nobody's project.
+
+    Each home is the root that its own files are judged in. ``requirements/base.txt``
+    of a checkout is a requirements file by its folder in that checkout, wherever
+    the root of this run lies.
     """
-    homes = {home for path in paths if (home := _home(Path(path).resolve(), root))}
+    homes = {home for path in paths if (home := _home(Path(os.path.realpath(path)), root))}
     deps: list[Path] = []
     locks: list[Path] = []
-    for deep in (True, False):
-        # The usual case has no home at all: every named path is one the walk reaches.
-        if folders := sorted(folder for folder, is_checkout in homes if is_checkout is deep):
-            _, found_deps, found_locks = discover_all(folders, root, deep)
-            deps += found_deps
-            locks += found_locks
+    # The usual case has no home at all: every named path is one the walk reaches.
+    for folder, is_checkout in sorted(homes):
+        _, found_deps, found_locks = discover_all([folder], folder, deep=is_checkout)
+        deps += found_deps
+        locks += found_locks
     return deps, locks
 
 
@@ -372,6 +484,9 @@ def run(
     ignore = set(ignore)  # read once: it may be an iterator, and it is needed twice
     rules = selected_rules(select, ignore)
     root = root.resolve()
+    # A link that is not followed is no path of this run: it is not read, it does
+    # not stand for the project, and the folder it leads to lends no dependency files.
+    paths = _followed(paths, root)
 
     found_py, found_deps, found_locks = discover_all(paths, root)
     # Excluded files are not checked, but still count as project modules below.
@@ -383,7 +498,7 @@ def run(
     # compared with the rest. And a private index, or the name of one of the project's
     # own packages, counts wherever in the project it is written.
     project = (found_py, found_deps, found_locks)
-    whole_project_given = any(Path(p).resolve() == root for p in paths)
+    whole_project_given = any(Path(os.path.realpath(p)) == root for p in paths)
     package_rules = rules & PACKAGE_RULES
     if (package_rules or "SLOP030" in rules) and not whole_project_given:
         project = discover_all([root], root)

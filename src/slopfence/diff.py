@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -26,24 +27,77 @@ _DIFF_OPTIONS = (
 ChangedLines = dict[str, "set[int] | None"]
 
 
+# The file name of the git program. Windows adds ``.exe`` to a program that is started
+# by its name, and nothing else: a ``git.cmd`` or ``git.bat`` was never started.
+_GIT_PROGRAM = "git.exe" if os.name == "nt" else "git"
+_NO_GIT = "git is not installed"
+# How every git command is started. git reads the config of the repository it runs in,
+# and that repository is the project being checked.
+_GIT_OPTIONS = (
+    # ``core.fsmonitor`` can name a program, which git then runs to ask what changed.
+    # The empty value switches it off in every git. ``false`` does not: a git before
+    # 2.36 reads the value as the name of a program, and would start one named "false".
+    "-c",
+    "core.fsmonitor=",
+)
+# Only read: don't refresh the index file on the side. That write would also run the
+# repository's ``post-index-change`` hook. Set in the environment, not with
+# ``--no-optional-locks``: a git from before 2.15 turns that option down and ignores
+# the variable.
+_GIT_ENVIRONMENT = {"GIT_OPTIONAL_LOCKS": "0"}
+
+
 class DiffError(RuntimeError):
     """git could not give the changed lines: it is not installed, or the ref is unknown."""
 
 
+def find_git(search_path: str) -> str | None:
+    """The full path of the git program in ``search_path``, a ``PATH`` value. None when
+    no folder of it holds one.
+
+    Only a folder that is named by its full path counts. An empty entry, ``.`` or
+    ``bin`` stands for the current folder or a folder in it, and git runs in the
+    project that is checked: a program named git that lies there is a file of that
+    project, and slopfence does not start one through such an entry. A folder that is
+    named by its full path is trusted as it is, wherever it lies.
+    """
+    for entry in search_path.split(os.pathsep):
+        # Windows takes a folder with quotes around it.
+        folder = entry.strip('"')
+        # ``Path.is_absolute``, not ``os.path.isabs``: before Python 3.13 that one
+        # takes ``\\tools`` on Windows for a full path, and it has no drive.
+        if not Path(folder).is_absolute():
+            continue
+        program = os.path.join(folder, _GIT_PROGRAM)
+        if os.path.isfile(program) and os.access(program, os.X_OK):
+            return program
+    return None
+
+
 def _git(root: Path, *args: str) -> str:
-    """What a git command prints when run in ``root``. Raises DiffError when it fails."""
+    """What a git command prints when run in ``root``. Raises DiffError when it fails.
+
+    git is started by its full path (see ``find_git``), so every system starts the
+    same program. Started by its name alone, Windows would look for it in the folder
+    slopfence was started in before any folder of ``PATH``, and that is the project.
+    """
+    program = find_git(os.environ.get("PATH", os.defpath))
+    if program is None:
+        raise DiffError(_NO_GIT)
     try:
         result = subprocess.run(
-            ["git", *args],
+            [program, *_GIT_OPTIONS, *args],
             cwd=root,
+            env={**os.environ, **_GIT_ENVIRONMENT},
             capture_output=True,
             check=True,
             # git emits UTF-8 paths; don't decode with the locale (cp1252 on Windows).
             encoding="utf-8",
             errors="surrogateescape",
         )
+    # Removed since it was found a moment ago.
     except FileNotFoundError as err:
-        raise DiffError("git is not installed") from err
+        raise DiffError(_NO_GIT) from err
     except subprocess.CalledProcessError as err:
         raise DiffError(err.stderr.strip() or f"git {' '.join(args)} failed") from err
     return result.stdout
@@ -101,7 +155,13 @@ def parse_unified_diff(diff_text: str) -> ChangedLines:
 
 
 def changed_lines(root: Path, ref: str) -> ChangedLines:
-    """Lines changed between merge-base(ref, HEAD) and the working tree, plus untracked files."""
+    """Lines changed between merge-base(ref, HEAD) and the working tree, plus untracked files.
+
+    Raises DiffError when git can't say, and for a ``ref`` that starts with ``-``: git
+    would read it as an option, not as a ref.
+    """
+    if ref.startswith("-"):
+        raise DiffError(f"a git ref can't start with '-' (got {ref!r})")
     base = _git(root, "merge-base", ref, "HEAD").strip()
     diff = _git(root, "diff", *_DIFF_OPTIONS, base)
     changed = parse_unified_diff(diff)

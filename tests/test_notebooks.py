@@ -378,6 +378,13 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!env X=1 pip install -i {PRIVATE} corp-a\n",
         f"!X=1 /usr/bin/pip install -i {PRIVATE} corp-a\n",
         f"!time C:\\\\Python\\\\Scripts\\\\pip install -i {PRIVATE} corp-a\n",
+        # The same on a line without "!" or "%": IPython runs ``pip`` as the magic.
+        f"pip -q install -i {PRIVATE} corp-a\n",
+        f"pip --no-cache-dir install --extra-index-url {PRIVATE} corp-a\n",
+        f"pip --proxy http://proxy.corp.example:3128 install --index {PRIVATE} corp-a\n",
+        "pip -q install -f ./wheels corp-a\n",
+        "pip --quiet install --no-index corp-a\n",
+        f"import os\npip -q install -i {PRIVATE} corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):
@@ -397,6 +404,8 @@ def test_a_private_source_covers_the_whole_notebook(write, check, cell):
         "!python -m pip -q install -e .",
         "!sudo pip install -r requirements.txt",
         "!sudo -H pip install corp-auth",
+        "pip -q install ./pkg",
+        "pip --quiet install corp-auth",
     ],
 )
 def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installed, command):
@@ -420,6 +429,11 @@ def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installe
         "!pipenv --version",
         "!echo install pip",
         "!pip download ghost-lib",
+        # Without "!" or "%": Python, or a line that IPython turns down.
+        "%matplotlib inline\npip = install = None",
+        "%matplotlib inline\npip, install = 1, 2",
+        "pip --version",
+        "pip -q download ghost-lib",
     ],
 )
 def test_a_command_that_is_no_pip_install_changes_nothing(write, check, not_installed, command):
@@ -1021,6 +1035,98 @@ def test_a_carriage_return_inside_a_cell_line_moves_no_import(tmp_path, not_inst
     assert not any("corp" in name for name in registry.queries)
 
 
+# A cell with a carriage return that no line feed follows, and the names that are sent
+# for the notebook: after the carriage return, and above a string that spans lines.
+PIP_LINES_NEAR_A_STRING = {
+    "a command after the carriage return": (f"x = 1\r!pip install -i {PRIVATE} corp-auth\n", []),
+    "a bare command after it": (f"import os\rpip -q install -i {PRIVATE} corp-auth\n", []),
+    "a command that ends at it": (
+        "%pip install ghost-one\rimport os\n",
+        ["ghost-one", "ghost-pip"],
+    ),
+    "a command right below the string": (
+        f'x = 1\rtext = """\nusage\n"""\n!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    "a command below a string with one in it": (
+        f'text = """a\rb\n"""\n%pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    # The magic at the end keeps the cell from being Python as it stands.
+    "text in the string": (
+        'x = 1\rtext = """\n!pip install corp-in-text\n"""\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    "text in the string, two above": (
+        'x = 1\ry = 2\rtext = """\n\n%pip install corp-in-text\n"""\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    # The string closes on the line that looks like a command. Taken for one, that
+    # line would take the closing marks with it, and the rest would be no Python.
+    "text on the line that closes the string": (
+        'text = """usage\r!pip install corp-in-text # """\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    "text in a string that a backslash carries on": (
+        'y = 1\rx = "usage \\\n!pip install corp-in-text"\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    # A cell that is no Python with or without its commands: Python 2's print.
+    "text in a string of a cell that is no Python": (
+        "print \"usage\"\rhelp = '''\n!pip install corp-in-text\n'''\n",
+        ["ghost-pip"],
+    ),
+    "a command below a string in a cell that is no Python": (
+        'print "usage"\rhelp = """\ntext\n"""\n!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
+    # Three marks that nothing closes are no string. The command below them is read,
+    # and its index covers the notebook.
+    "a command with an index below marks that are never closed": (
+        f'x = """never closed\r!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    # The string is closed, and in the same line another one opens that never is.
+    "text in a string that closes where another opens": (
+        'help = """\r!pip install corp-in-text\n"""; unfinished = """\n',
+        ["ghost-pip"],
+    ),
+    # A string in single marks that a backslash carries on, and that does not end in
+    # the next line: no string. The command there is read, and its index counts.
+    "a command with an index below a single mark that is never closed": (
+        f'y = 1\rx = "unfinished \\\n!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    "a command below a string with an escaped mark in it": (
+        'x = "say \\"hi\\""\r!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(PIP_LINES_NEAR_A_STRING))
+def test_a_carriage_return_above_a_string_moves_no_pip_line(tmp_path, layout):
+    """A carriage return that no line feed follows ends a line for Python and for
+    IPython. So a command after one is read, and its index covers the notebook. The
+    lines of a string are the lines the parser counts: the command right below the
+    string is read too, and a line of the string is still text, so its name is not
+    sent: also on the line that closes the string, and also in a cell that is no
+    Python. The same cell with a line feed in its place sends the same names."""
+    cell, sent = PIP_LINES_NEAR_A_STRING[layout]
+    path = tmp_path / "nb.ipynb"
+    path.write_text(jupyter([cell, "%pip install ghost-pip\n"]), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert registry.queries == sent and subjects(result) == sent
+
+    # The same cell with a line feed in place of the carriage return sends the same.
+    cells = [cell.replace("\r", "\n"), "%pip install ghost-pip\n"]
+    path.write_text(jupyter(cells), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert registry.queries == sent and subjects(result) == sent
+
+
 def test_read_notebook_keeps_code_cells_only():
     """Markdown and raw cells, and cells without a string source, are dropped."""
     nb = notebook(["x = 1\n"])
@@ -1249,3 +1355,51 @@ def test_diff_counts_the_lines_of_the_file_under_a_textconv_driver(tmp_path):
     assert line in changed["nb.ipynb"]
     result = run([tmp_path], tmp_path, FakeRegistry({"requests"}), changed=changed)
     assert found(result) == [("nb.ipynb", line, text.split("\n")[line - 1].index("ghost-new") + 1)]
+
+
+# --- A cell saved as one long string: positions stay right, and cheap to find. ---
+
+
+def _one_string_cell(count):
+    """The text of a notebook whose one code cell is a single JSON string of ``count``
+    pip lines and imports, with every kind of escape between them."""
+    lines = []
+    for n in range(count):
+        lines.append(f'label = "q{n}"  # café \\ tab\there')
+        lines.append(f"%pip install one-string-{n}")
+        lines.append(f"import one_string_{n}")
+    cell = {"cell_type": "code", "metadata": {}, "outputs": [], "source": "\n".join(lines)}
+    return json.dumps({"cells": [cell], "metadata": {}, "nbformat": 4, "nbformat_minor": 5})
+
+
+def test_positions_in_a_cell_that_is_one_long_string(tmp_path):
+    """Every dependency and import of such a cell is found at its own place in the
+    file, whatever escapes come before it."""
+    text = _one_string_cell(40)
+    assert "\\n" in text and '\\"' in text and "\\\\" in text and "\\u00e9" in text
+    scanned = scan_notebook(text, "n.ipynb", True)
+    assert [dep.name for dep in scanned.dependencies] == [f"one-string-{n}" for n in range(40)]
+    for dep in scanned.dependencies:
+        assert dep.line == 1 and text[dep.col - 1 :].startswith(dep.name)
+    assert [name for name, _, _ in scanned.imports] == [f"one_string_{n}" for n in range(40)]
+    for name, line, col in scanned.imports:
+        assert line == 1 and text[col - 1 :].startswith(f"import {name}")
+
+
+@pytest.mark.parametrize("step", ["_escapes", "_line_offsets"])
+def test_a_long_string_is_gone_through_once_not_once_per_name(monkeypatch, step):
+    """The escapes of a source string and the line starts of a cell are worked out
+    once, however many names the cell holds. Worked out again for every name, the
+    time grows with the square of the cell: 20,000 pip lines took a minute (#104)."""
+    calls = []
+    real = getattr(notebooks, step)
+
+    def counted(text):
+        """Do the step, and note that it was done."""
+        calls.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(notebooks, step, counted)
+    scanned = scan_notebook(_one_string_cell(300), "n.ipynb", True)
+    assert len(scanned.dependencies) == 300 and len(scanned.imports) == 300
+    assert len(calls) == 1

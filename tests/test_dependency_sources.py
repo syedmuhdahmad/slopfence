@@ -20,7 +20,7 @@ from slopfence.detectors.dependency import (
 from slopfence.detectors.packages import parse_dependency_file
 from slopfence.detectors.setuptools_files import _cfg_lines
 from slopfence.engine import discover_all, run
-from slopfence.registry import OfflineRegistry, PyPIRegistry
+from slopfence.registry import OfflineRegistry, PyPIRegistry, normalize
 from slopfence.source import relative_path
 from tests.conftest import DownRegistry, FakeRegistry, needs_parser_depth_limit
 
@@ -198,6 +198,8 @@ def test_discovery(write, tmp_path):
         # pip fills in an environment variable before it reads the line.
         ("ghost-lib[${EXTRAS}]==1.0", ("ghost-lib", False, False)),
         ("apache-airflow[celery, ${AIRFLOW_EXTRAS}]", ("apache-airflow", False, False)),
+        ("ghost-lib[${A},${B}]", ("ghost-lib", False, False)),
+        ("ghost-lib [ ${A} , ${B} ] >= 1.0", ("ghost-lib", False, False)),
         (
             "corp-lib[${EXTRAS}] @ git+https://git.corp.example/corp-lib.git",
             ("corp-lib", True, False),
@@ -337,6 +339,19 @@ def test_extras_from_an_environment_variable_keep_a_line_a_requirement(write, ch
     assert registry.queries == ["requests", "ghost-lib"]
 
 
+def test_extras_from_two_environment_variables_keep_a_line_a_requirement(write, check):
+    """``name[${A},${B}]`` is a list of two extras, each from a variable. The line is a
+    requirement like any other, so the invented name on it is reported. Two variables
+    with no comma between them can make one extra (``re`` and ``dis`` give ``redis``).
+    That form is not read yet, a limit the README names: such a line is not looked up."""
+    write("requirements.txt", "requests\nghost-lib[${A},${B}]==1.0\nghost-two[${A}, ${B}]\n")
+    write("constraints.txt", "requests==2.31\nghost-three[${A}${B}]==1.0\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("requirements.txt", 2, 1), ("requirements.txt", 3, 1)]
+    assert "ghost-three" not in registry.queries
+
+
 SPACES = " " * 5000
 LONG = [
     # Not a requirement: every way to cut the line up is tried before it is turned down.
@@ -430,6 +445,8 @@ DOCUMENTS = {
     "docs/requirements/usage.txt": "Overview\n~~~~~~~~\n\nUsage\n~~~~~\n",
     "requirements/NOTES.txt": "Requirements\n\n| name | version |\n\nNotes\n\n``pip install``\n",
     "requirements/index.txt": ".. -*- mode: rst -*-\n\nbase\ndev\n",
+    # A dot and a backslash that does not end the line: no line of pip's that goes on.
+    "requirements/layout.txt": "Layout\n\n. \\ the root folder\nbase\ndev\n",
     # Not a document, and no file pip takes either: a merge that is not finished.
     "requirements-dev.txt": "<<<<<<< HEAD\nbase==2.0\n=======\nghost-lib==1.0\n>>>>>>> dev\n",
 }
@@ -492,6 +509,18 @@ def test_options_and_paths_keep_a_file_a_pip_file(write, check):
     result = check("SLOP001", registry=registry)
     assert found(result) == [("requirements/base.txt", len(lines), 1)]
     assert sorted(set(registry.queries)) == ["asgiref", "ghost-lib", "requests"]
+
+
+@pytest.mark.parametrize("folder", [". \\", ".. \\", ".\t\\", ".  \\"])
+def test_the_folder_itself_on_a_line_that_goes_on_keeps_a_file_a_pip_file(write, check, folder):
+    """``. \\`` with its options on the next line installs the folder itself. It is a
+    line of pip's, not the markup of a document: the invented name below it is
+    reported, where the whole file used to be passed over."""
+    body = f"{folder}\n    --config-settings editable_mode=strict\nrequests\nghost-lib==1.0\n"
+    write("requirements/base.txt", body)
+    registry = FakeRegistry({"requests"})
+    assert found(check("SLOP001", registry=registry)) == [("requirements/base.txt", 4, 1)]
+    assert registry.queries == ["requests", "ghost-lib"]
 
 
 def test_a_cmake_file_in_a_requirements_folder_is_not_read(write, check):
@@ -826,7 +855,6 @@ def test_setup_cfg_found_and_missing(write, check, tmp_path):
         "[flake8]\nmax-line-length = 160\nignore = W503,E402\n",
         "[options]\ninstall_requires =\n    %(name)s-core\n",
         "[options]\npython_requires = >=3.8\nzip_safe = False\n",
-        "[options]\ninstall_requires = requests, flask\n",  # commas: setuptools rejects it
         "[options]\n= no option name\n",
     ],
 )
@@ -1008,6 +1036,52 @@ def test_an_ignore_comment_covers_all_that_pip_reads_on_its_line(tmp_path, check
     registry = FakeRegistry(set())
     assert found(check("SLOP001", registry=registry)) == [("requirements.txt", 2, 1)]
     assert registry.queries == ["ghost-three"]
+
+
+# Two requirements on one line of the file, each with a comment of its own: what the
+# comments say, and the names that are still sent.
+TWO_COMMENTS = {
+    "the second one names no rule": ("ignore[SLOP030]", "ignore", ["flask"]),
+    "each names a rule": ("ignore[SLOP002]", "ignore[SLOP001]", ["flask"]),
+    "the first one names no rule": ("ignore", "ignore[SLOP030]", []),
+    "neither covers SLOP001": ("ignore[SLOP030]", "checked", ["flask", "corp-auth"]),
+}
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+@pytest.mark.parametrize("comments", sorted(TWO_COMMENTS))
+def test_every_ignore_comment_on_a_line_counts_where_pip_reads_two(tmp_path, check, char, comments):
+    """``flask  # slopfence: ignore[SLOP030]<form feed>corp-auth  # slopfence: ignore``
+    is one line of the file, and two for pip, each with its comment. The second
+    comment covers its own requirement: v0.2 kept ``corp-auth`` on the machine, and it
+    stays there. The first comment is the comment of the line, as before: it covers
+    both. A comment that names another rule keeps no name back."""
+    first, second, sent = TWO_COMMENTS[comments]
+    text = f"flask  # slopfence: {first}{char}corp-auth  # slopfence: {second}\nrequests\n"
+    (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+    registry = FakeRegistry({"flask", "requests"})
+    result = check("SLOP001", registry=registry)
+    assert registry.queries == [*sent, "requests"]
+    assert [f.subject for f in result.findings] == [name for name in sent if name != "flask"]
+
+
+@pytest.mark.parametrize("char", NOT_LINE_ENDS)
+def test_the_second_comment_on_the_last_line_covers_no_requirement_that_goes_on(
+    tmp_path, check, char
+):
+    """The look-alike: the second comment on the last line of a requirement that goes
+    on belongs to the requirement after the line break that only pip sees. It covers
+    that one, and not the lines before: they are still looked up and reported."""
+    text = (
+        "corp-auth==1.0 \\\n"
+        f"    --hash=sha256:abc  # slopfence: ignore[SLOP030]{char}corp-core  # slopfence: ignore\n"
+        "ghost-three\n"
+    )
+    (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("requirements.txt", 1, 1), ("requirements.txt", 3, 1)]
+    assert registry.queries == ["corp-auth", "ghost-three"]
 
 
 # The same list in the two TOML files, with a comment line above it that holds {char}.
@@ -1228,8 +1302,6 @@ def test_setup_py_skips_everything_computed(write, tmp_path, check):
             'reqs = ["requests"]\nsetup(install_requires=reqs)\n',
             ["requests"],
         ),
-        # A space-separated string is not a requirement.
-        ('setup(install_requires="requests flask")\n', []),
         # Extras that a function returns are not known.
         ("setup(extras_require=load_extras())\n", []),
     ],
@@ -1587,6 +1659,7 @@ def test_an_entry_that_is_a_table_of_its_own_is_on_its_header_line(
 
 IGNORED = "  # slopfence: ignore"
 OWN_ENTRY = '[tool.poetry.dependencies.corp-auth]\nversion = "^1.2"\nextras = ["saml"]\n'
+DOTTED_ENTRY = 'corp-auth.version = "^1.2"\n'
 # A Poetry entry that v0.2 reported on another line than its own, with an ignore
 # comment on that line: the file, and the line the entry is reported on today.
 WHERE_V02_REPORTED = {
@@ -1633,6 +1706,78 @@ def test_an_ignore_comment_where_v02_reported_a_poetry_entry_still_covers_it(tmp
     registry = FakeRegistry({"requests"})
     result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
     assert found(result) == [("pyproject.toml", line, 1)] and "corp-auth" in registry.queries
+
+
+# Headers that v0.2 did not know for ``[tool.poetry.dependencies]``: it took the spaces
+# out of a header and nothing else.
+HEADERS_V02_DID_NOT_KNOW = {
+    "double quotes": '[tool.poetry."dependencies"]',
+    "single quotes": "[tool.'poetry'.dependencies]",
+    "a tab": "[tool.poetry.\tdependencies]",
+}
+# The same entry in the two forms that are not ``name = ...``, and the line it is on.
+NOT_A_PLAIN_KEY = {"a table of its own": (f"\n{OWN_ENTRY}", 8), "a dotted key": (DOTTED_ENTRY, 7)}
+
+
+@pytest.mark.parametrize("entry", sorted(NOT_A_PLAIN_KEY))
+@pytest.mark.parametrize("header", sorted(HEADERS_V02_DID_NOT_KNOW))
+def test_an_ignore_comment_on_line_1_covers_an_entry_under_a_header_v02_did_not_know(
+    tmp_path, header, entry
+):
+    """v0.2 did not find ``[tool.poetry."dependencies"]``, so it looked for the entry
+    in the whole file and reported it on line 1. The ignore comment its users put
+    there still keeps the name on the machine. So does one on the header, where v0.3
+    looked. Without a comment the entry is looked up, on its own line."""
+    body, line = NOT_A_PLAIN_KEY[entry]
+    table = f'{HEADERS_V02_DID_NOT_KNOW[header]}\npython = "^3.10"\n{body}'
+    path = tmp_path / "pyproject.toml"
+    texts = {
+        "line 1": f"# dependencies{IGNORED}\n{POETRY_HEAD}{table}",
+        "the header": f"# dependencies\n{POETRY_HEAD}{table}".replace(
+            "]\npython", f"]{IGNORED}\npython"
+        ),
+    }
+    for where, text in texts.items():
+        path.write_text(text, encoding="utf-8")
+        registry = FakeRegistry({"requests"})
+        result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == [], where
+
+    path.write_text(texts["line 1"].replace(IGNORED, ""), encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("pyproject.toml", line, 1)] and registry.queries == ["corp-auth"]
+
+
+def test_the_first_line_with_the_key_is_where_v02_reported_under_such_a_header(tmp_path):
+    """With a line ``corp-auth = ...`` anywhere in the file, in another table too, that
+    line is where v0.2 reported the entry under a header it did not know. A comment
+    there covers the entry, and a comment on line 1 then does not: v0.2 never
+    reported the entry there."""
+    extras = f'[tool.poetry.extras]\ncorp-auth = ["saml"]{IGNORED}\n\n'
+    table = f'[tool.poetry."dependencies"]\npython = "^3.10"\n\n{OWN_ENTRY}'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(f"# dependencies\n{POETRY_HEAD}{extras}{table}", encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    assert run([tmp_path], tmp_path, registry, select=["SLOP001"]).findings == []
+    assert registry.queries == []
+
+    text = f"# dependencies{IGNORED}\n{POETRY_HEAD}{extras.replace(IGNORED, '')}{table}"
+    path.write_text(text, encoding="utf-8")
+    registry = FakeRegistry({"requests"})
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("pyproject.toml", 11, 1)] and registry.queries == ["corp-auth"]
+
+
+def test_an_ignore_comment_on_line_1_covers_no_entry_under_a_header_v02_knew(tmp_path):
+    """The look-alike: v0.2 found ``[tool.poetry.dependencies]``, also with spaces in
+    it, and reported the entry on that header. A comment on line 1 never covered it."""
+    for header in ("[tool.poetry.dependencies]", "[ tool . poetry . dependencies ]"):
+        text = f'# dependencies{IGNORED}\n{POETRY_HEAD}{header}\npython = "^3.10"\n\n{OWN_ENTRY}'
+        (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+        registry = FakeRegistry({"requests"})
+        result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+        assert found(result) == [("pyproject.toml", 8, 1)] and registry.queries == ["corp-auth"]
 
 
 def test_a_pipfile_entry_with_a_dotted_key_is_on_its_own_line(write, check):
@@ -2624,6 +2769,59 @@ def test_a_string_that_is_no_requirement_still_declares_its_name(
     assert not any("corp" in name for name in registry.queries)
 
 
+SETUP_PY_WITH = "from setuptools import setup\nsetup(name='demo', install_requires={})\n"
+# A ``setup.cfg`` or ``setup.py`` that names ``corp-utils`` in a string that is no
+# requirement: a bracket that is no list of extras, a single "=", Poetry's "^".
+BROKEN_IN_A_SETUP_FILE = {
+    "setup.cfg with a bracket": (
+        "setup.cfg",
+        "[options]\ninstall_requires =\n    requests\n    Corp.Utils [platform:dpkg]\n",
+    ),
+    "setup.cfg with a single =": (
+        "setup.cfg",
+        "[options.extras_require]\ndev =\n    corp-utils=1.0\n",
+    ),
+    "setup.cfg on the line of the key": (
+        "setup.cfg",
+        "[options]\ntests_require = corp_utils ^1.0\n",
+    ),
+    "setup.py with a bracket": (
+        "setup.py",
+        SETUP_PY_WITH.format("['requests', 'Corp.Utils [platform:dpkg]']"),
+    ),
+    "setup.py with a caret": ("setup.py", SETUP_PY_WITH.format("['corp-utils ^1.0']")),
+    # A list in one line, with commas or spaces: setuptools turns it down.
+    "setup.cfg with commas": ("setup.cfg", "[options]\ninstall_requires = corp-utils, flask\n"),
+    "setup.py with spaces": ("setup.py", SETUP_PY_WITH.format('"corp-utils flask"')),
+    "setup.py with a list in one string": (
+        "setup.py",
+        SETUP_PY_WITH.format('"""\n    requests\n    corp-utils=1.0\n    """'),
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(BROKEN_IN_A_SETUP_FILE))
+def test_a_string_that_is_no_requirement_in_a_setup_file_still_declares_its_name(
+    write, check, not_installed, layout
+):
+    """``Corp.Utils [platform:dpkg]`` in ``setup.cfg`` or ``setup.py`` is no requirement,
+    so the name is not looked up as a dependency. It is declared all the same, as it
+    is in a requirements file and in ``pyproject.toml``: with ``--check-imports`` the
+    import of that package stays on the machine. Another import is still looked up."""
+    name, body = BROKEN_IN_A_SETUP_FILE[layout]
+    path = write(name, body)
+    declared = parse_dependency_file(path, path.parent).dependencies
+    assert [(normalize(dep.name), dep.validate) for dep in declared] in (
+        [("corp-utils", False)],
+        [("requests", True), ("corp-utils", False)],
+    )
+    write("app.py", "import corp_utils\nimport ghost_mod_zz\n")
+    registry = FakeRegistry({"requests", "setuptools"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz"]
+    assert not any("corp" in asked.lower() for asked in registry.queries)
+
+
 def test_a_uv_source_for_a_string_that_is_no_requirement_counts_in_other_files(write, check):
     """The same without imports: the uv source says where ``corp-auth`` comes from, so
     the requirements file that names it again is not looked up for it. The broken
@@ -2883,6 +3081,49 @@ def test_the_folders_above_the_project_root_are_never_read(write, tmp_path):
         registry = FakeRegistry(set())
         result = run(paths, root, registry, select=["SLOP001"])
         assert registry.queries == names and result.notes == []
+
+
+# What sets a private index in the checkout that a named folder above the root lies in.
+INDEX_ABOVE = {
+    "requirements.txt": INDEX + "corp-core\n",
+    "deploy/constraints.txt": INDEX + "corp-core\n",
+    # A requirements file by its folder in the checkout, not by its name.
+    "requirements/base.txt": INDEX + "corp-core\n",
+    "Pipfile.lock": PRIVATE_LOCK,
+}
+
+
+@pytest.mark.parametrize("index", sorted(INDEX_ABOVE))
+def test_a_named_folder_above_the_root_is_judged_with_its_own_checkout(write, tmp_path, index):
+    """``slopfence ..`` from ``big/services/proj``, where ``big`` is the checkout: the
+    named folder ``big/services`` is not part of the project, and it belongs to
+    ``big``. So it is checked together with the dependency and lock files of ``big``,
+    as its ``setup.cfg`` is when that file is named: the private index there covers
+    it, and the file and its folder agree."""
+    write("big/.git/HEAD", "ref: refs/heads/main\n")
+    write(f"big/{index}", INDEX_ABOVE[index])
+    path = write("big/services/setup.cfg", GHOST_CFG.replace("ghost-lib", "corp-auth"))
+    write("big/services/proj/app.py", "x = 1\n")
+    root = tmp_path / "big" / "services" / "proj"
+    for named in (path, path.parent):
+        registry = FakeRegistry(set())
+        result = run([named], root, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == []
+        assert "a private package index is set in" in result.notes[0]
+        assert "secret" not in result.notes[0]
+
+
+def test_a_named_folder_above_the_root_without_a_checkout_is_on_its_own(write, tmp_path):
+    """The look-alike: no folder above the named one holds a ``.git``. The folders
+    above it are then nobody's project, and the index there covers nothing."""
+    write("loose/requirements.txt", INDEX + "corp-core\n")
+    path = write("loose/services/setup.cfg", GHOST_CFG)
+    write("loose/services/proj/app.py", "x = 1\n")
+    root = tmp_path / "loose" / "services" / "proj"
+    for named in (path, path.parent):
+        registry = FakeRegistry(set())
+        result = run([named], root, registry, select=["SLOP001"])
+        assert registry.queries == ["ghost-lib"] and result.notes == []
 
 
 def test_a_named_file_the_walk_reaches_is_judged_with_the_project_alone(write, tmp_path):
