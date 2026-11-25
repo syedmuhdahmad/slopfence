@@ -19,6 +19,7 @@ from slopfence.detectors.dependency import (
     DependencyFile,
     Kind,
     Requirement,
+    leading_name,
     parse_requirement,
     requirements_comment,
     text_lines,
@@ -124,13 +125,29 @@ def _cfg_comments(text: str) -> list[str]:
     return comments
 
 
-def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, Requirement]]:
-    """The (line number, requirement) of each requirement in one option's value.
+def _declared(spec: str) -> tuple[str, Requirement | None] | None:
+    """The package that one string of a requirement list declares, with what the
+    string says about it. None when it names no package.
+
+    A string that is no requirement (``corp-auth=1.0``, bindep's ``corp-auth
+    [platform:dpkg]``) still declares the name it starts with, as it does in a
+    requirements file and in ``pyproject.toml`` (see ``dependency.leading_name``).
+    Such a name comes without a requirement, and is never looked up.
+    """
+    parsed = parse_requirement(spec)
+    name = parsed.name if parsed else leading_name(spec)
+    return None if name is None else (name, parsed)
+
+
+def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, str, Requirement | None]]:
+    """The (line number, name, requirement) of each package in one option's value.
 
     One requirement per line. A value that is all on the key's line is cut at ``;``,
     as setuptools does: ``setup_requires = pbr; setuptools`` is two requirements. So
     is ``pytest; python_version < 3``, where the second part was meant as a marker:
-    a part after the first that starts with a marker variable is not a package.
+    a part after the first that starts with a marker variable is not a package, and
+    neither is one that is no requirement. The requirement is None for a line that
+    is none and only declares its name (see ``_declared``).
     """
     if lines[0][1].startswith("file:"):
         return  # the list lives in another file, which is checked on its own
@@ -140,9 +157,9 @@ def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, Requiremen
         if "%(" in spec:
             continue  # configparser interpolation: the real value isn't known
         for n, chunk in enumerate(spec.split(";") if one_line else [spec]):
-            parsed = parse_requirement(chunk)
-            if parsed and not (n and parsed.name in MARKER_NAMES):
-                yield lineno, parsed
+            found = _declared(chunk)
+            if found and not (n and (found[1] is None or found[0] in MARKER_NAMES)):
+                yield lineno, *found
 
 
 def _cfg_names_a_source(values: dict[tuple[str, str], list[_ValueLine]]) -> bool:
@@ -183,15 +200,16 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
             or section == "options.extras_require"
         ):
             continue
-        for lineno, parsed in _cfg_requirements(lines):
+        for lineno, name, parsed in _cfg_requirements(lines):
+            direct = parsed is not None and parsed.direct
             found.dependencies.append(
                 Dependency(
-                    parsed.name,
+                    name,
                     rel,
                     lineno,
-                    validate=not (parsed.direct or private),
+                    validate=parsed is not None and not (direct or private),
                     ignored=ALL_RULES if ignore_file else line_ignores(comments[lineno - 1]),
-                    own_source=parsed.direct,
+                    own_source=direct,
                 )
             )
     found.dependencies.sort(key=lambda dep: dep.line)
@@ -515,21 +533,23 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
             literals += script.extras(value)
         for literal in literals:
             for text, line, col in _string_lines(literal, lines):
-                parsed = parse_requirement(REQ_COMMENT.sub("", text))
-                if parsed is None or (line, col, parsed.name) in seen:
+                declared = _declared(REQ_COMMENT.sub("", text))
+                if declared is None or (line, col, declared[0]) in seen:
                     continue
-                seen.add((line, col, parsed.name))
+                name, parsed = declared
+                seen.add((line, col, name))
+                direct = parsed is not None and parsed.direct
                 found.dependencies.append(
                     Dependency(
-                        parsed.name,
+                        name,
                         src.rel,
                         line,
-                        validate=not (parsed.direct or private),
+                        validate=parsed is not None and not (direct or private),
                         ignored=ALL_RULES
                         if src.ignore_file
                         else line_ignores(comments.get(line, "")),
                         col=col,
-                        own_source=parsed.direct,
+                        own_source=direct,
                     )
                 )
     if script.gave_up:

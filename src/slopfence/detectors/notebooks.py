@@ -17,9 +17,10 @@ from __future__ import annotations
 import ast
 import json
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from itertools import accumulate
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
@@ -139,6 +140,9 @@ class Notebook:
     cells: list[Cell]
     # Offset of the start of every line of ``text``. Worked out when first asked for.
     _line_starts: list[int] = field(default_factory=list)
+    # What ``_escapes`` says about a source string, by the offset of the string in
+    # ``text``. Worked out when a position in the string is first asked for.
+    _escapes_of: dict[int, tuple[list[int], list[int]]] = field(default_factory=dict)
 
     def position(self, cell: Cell, offset: int) -> tuple[int, int]:
         """The 1-based (line, column) in the file of character ``offset`` of a cell."""
@@ -146,24 +150,43 @@ class Notebook:
             self._line_starts = [0] + [m.end() for m in re.finditer("\n", self.text)]
         piece = max(bisect_right(cell.starts, offset) - 1, 0)
         start, end = cell.spans[piece]
-        body = self.text[start + 1 : end - 1]
-        at = start + 1 + _raw_length(body, offset - cell.starts[piece])
+        if start not in self._escapes_of:
+            self._escapes_of[start] = _escapes(self.text[start + 1 : end - 1])
+        at = start + 1 + _raw_length(self._escapes_of[start], offset - cell.starts[piece])
         line = bisect_right(self._line_starts, at)
         return line, at - self._line_starts[line - 1] + 1
 
 
-def _raw_length(body: str, count: int) -> int:
-    """How many characters of a JSON string body encode its first ``count`` characters."""
+def _escapes(body: str) -> tuple[list[int], list[int]]:
+    """Where the escapes of a JSON string body are. For each one: how many characters
+    the body decodes to before it, and where it ends in the body.
+
+    Listed once per string. A cell can be one string of thousands of lines, and a
+    position is asked for every package and import in it.
+    """
+    before: list[int] = []
+    ends: list[int] = []
     if "\\" not in body:
-        return count
+        return before, ends
     pos = decoded = 0
     for m in _ESCAPE.finditer(body):
-        plain = m.start() - pos
-        if decoded + plain >= count:
-            break
-        decoded += plain + 1
+        decoded += m.start() - pos
+        before.append(decoded)
+        decoded += 1
         pos = m.end()
-    return pos + count - decoded
+        ends.append(pos)
+    return before, ends
+
+
+def _raw_length(escapes: tuple[list[int], list[int]], count: int) -> int:
+    """How many characters of a JSON string body encode its first ``count`` characters.
+
+    ``escapes`` is what ``_escapes`` says about the body.
+    """
+    before, ends = escapes
+    # The escapes that stand for one of those characters.
+    passed = bisect_left(before, count)
+    return ends[passed - 1] + count - before[passed - 1] - 1 if passed else count
 
 
 def _read_source(reader: _Reader) -> Cell | None:
@@ -257,7 +280,10 @@ def read_notebook(text: str) -> Notebook | None:
 # --- Cells as Python ---------------------------------------------------------------
 
 _SHELL_CELL = re.compile(r"\s*%%(?:bash|sh|shell)\b")
-_AUTOMAGIC = re.compile(r"pip\s+install\b")
+# A ``pip install`` line without the ``%``. IPython runs it as the magic all the same,
+# with words between the two too (``pip -q install x``), unless what follows ``pip``
+# starts like an assignment or a tuple (``pip = install = None``).
+_AUTOMAGIC = re.compile(r"pip\s+(?![=,])(?:\S+\s+)*?install\b")
 # A ``cd`` line without the ``%``. IPython runs it as the magic all the same, unless
 # what follows starts like an assignment or a tuple (``cd = 3``, ``cd, x = 1, 2``).
 _AUTOMAGIC_CD = re.compile(r"^[ \t]*cd[ \t]+[^=,\s]", re.M)
@@ -267,8 +293,8 @@ _CELL_MAGIC = re.compile(r"\s*%%(\w*)")
 # Cell magics that save the cell's body as a file.
 _FILE_CELL_MAGICS = {"writefile", "file"}
 _ASSIGNED_COMMAND = re.compile(r"\s*[A-Za-z_][\w.,\s\[\]]*=\s*[!%]")
-# A carriage return that no line feed follows. Python's parser ends a line there, and
-# nothing else that reads a cell does.
+# A carriage return that no line feed follows. Python's parser and IPython end a line
+# there, and the file of the notebook does not.
 _LONE_CARRIAGE_RETURN = re.compile(r"\r(?!\n)")
 # Expressions that hold string text over several lines (t-strings since Python 3.14).
 _STRINGS = tuple(
@@ -282,6 +308,10 @@ _STRINGS = tuple(
 class CellView:
     """What one cell contains, by offset into the cell's text."""
 
+    # The cell's text with the line ends that Python and IPython see: a line feed in
+    # place of each carriage return that no line feed follows. Every offset into it
+    # is the same offset into the text of the cell.
+    text: str = ""
     # (command start offset, 0-based line index) of each IPython or shell line.
     commands: list[tuple[int, int]] = field(default_factory=list)
     # Imports as (top-level module, line number in the cell, 0-based character column).
@@ -309,6 +339,86 @@ def _parse_cell(text: str) -> SourceFile | None:
     return parse(text, Path("<cell>"), "<cell>")
 
 
+# Where a string or a comment starts in a line of Python. The first one counts.
+_QUOTE_OR_COMMENT = re.compile(r"'''|\"\"\"|'|\"|#")
+
+
+def _open_quote(line: str, quote: str) -> tuple[bool, str]:
+    """What ``line`` does to the strings around it. First: whether the string that is
+    open where the line starts is closed in it, by its own mark. Second: the
+    quotation mark of the string that is open where the line ends: one mark, three of
+    one, or nothing. ``quote`` is the mark that is open where the line starts.
+
+    A string in single marks ends with its line when no backslash carries it on.
+    That is no closing: Python takes such a line for an error.
+
+    A scan for quotation marks and comments. Python's parser can't be asked: IPython
+    lines stand in the cell. The scan is not exact (an f-string can hold quotation
+    marks of its own), and need not be. It keeps the lines of a string as they are,
+    so that the parser sees the string whole.
+    """
+    closed = False
+    first = bool(quote)  # still in the string that was open where the line starts
+    pos = 0
+    while True:
+        if quote:
+            end = line.find(quote, pos)
+            # An odd number of backslashes in front takes the mark's meaning away.
+            while end != -1 and (end - len(line[:end].rstrip("\\"))) % 2:
+                end = line.find(quote, end + 1)
+            if end == -1:
+                break
+            closed, first = closed or first, False
+            pos, quote = end + len(quote), ""
+        else:
+            found = _QUOTE_OR_COMMENT.search(line, pos)
+            if found is None or found.group() == "#":
+                return closed, ""
+            pos, quote = found.end(), found.group()
+    if len(quote) == 1 and not line.rstrip("\r").endswith("\\"):
+        return closed, ""
+    return closed, quote
+
+
+def _string_lines(lines: list[str], skip_first: bool) -> set[int]:
+    """The 0-based indexes of the lines that start inside a string that is closed
+    further down.
+
+    A string that is never closed is no string, and nothing below its opening is
+    counted: what follows a mark that nothing closes is a guess, and a command there
+    may be the one that sets a private index. Those lines are judged like any others.
+    That goes for three marks without their closing, and for a string in single marks
+    that a backslash carries on to a line where it does not end.
+    """
+    inside: set[int] = set()
+    pending: list[int] = []
+    quote = ""
+    continued = False
+    for n, line in enumerate(lines):
+        if n == 0 and skip_first:
+            continue
+        stripped = line.strip()
+        if quote:
+            pending.append(n)
+            closed, quote = _open_quote(line, quote)
+            if closed:
+                # Also when another string opens in the same line: that one has
+                # lines of its own, and they are counted when it is closed.
+                inside.update(pending)
+                pending.clear()
+            elif not quote:
+                # It ended with its line and was never closed: no string after all.
+                pending.clear()
+                continued = _is_magic_line(stripped) and stripped.endswith("\\")
+        elif continued or _is_magic_line(stripped):
+            # An IPython line: its quotation marks are the shell's, not Python's.
+            continued = stripped.endswith("\\")
+        else:
+            continued = False
+            _, quote = _open_quote(line, "")
+    return inside
+
+
 def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list[tuple[int, int]]]:
     """A cell's lines with every IPython line replaced by ``pass``, and the command
     lines among them as (command start offset, 0-based line index).
@@ -317,6 +427,11 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     replaced lines keep their indentation, so the result parses where the cell was
     Python around its magics. ``skip_first`` blanks the first line: a cell magic.
 
+    A line that starts inside a string is text, whatever it looks like: it is kept
+    as it is and is no command (see ``_string_lines``). Replaced, the line that closes
+    a string would take the closing marks with it, the rest would be no Python, and
+    nothing could tell its text from a command any more.
+
     A carriage return at the end of a line is no indentation. Kept in front of
     ``pass``, it would be one more line for Python's parser, and every import below
     it would be found one line too low.
@@ -324,6 +439,7 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     python = list(lines)
     commands: list[tuple[int, int]] = []
     continued = False
+    text = _string_lines(lines, skip_first)
     offset = 0
     for n, line in enumerate(lines):
         stripped = line.strip()
@@ -331,11 +447,15 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
         indent = len(body) - len(body.lstrip())
         if n == 0 and skip_first:
             python[n] = ""
+        elif n in text:
+            continued = False
         elif continued or _is_magic_line(stripped):
             if not continued and (stripped.startswith(("!", "%")) or _AUTOMAGIC.match(stripped)):
                 marker = len(stripped) - len(stripped.lstrip("!%"))
                 commands.append((offset + indent + marker, n))
-            python[n] = line[:indent] + "pass"
+            # The line a command goes on in is left empty: with an indentation of
+            # its own, a ``pass`` there would be no Python below the first one.
+            python[n] = "" if continued else line[:indent] + "pass"
             # A line that ends with a backslash goes on in the next one.
             continued = stripped.endswith("\\")
         else:
@@ -348,11 +468,15 @@ def view_cell(text: str, want_imports: bool) -> CellView:
     """Find the command lines of a cell and, if it parses as Python, its imports
     and the ignore comments on its lines. A cell that doesn't parse is not an error.
 
-    No import is taken from a cell with a carriage return inside a line. The parser
-    counts one more line there than the cell has, so an import could not be matched
-    to its line: to its place in the file, or to the ignore comment on it.
+    A carriage return that no line feed follows ends a line too, as it does for
+    Python and IPython: a command after one is a command, and the lines of a string
+    are the lines that the parser counts. No import is taken from a cell with one:
+    the file has no line break there, and the imports of such a cell were never
+    looked up.
     """
-    view = CellView()
+    lone_carriage_return = bool(_LONE_CARRIAGE_RETURN.search(text))
+    text = _LONE_CARRIAGE_RETURN.sub("\n", text)
+    view = CellView(text)
     lines = text.split("\n")
     magic = _CELL_MAGIC.match(lines[0])
     if magic and _SHELL_CELL.match(lines[0]):
@@ -389,7 +513,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
         }
         view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
     view.ignores = {c.line: off for c in src.comments if (off := line_ignores(c.text))}
-    if want_imports and not _LONE_CARRIAGE_RETURN.search(text):
+    if want_imports and not lone_carriage_return:
         for name, lineno, byte_col in top_level_imports(src):
             line = lines[lineno - 1] if lineno <= len(lines) else ""
             view.imports.append((name, lineno, char_column(line, byte_col - 1)))
@@ -453,12 +577,16 @@ def _brings_code(words: list[Word], magic: bool) -> bool:
     return names[0] in _FETCH_COMMANDS or tuple(names[:2]) in _FETCH_SUBCOMMANDS
 
 
-def _offset(lines: list[str], lineno: int, col: int) -> int:
-    """Offset in a cell's text of a 1-based line and 0-based character column."""
-    return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
+def _line_offsets(text: str) -> list[int]:
+    """The offset in ``text`` of the start of each of its lines.
+
+    Worked out once per cell. An import is then looked up by its line, instead of
+    counting to it from the start of the cell again for every import.
+    """
+    return [0, *accumulate(len(line) + 1 for line in text.split("\n"))]
 
 
-def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
+def _installs(view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
     """Every ``pip install`` command of a cell, and every command that brings in code
     in another way (see ``_brings_code``): that one as an install that names nothing.
     So does a ``pip install`` in a form that is not read (``sudo pip install``), with
@@ -469,18 +597,21 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozense
     last line when it goes on over several. Or it is on a comment-only line right
     above the command: on Windows a shell line passes ``# ...`` on to pip, so there
     the comment can't share the line.
+
+    The commands are read from ``view.text``, the text whose lines the view counts.
     """
-    lines = cell.text.split("\n")
+    text = view.text
+    lines = text.split("\n")
     for offset, n in view.commands:
         if len(lines[n]) > MAX_COMMAND_LENGTH:
             continue
-        commands, end = shell_commands(cell.text, offset)
-        last_line = cell.text[cell.text.rfind("\n", 0, end) + 1 : end]
+        commands, end = shell_commands(text, offset)
+        last_line = text[text.rfind("\n", 0, end) + 1 : end]
         above = lines[n - 1].strip() if n else ""
         ignored = line_ignores(requirements_comment(last_line))
         if above.startswith("#"):
             ignored |= line_ignores(above)
-        magic = cell.text[offset - 1 : offset] == "%"
+        magic = text[offset - 1 : offset] == "%"
         for words in commands:
             arguments = pip_install_arguments(words)
             if arguments is not None:
@@ -538,7 +669,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
             view = view_cell(cell.text, want_imports)
             written |= view.written
             unnamed = unnamed or view.changes_folder
-            for install, ignored in _installs(cell, view):
+            for install, ignored in _installs(view):
                 understood += install.source_options
                 found.private_index = found.private_index or install.private_index
                 links = links or install.links
@@ -557,9 +688,9 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                             own_source=sourced,
                         )
                     )
-            lines = cell.text.split("\n")
+            starts = _line_offsets(cell.text)
             for name, lineno, col in view.imports:
-                at = _offset(lines, lineno, col)
+                at = starts[lineno - 1] + col
                 off = view.ignores.get(lineno, frozenset())
                 # Unusual line breaks: never report at a wrong place.
                 if "SLOP001" not in off and cell.text.startswith(("import", "from"), at):
