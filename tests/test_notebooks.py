@@ -378,6 +378,13 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!env X=1 pip install -i {PRIVATE} corp-a\n",
         f"!X=1 /usr/bin/pip install -i {PRIVATE} corp-a\n",
         f"!time C:\\\\Python\\\\Scripts\\\\pip install -i {PRIVATE} corp-a\n",
+        # The same on a line without "!" or "%": IPython runs ``pip`` as the magic.
+        f"pip -q install -i {PRIVATE} corp-a\n",
+        f"pip --no-cache-dir install --extra-index-url {PRIVATE} corp-a\n",
+        f"pip --proxy http://proxy.corp.example:3128 install --index {PRIVATE} corp-a\n",
+        "pip -q install -f ./wheels corp-a\n",
+        "pip --quiet install --no-index corp-a\n",
+        f"import os\npip -q install -i {PRIVATE} corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):
@@ -397,6 +404,8 @@ def test_a_private_source_covers_the_whole_notebook(write, check, cell):
         "!python -m pip -q install -e .",
         "!sudo pip install -r requirements.txt",
         "!sudo -H pip install corp-auth",
+        "pip -q install ./pkg",
+        "pip --quiet install corp-auth",
     ],
 )
 def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installed, command):
@@ -420,6 +429,11 @@ def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installe
         "!pipenv --version",
         "!echo install pip",
         "!pip download ghost-lib",
+        # Without "!" or "%": Python, or a line that IPython turns down.
+        "%matplotlib inline\npip = install = None",
+        "%matplotlib inline\npip, install = 1, 2",
+        "pip --version",
+        "pip -q download ghost-lib",
     ],
 )
 def test_a_command_that_is_no_pip_install_changes_nothing(write, check, not_installed, command):
@@ -1019,6 +1033,98 @@ def test_a_carriage_return_inside_a_cell_line_moves_no_import(tmp_path, not_inst
     result = run([tmp_path], tmp_path, registry, select=["SLOP001"], check_imports=True)
     assert sorted(subjects(result)) == ["ghost-pip", "ghost_next"]
     assert not any("corp" in name for name in registry.queries)
+
+
+# A cell with a carriage return that no line feed follows, and the names that are sent
+# for the notebook: after the carriage return, and above a string that spans lines.
+PIP_LINES_NEAR_A_STRING = {
+    "a command after the carriage return": (f"x = 1\r!pip install -i {PRIVATE} corp-auth\n", []),
+    "a bare command after it": (f"import os\rpip -q install -i {PRIVATE} corp-auth\n", []),
+    "a command that ends at it": (
+        "%pip install ghost-one\rimport os\n",
+        ["ghost-one", "ghost-pip"],
+    ),
+    "a command right below the string": (
+        f'x = 1\rtext = """\nusage\n"""\n!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    "a command below a string with one in it": (
+        f'text = """a\rb\n"""\n%pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    # The magic at the end keeps the cell from being Python as it stands.
+    "text in the string": (
+        'x = 1\rtext = """\n!pip install corp-in-text\n"""\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    "text in the string, two above": (
+        'x = 1\ry = 2\rtext = """\n\n%pip install corp-in-text\n"""\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    # The string closes on the line that looks like a command. Taken for one, that
+    # line would take the closing marks with it, and the rest would be no Python.
+    "text on the line that closes the string": (
+        'text = """usage\r!pip install corp-in-text # """\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    "text in a string that a backslash carries on": (
+        'y = 1\rx = "usage \\\n!pip install corp-in-text"\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    # A cell that is no Python with or without its commands: Python 2's print.
+    "text in a string of a cell that is no Python": (
+        "print \"usage\"\rhelp = '''\n!pip install corp-in-text\n'''\n",
+        ["ghost-pip"],
+    ),
+    "a command below a string in a cell that is no Python": (
+        'print "usage"\rhelp = """\ntext\n"""\n!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
+    # Three marks that nothing closes are no string. The command below them is read,
+    # and its index covers the notebook.
+    "a command with an index below marks that are never closed": (
+        f'x = """never closed\r!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    # The string is closed, and in the same line another one opens that never is.
+    "text in a string that closes where another opens": (
+        'help = """\r!pip install corp-in-text\n"""; unfinished = """\n',
+        ["ghost-pip"],
+    ),
+    # A string in single marks that a backslash carries on, and that does not end in
+    # the next line: no string. The command there is read, and its index counts.
+    "a command with an index below a single mark that is never closed": (
+        f'y = 1\rx = "unfinished \\\n!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
+    "a command below a string with an escaped mark in it": (
+        'x = "say \\"hi\\""\r!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(PIP_LINES_NEAR_A_STRING))
+def test_a_carriage_return_above_a_string_moves_no_pip_line(tmp_path, layout):
+    """A carriage return that no line feed follows ends a line for Python and for
+    IPython. So a command after one is read, and its index covers the notebook. The
+    lines of a string are the lines the parser counts: the command right below the
+    string is read too, and a line of the string is still text, so its name is not
+    sent: also on the line that closes the string, and also in a cell that is no
+    Python. The same cell with a line feed in its place sends the same names."""
+    cell, sent = PIP_LINES_NEAR_A_STRING[layout]
+    path = tmp_path / "nb.ipynb"
+    path.write_text(jupyter([cell, "%pip install ghost-pip\n"]), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert registry.queries == sent and subjects(result) == sent
+
+    # The same cell with a line feed in place of the carriage return sends the same.
+    cells = [cell.replace("\r", "\n"), "%pip install ghost-pip\n"]
+    path.write_text(jupyter(cells), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert registry.queries == sent and subjects(result) == sent
 
 
 def test_read_notebook_keeps_code_cells_only():
