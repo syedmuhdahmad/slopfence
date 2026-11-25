@@ -8,7 +8,7 @@ import pytest
 
 from slopfence import diff as diffmod
 from slopfence.cli import main
-from tests.conftest import git, git_init
+from tests.conftest import git, git_init, pyproject
 
 # What the git program is called in a folder of PATH.
 GIT_NAME = "git.exe" if os.name == "nt" else "git"
@@ -374,6 +374,37 @@ def test_deletion_that_makes_no_copy_reports_nothing_with_diff(
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 0
     assert "No issues found" in capsys.readouterr().out
+
+
+def test_copy_in_a_file_where_the_rule_is_off_passes_a_diff_run(tmp_path, monkeypatch, capsys):
+    """A limit that the README names (#71): the copy is added to a file where SLOP030
+    is switched off, so the --diff run has nothing to report there, and the older copy
+    in the other file is not a changed line. The next full run reports that one."""
+    function = "def total_price(items, limit, rate):\n" + BODY
+    _committed(tmp_path, {"a.py": function.encode(), "b.py": b"x = 1\n"})
+    pyproject(tmp_path, '[tool.slopfence]\nper-file-ignores = {"b.py" = ["SLOP030"]}\n')
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "config")
+    (tmp_path / "b.py").write_bytes(function.replace("total_price", "sum_prices").encode())
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 0
+    assert "No issues found" in capsys.readouterr().out
+    assert main([".", "--offline"]) == 1
+    assert "'total_price' is identical to 'sum_prices' in b.py:1" in capsys.readouterr().out
+
+
+def test_ignore_comment_on_one_copy_does_not_cover_the_other_one(tmp_path, monkeypatch, capsys):
+    """The other limit that the README names (#71): the comment is on the copy that was
+    there. When the other copy changes, that one is reported: the comment belongs on
+    both ``def`` lines."""
+    first = "def total_price(items, limit, rate):  # slopfence: ignore[SLOP030]\n" + BODY
+    second = "def sum_prices(items, limit, rate):\n    print(items)\n" + BODY
+    _committed(tmp_path, {"a.py": first.encode(), "b.py": second.encode()})
+    b = (tmp_path / "b.py").read_bytes()
+    (tmp_path / "b.py").write_bytes(b.replace(b"    print(items)\n", b""))
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--offline", "--diff", "HEAD"]) == 1
+    assert "'sum_prices' is identical to 'total_price' in a.py:1" in capsys.readouterr().out
 
 
 def test_deletion_next_to_an_old_finding_does_not_report_it(tmp_path, monkeypatch, capsys):
