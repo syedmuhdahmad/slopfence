@@ -370,18 +370,24 @@ Pull request #95 was checked in the same way, and is not part of the fixed build
 ```bash
 git clone https://github.com/psf/requests.git corpus/requests
 git -C corpus/requests checkout 3c7baaa05
-mkdir run && cd run
-python -I -m slopfence --format json --offline ../corpus/requests > offline.json
-python -I -m slopfence --format json --select SLOP001,SLOP002 ../corpus/requests > online.json
-python -I -m slopfence --format json --offline --diff HEAD~25 ../corpus/requests > diff.json
+mkdir -p run/main/requests && cd run/main/requests
+python -I -m slopfence --format json --offline ../../../corpus/requests > offline.json
+python -I -m slopfence --format json --select SLOP001,SLOP002 ../../../corpus/requests > online.json
+python -I -m slopfence --format json --offline --diff HEAD~25 ../../../corpus/requests > diff.json
+cd ../../..
 ```
 
 The clone has no `--depth` here. The branch has moved on since the test, and a short clone of today may not hold the commit that was tested. The second line checks that commit out.
 
+`run/main/requests` holds the results of one build for one project. Give each build and each project a folder of its own (`run/fixed/requests`, `run/main/django`), so that no run overwrites another.
+
 Do the same with the other 17 projects, each at its commit in [The projects](#the-projects), once with each build, and compare the `findings` lists of the two builds.
 
-For one rule on many projects, the corpus tool prints the counts and a sample to read. Run it from the root of a slopfence checkout, and give it the path of the `corpus` folder:
+The sample in [Findings read by hand](#findings-read-by-hand) was drawn with seed 2026, five findings for each rule, from the 17 projects without `home-assistant/core`, on a build without the `SLOP051` fix (`main` at `da6cf3f` is one). The corpus tool draws a sample in that way. Run it from the root of a slopfence checkout at such a commit, once for each rule:
 
 ```bash
-.venv/bin/python .claude/tools/corpus_run.py --rule SLOP051 --sample 30 /path/to/corpus/*
+projects=$(ls -d /path/to/corpus/* | grep -v '/core$')
+.venv/bin/python .claude/tools/corpus_run.py --rule SLOP051 --seed 2026 --sample 5 $projects
 ```
+
+The working files of the test were not kept. So this report can't promise that the command picks the very same findings as the sample above: it shows how such a sample is drawn.
