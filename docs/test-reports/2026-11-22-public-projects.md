@@ -368,11 +368,20 @@ Pull request #95 was checked in the same way, and is not part of the fixed build
 ## How to repeat it
 
 ```bash
-git clone --depth 30 https://github.com/psf/requests.git corpus/requests
+git clone https://github.com/psf/requests.git corpus/requests
+git -C corpus/requests checkout 3c7baaa05
 mkdir run && cd run
 python -I -m slopfence --format json --offline ../corpus/requests > offline.json
 python -I -m slopfence --format json --select SLOP001,SLOP002 ../corpus/requests > online.json
 python -I -m slopfence --format json --offline --diff HEAD~25 ../corpus/requests > diff.json
 ```
 
-Do the same with the other 17 projects at the commits in [The projects](#the-projects), once with each build, and compare the `findings` lists of the two builds. For one rule on many projects, `.claude/tools/corpus_run.py --rule SLOP051 --sample 30 corpus/*` prints the counts and a sample to read.
+The clone has no `--depth` here. The branch has moved on since the test, and a short clone of today may not hold the commit that was tested. The second line checks that commit out.
+
+Do the same with the other 17 projects, each at its commit in [The projects](#the-projects), once with each build, and compare the `findings` lists of the two builds.
+
+For one rule on many projects, the corpus tool prints the counts and a sample to read. Run it from the root of a slopfence checkout, and give it the path of the `corpus` folder:
+
+```bash
+.venv/bin/python .claude/tools/corpus_run.py --rule SLOP051 --sample 30 /path/to/corpus/*
+```
