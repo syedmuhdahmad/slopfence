@@ -367,17 +367,24 @@ Pull request #95 was checked in the same way, and is not part of the fixed build
 
 ## How to repeat it
 
+First get the project, once, at the commit that was tested:
+
 ```bash
 git clone https://github.com/psf/requests.git corpus/requests
 git -C corpus/requests checkout 3c7baaa05
+```
+
+The clone has no `--depth` here. The branch has moved on since the test, and a short clone of today may not hold the commit that was tested. The second line checks that commit out.
+
+Then run each build on it. These lines can be run again as often as needed:
+
+```bash
 mkdir -p run/main/requests && cd run/main/requests
 python -I -m slopfence --format json --offline ../../../corpus/requests > offline.json
 python -I -m slopfence --format json --select SLOP001,SLOP002 ../../../corpus/requests > online.json
 python -I -m slopfence --format json --offline --diff HEAD~25 ../../../corpus/requests > diff.json
 cd ../../..
 ```
-
-The clone has no `--depth` here. The branch has moved on since the test, and a short clone of today may not hold the commit that was tested. The second line checks that commit out.
 
 `run/main/requests` holds the results of one build for one project. Give each build and each project a folder of its own (`run/fixed/requests`, `run/main/django`), so that no run overwrites another.
 
