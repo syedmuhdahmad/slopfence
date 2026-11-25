@@ -4,6 +4,8 @@ Date: 2026-11-22. Machine: Linux 7.0, 8 CPUs, Python 3.14.4, git 2.53.
 
 This report says what happened when slopfence checked 18 well-known public projects, before and after a set of fixes. The work came in two rounds on the same day. The report ends with what is still open.
 
+Note, added on 2026-11-25: the fixes named here were then reviewed as pull requests #107 to #121. The review changed several of them. So the code on `main` is not exactly the build that was tested for this report, and the commits in the tables are the tested versions.
+
 ## Summary
 
 - **46,747 files in 18 projects, no crash.** Both builds finished every project. Exit codes were `0` or `1`, never `2`.
