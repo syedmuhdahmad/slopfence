@@ -343,15 +343,22 @@ def _parse_cell(text: str) -> SourceFile | None:
 _QUOTE_OR_COMMENT = re.compile(r"'''|\"\"\"|'|\"|#")
 
 
-def _open_quote(line: str, quote: str) -> str:
-    """The quotation mark of the string that is open where ``line`` ends: one mark,
-    three of one, or nothing. ``quote`` is the one that is open where the line starts.
+def _open_quote(line: str, quote: str) -> tuple[bool, str]:
+    """What ``line`` does to the strings around it. First: whether the string that is
+    open where the line starts is closed in it, by its own mark. Second: the
+    quotation mark of the string that is open where the line ends: one mark, three of
+    one, or nothing. ``quote`` is the mark that is open where the line starts.
+
+    A string in single marks ends with its line when no backslash carries it on.
+    That is no closing: Python takes such a line for an error.
 
     A scan for quotation marks and comments. Python's parser can't be asked: IPython
     lines stand in the cell. The scan is not exact (an f-string can hold quotation
     marks of its own), and need not be. It keeps the lines of a string as they are,
     so that the parser sees the string whole.
     """
+    closed = False
+    first = bool(quote)  # still in the string that was open where the line starts
     pos = 0
     while True:
         if quote:
@@ -361,16 +368,16 @@ def _open_quote(line: str, quote: str) -> str:
                 end = line.find(quote, end + 1)
             if end == -1:
                 break
+            closed, first = closed or first, False
             pos, quote = end + len(quote), ""
         else:
             found = _QUOTE_OR_COMMENT.search(line, pos)
             if found is None or found.group() == "#":
-                return ""
+                return closed, ""
             pos, quote = found.end(), found.group()
-    # A string in single marks ends with its line, unless a backslash carries it on.
     if len(quote) == 1 and not line.rstrip("\r").endswith("\\"):
-        return ""
-    return quote
+        return closed, ""
+    return closed, quote
 
 
 def _string_lines(lines: list[str], skip_first: bool) -> set[int]:
@@ -380,6 +387,8 @@ def _string_lines(lines: list[str], skip_first: bool) -> set[int]:
     A string that is never closed is no string, and nothing below its opening is
     counted: what follows a mark that nothing closes is a guess, and a command there
     may be the one that sets a private index. Those lines are judged like any others.
+    That goes for three marks without their closing, and for a string in single marks
+    that a backslash carries on to a line where it does not end.
     """
     inside: set[int] = set()
     pending: list[int] = []
@@ -391,16 +400,22 @@ def _string_lines(lines: list[str], skip_first: bool) -> set[int]:
         stripped = line.strip()
         if quote:
             pending.append(n)
-            quote = _open_quote(line, quote)
-            if not quote:
+            closed, quote = _open_quote(line, quote)
+            if closed:
+                # Also when another string opens in the same line: that one has
+                # lines of its own, and they are counted when it is closed.
                 inside.update(pending)
                 pending.clear()
+            elif not quote:
+                # It ended with its line and was never closed: no string after all.
+                pending.clear()
+                continued = _is_magic_line(stripped) and stripped.endswith("\\")
         elif continued or _is_magic_line(stripped):
             # An IPython line: its quotation marks are the shell's, not Python's.
             continued = stripped.endswith("\\")
         else:
             continued = False
-            quote = _open_quote(line, "")
+            _, quote = _open_quote(line, "")
     return inside
 
 

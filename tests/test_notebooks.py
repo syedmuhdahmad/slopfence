@@ -1086,6 +1086,17 @@ PIP_LINES_NEAR_A_STRING = {
         f'x = """never closed\r!pip install -i {PRIVATE} corp-auth\n',
         [],
     ),
+    # The string is closed, and in the same line another one opens that never is.
+    "text in a string that closes where another opens": (
+        'help = """\r!pip install corp-in-text\n"""; unfinished = """\n',
+        ["ghost-pip"],
+    ),
+    # A string in single marks that a backslash carries on, and that does not end in
+    # the next line: no string. The command there is read, and its index counts.
+    "a command with an index below a single mark that is never closed": (
+        f'y = 1\rx = "unfinished \\\n!pip install -i {PRIVATE} corp-auth\n',
+        [],
+    ),
     "a command below a string with an escaped mark in it": (
         'x = "say \\"hi\\""\r!pip install ghost-one\n',
         ["ghost-one", "ghost-pip"],
