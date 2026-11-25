@@ -15,6 +15,10 @@ _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 # How ``git diff`` is asked, so that the answer does not depend on the user's git config.
 _DIFF_OPTIONS = (
     "--unified=0",
+    # No unchanged line between two hunks that lie near each other, whatever
+    # diff.interHunkContext says. A hunk is read by the counts in its header, and
+    # holds nothing but removed and added lines.
+    "--inter-hunk-context=0",
     "--no-color",
     # The lines of the files as they are: no external diff tool, and no conversion to
     # text first (a ``textconv`` driver, as some tools set one for notebooks).
@@ -157,12 +161,9 @@ def unquote_git_path(path: str) -> str:
 
 def _new_path(header: str) -> str | None:
     """The path of the new file that a ``+++ `` line names. None for a deleted file."""
-    target = header[4:]
-    if not target.startswith('"'):
-        # git puts a tab after a name with a space in it. A name that ends in a tab
-        # is written in quotes.
-        target = target.removesuffix("\t")
-    target = unquote_git_path(target)
+    # git puts a tab after a name with a space in it, also after a name in quotes. It
+    # is never part of the name: a tab in a name is written as ``\t`` inside quotes.
+    target = unquote_git_path(header[4:].removesuffix("\t"))
     return None if target == "/dev/null" else target.removeprefix("b/")
 
 

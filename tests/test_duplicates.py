@@ -360,7 +360,7 @@ def test_fingerprint_is_the_token_sequence(write, tmp_path):
     assert original.fingerprint == copy.fingerprint
     assert TOKEN_SEP.join(original.tokens) == original.fingerprint
     assert original.size == len(original.tokens) > 10
-    assert original.tokens[:3] == ["arguments", "arg", "v0"]
+    assert original.tokens[:3] == ["arguments", "arg", "#0"]
 
 
 def test_separator_in_a_constant_cannot_fake_a_token_boundary(write, tmp_path, check):
@@ -499,3 +499,103 @@ def test_edited_first_copy_names_the_copy_it_was_identical_to(write, tmp_path):
     write("src/a.py", BUILD_QUERY)
     write("src/b.py", edited)
     assert peers() == [("src/b.py", None)]
+
+
+# --- Names that a function declares global or nonlocal are not local names (#99). ---
+
+SETTER = '''
+def {name}({param}):
+    """Set {var}."""
+    global {var}
+    {var} = {param}
+    return {var}
+'''
+
+COUNTER = '''
+def {name}():
+    count = 0
+
+    def bump(step):
+        """Add to {var}."""
+        nonlocal {var}
+        {var} = {var} + step
+        return {var}
+
+    return bump
+'''
+
+
+def test_functions_that_assign_different_globals_are_not_identical(write, check):
+    """Each one sets another variable of its module: neither can stand in for the
+    other. Seen in celery (``set_in_sighandler`` and ``set_default_app``)."""
+    write("app/log.py", SETTER.format(name="set_in_sighandler", param="value", var="_in_handler"))
+    write("app/state.py", SETTER.format(name="set_default_app", param="app", var="default_app"))
+    assert check("SLOP030").findings == []
+
+
+def test_functions_that_assign_the_same_global_are_still_identical(write, check):
+    """The same global, set the same way under another parameter name, is a copy."""
+    write("app/a.py", SETTER.format(name="set_app", param="value", var="default_app"))
+    write("app/b.py", SETTER.format(name="use_app", param="app", var="default_app"))
+    [finding] = check("SLOP030").findings
+    assert finding.path == "app/b.py" and "'use_app' is identical to 'set_app'" in finding.message
+
+
+def test_nonlocal_names_count_like_global_ones(write, check):
+    """A name declared ``nonlocal`` belongs to the function around: it keeps its name."""
+    write("app/a.py", COUNTER.format(name="make_counter", var="count"))
+    write("app/b.py", COUNTER.format(name="make_total", var="count").replace("count", "total"))
+    findings = check("SLOP030").findings
+    assert [f for f in findings if f.subject == "bump"] == []
+
+
+FACTORY = '''
+def {name}():
+    """Make a setter of {var} that keeps what it was given."""
+    seen = []
+
+    def set_it(value):
+        """Set the variable and keep the value."""
+        global {var}
+        {var} = value
+        seen.append(value)
+        return value
+
+    return set_it
+'''
+
+
+def test_factories_whose_inner_functions_set_different_globals_are_not_identical(write, check):
+    """The global is declared one function further in. The two factories still set
+    different variables, and neither can stand in for the other."""
+    write("app/log.py", FACTORY.format(name="make_handler_flag", var="_in_handler"))
+    write("app/state.py", FACTORY.format(name="make_default_app", var="default_app"))
+    assert check("SLOP030").findings == []
+
+
+def test_factories_whose_inner_functions_set_the_same_global_are_identical(write, check):
+    """The same global one function further in: the second factory is a copy, and so
+    is the function inside it."""
+    write("app/a.py", FACTORY.format(name="make_setter", var="default_app"))
+    write("app/b.py", FACTORY.format(name="build_setter", var="default_app"))
+    findings = check("SLOP030").findings
+    assert [(f.path, f.subject) for f in findings] == [
+        ("app/b.py", "build_setter"),
+        ("app/b.py", "set_it"),
+    ]
+
+
+def test_global_named_like_a_placeholder_is_not_taken_for_a_local(write, check):
+    """Locals are numbered when functions are compared. A global that happens to be
+    named ``v0`` is not local number 0: only the first function sets the global."""
+    write("app/a.py", "def first(x):\n    global v0\n    v0 = transform(x)\n    return v0\n")
+    write("app/b.py", "def second(y):\n    global v0\n    y = transform(y)\n    return v0\n")
+    assert check("SLOP030").findings == []
+
+
+def test_local_names_still_do_not_matter(write, check):
+    """Renaming a plain local variable changes nothing: the two are still identical."""
+    body = "    {a} = len(items)\n    {b} = {a} * 2\n    print({b})\n    return {b}\n"
+    write("app/a.py", "def first(items):\n" + body.format(a="size", b="twice"))
+    write("app/b.py", "def second(rows):\n" + body.format(a="n", b="m").replace("items", "rows"))
+    assert len(check("SLOP030").findings) == 1

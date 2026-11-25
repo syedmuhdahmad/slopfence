@@ -283,9 +283,10 @@ def test_a_file_without_a_final_line_end_is_read_to_its_last_line(tmp_path):
     assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2}, "next.py": {2}}
 
 
-@pytest.mark.parametrize("name", ["my file.py", "a b/c d.py"])
+@pytest.mark.parametrize("name", ["my file.py", "a b/c d.py", "my stra\u00dfe.py"])
 def test_a_file_with_a_space_in_its_name_has_its_changed_lines(tmp_path, name):
-    """git ends the header of such a file with a tab. The tab is not part of the name."""
+    """git ends the header of such a file with a tab. The tab is not part of the name,
+    also when git writes the name in quotes because of a letter that is not ASCII."""
     _committed(tmp_path, {name: b"x = 1\n"})
     (tmp_path / name).write_bytes(b"x = 1\ny = 2\n")
     assert diffmod.changed_lines(tmp_path, "HEAD") == {name: {2}}
@@ -382,6 +383,29 @@ def test_deletion_next_to_an_old_finding_does_not_report_it(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     assert main([".", "--offline", "--diff", "HEAD"]) == 0
     assert "No issues found" in capsys.readouterr().out
+
+
+def test_changes_near_each_other_are_read_whatever_the_repository_asks_for(tmp_path):
+    """``diff.interHunkContext`` in a repository's config makes git join two hunks and
+    print the unchanged lines between them. A hunk is read by its counts, so such a
+    line would end it, and the changes below would be lost. git is asked for none."""
+    before = "".join(f"line{n} = {n}\n" for n in range(1, 13))
+    _committed(tmp_path, {"app.py": before.encode()})
+    git(tmp_path, "config", "diff.interHunkContext", "5")
+    after = before.replace("line2 = 2\n", "line2 = 20\n++ /dev/null\n").replace(
+        "line6 = 6", "line6 = 60"
+    )
+    (tmp_path / "app.py").write_bytes(after.encode())
+    assert diffmod.changed_lines(tmp_path, "HEAD") == {"app.py": {2, 3, 7}}
+
+
+def test_new_path_of_a_header_in_quotes_with_a_tab_after_it():
+    """The header git writes for ``my straße.py``: quotes for the letter, and a tab after
+    the closing mark for the space."""
+    text = (
+        '--- "a/my stra\\303\\237e.py"\t\n+++ "b/my stra\\303\\237e.py"\t\n@@ -1,0 +2 @@\n+y = 2\n'
+    )
+    assert diffmod.parse_unified_diff(text) == {"my stra\u00dfe.py": {2}}
 
 
 def test_parse_unified_diff_reads_a_hunk_by_its_counts():
