@@ -1061,6 +1061,29 @@ PIP_LINES_NEAR_A_STRING = {
         'x = 1\ry = 2\rtext = """\n\n%pip install corp-in-text\n"""\n%matplotlib inline\n',
         ["ghost-pip"],
     ),
+    # The string closes on the line that looks like a command. Taken for one, that
+    # line would take the closing marks with it, and the rest would be no Python.
+    "text on the line that closes the string": (
+        'text = """usage\r!pip install corp-in-text # """\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    "text in a string that a backslash carries on": (
+        'y = 1\rx = "usage \\\n!pip install corp-in-text"\n%matplotlib inline\n',
+        ["ghost-pip"],
+    ),
+    # A cell that is no Python with or without its commands: Python 2's print.
+    "text in a string of a cell that is no Python": (
+        "print \"usage\"\rhelp = '''\n!pip install corp-in-text\n'''\n",
+        ["ghost-pip"],
+    ),
+    "a command below a string in a cell that is no Python": (
+        'print "usage"\rhelp = """\ntext\n"""\n!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
+    "a command below a string with an escaped mark in it": (
+        'x = "say \\"hi\\""\r!pip install ghost-one\n',
+        ["ghost-one", "ghost-pip"],
+    ),
 }
 
 
@@ -1070,7 +1093,8 @@ def test_a_carriage_return_above_a_string_moves_no_pip_line(tmp_path, layout):
     IPython. So a command after one is read, and its index covers the notebook. The
     lines of a string are the lines the parser counts: the command right below the
     string is read too, and a line of the string is still text, so its name is not
-    sent. The same cell with a line feed in its place sends the same names."""
+    sent: also on the line that closes the string, and also in a cell that is no
+    Python. The same cell with a line feed in its place sends the same names."""
     cell, sent = PIP_LINES_NEAR_A_STRING[layout]
     path = tmp_path / "nb.ipynb"
     path.write_text(jupyter([cell, "%pip install ghost-pip\n"]), encoding="utf-8")

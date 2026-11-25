@@ -339,6 +339,40 @@ def _parse_cell(text: str) -> SourceFile | None:
     return parse(text, Path("<cell>"), "<cell>")
 
 
+# Where a string or a comment starts in a line of Python. The first one counts.
+_QUOTE_OR_COMMENT = re.compile(r"'''|\"\"\"|'|\"|#")
+
+
+def _open_quote(line: str, quote: str) -> str:
+    """The quotation mark of the string that is open where ``line`` ends: one mark,
+    three of one, or nothing. ``quote`` is the one that is open where the line starts.
+
+    A scan for quotation marks and comments. Python's parser can't be asked: IPython
+    lines stand in the cell. The scan is not exact (an f-string can hold quotation
+    marks of its own), and need not be. It keeps the lines of a string as they are,
+    so that the parser sees the string whole.
+    """
+    pos = 0
+    while True:
+        if quote:
+            end = line.find(quote, pos)
+            # An odd number of backslashes in front takes the mark's meaning away.
+            while end != -1 and (end - len(line[:end].rstrip("\\"))) % 2:
+                end = line.find(quote, end + 1)
+            if end == -1:
+                break
+            pos, quote = end + len(quote), ""
+        else:
+            found = _QUOTE_OR_COMMENT.search(line, pos)
+            if found is None or found.group() == "#":
+                return ""
+            pos, quote = found.end(), found.group()
+    # A string in single marks ends with its line, unless a backslash carries it on.
+    if len(quote) == 1 and not line.rstrip("\r").endswith("\\"):
+        return ""
+    return quote
+
+
 def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list[tuple[int, int]]]:
     """A cell's lines with every IPython line replaced by ``pass``, and the command
     lines among them as (command start offset, 0-based line index).
@@ -347,6 +381,11 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     replaced lines keep their indentation, so the result parses where the cell was
     Python around its magics. ``skip_first`` blanks the first line: a cell magic.
 
+    A line that starts inside a string is text, whatever it looks like: it is kept
+    as it is and is no command. Replaced, the line that closes a string would take
+    the closing marks with it, the rest would be no Python, and nothing could tell
+    its text from a command any more.
+
     A carriage return at the end of a line is no indentation. Kept in front of
     ``pass``, it would be one more line for Python's parser, and every import below
     it would be found one line too low.
@@ -354,6 +393,7 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
     python = list(lines)
     commands: list[tuple[int, int]] = []
     continued = False
+    quote = ""  # the quotation mark of the string that is open where the line starts
     offset = 0
     for n, line in enumerate(lines):
         stripped = line.strip()
@@ -361,15 +401,20 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
         indent = len(body) - len(body.lstrip())
         if n == 0 and skip_first:
             python[n] = ""
+        elif quote:
+            quote = _open_quote(line, quote)
         elif continued or _is_magic_line(stripped):
             if not continued and (stripped.startswith(("!", "%")) or _AUTOMAGIC.match(stripped)):
                 marker = len(stripped) - len(stripped.lstrip("!%"))
                 commands.append((offset + indent + marker, n))
-            python[n] = line[:indent] + "pass"
+            # The line a command goes on in is left empty: with an indentation of
+            # its own, a ``pass`` there would be no Python below the first one.
+            python[n] = "" if continued else line[:indent] + "pass"
             # A line that ends with a backslash goes on in the next one.
             continued = stripped.endswith("\\")
         else:
             continued = False
+            quote = _open_quote(line, "")
         offset += len(line) + 1
     return python, commands
 

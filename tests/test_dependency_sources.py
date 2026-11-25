@@ -342,7 +342,8 @@ def test_extras_from_an_environment_variable_keep_a_line_a_requirement(write, ch
 def test_extras_from_two_environment_variables_keep_a_line_a_requirement(write, check):
     """``name[${A},${B}]`` is a list of two extras, each from a variable. The line is a
     requirement like any other, so the invented name on it is reported. Two variables
-    with no comma between them are no list of extras: such a line names no package."""
+    with no comma between them can make one extra (``re`` and ``dis`` give ``redis``).
+    That form is not read yet, a limit the README names: such a line is not looked up."""
     write("requirements.txt", "requests\nghost-lib[${A},${B}]==1.0\nghost-two[${A}, ${B}]\n")
     write("constraints.txt", "requests==2.31\nghost-three[${A}${B}]==1.0\n")
     registry = FakeRegistry({"requests"})
@@ -3086,6 +3087,8 @@ def test_the_folders_above_the_project_root_are_never_read(write, tmp_path):
 INDEX_ABOVE = {
     "requirements.txt": INDEX + "corp-core\n",
     "deploy/constraints.txt": INDEX + "corp-core\n",
+    # A requirements file by its folder in the checkout, not by its name.
+    "requirements/base.txt": INDEX + "corp-core\n",
     "Pipfile.lock": PRIVATE_LOCK,
 }
 
